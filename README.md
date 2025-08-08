@@ -47,6 +47,11 @@ Create the heartbeat asset via helper script:
 python .\create_heartbeat_asset.py --name local:swapServiceHeartbeat
 # If you omit --name, an unnamed asset is created; read it by address
 ```
+Linux/macOS:
+```bash
+python3 ./create_heartbeat_asset.py --name local:swapServiceHeartbeat
+# If you omit --name, an unnamed asset is created; read it by address
+```
 The script initializes a mutable `last_poll_timestamp` field and prints the asset address to set in `.env`.
 
 How clients check status:
@@ -70,6 +75,31 @@ python -m pip install -r requirements.txt
 Or explicitly:
 ```powershell
 python -m pip install python-dotenv solana solders spl-token
+```
+
+Linux/macOS:
+```bash
+python3 -m pip install -r requirements.txt
+```
+Or explicitly:
+```bash
+python3 -m pip install python-dotenv solana solders spl-token
+```
+
+Optional: create and use a virtual environment
+
+Windows (PowerShell):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Linux/macOS:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
 ```
 
 ## Environment Configuration
@@ -113,10 +143,21 @@ NEXUS_HEARTBEAT_ASSET_ADDRESS=<OPTIONAL_HEARTBEAT_ASSET_ADDRESS>
 HEARTBEAT_MIN_INTERVAL_SEC=10
 ```
 
+OS-specific notes:
+- Linux/macOS: ensure the Nexus CLI is executable. If you keep it in the repo root, run:
+  - `chmod +x ./nexus`
+  - Set `NEXUS_CLI_PATH=./nexus` (or an absolute path) in `.env`.
+- Windows (PowerShell): if the CLI is not in PATH, keep `NEXUS_CLI_PATH=./nexus` and run the service from the repo root so the relative path resolves.
+
 ## Running the Service
 ```powershell
 python .\swapService.py
 ```
+Linux/macOS:
+```bash
+python3 ./swapService.py
+```
+Note: `swapService.py` is a thin entrypoint that delegates to the modular runner in `src/main.py`.
 Expected startup output:
 ```
 🌐 Starting bidirectional swap service
