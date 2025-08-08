@@ -1,0 +1,4 @@
+python-dotenv>=1.0,<2.0
+solana>=0.30,<0.31
+solders>=0.18,<0.19
+spl-token>=0.5,<0.6
