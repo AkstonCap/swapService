@@ -13,12 +13,13 @@ import json
 import subprocess
 import base64
 from decimal import Decimal, ROUND_DOWN
+from typing import Optional
 from dotenv import load_dotenv
 
 from solana.rpc.api import Client
 from solana.publickey import PublicKey
 from solana.keypair import Keypair
-from solana.transaction import Transaction
+from solana.transaction import Transaction, TransactionInstruction
 from spl.token.constants import TOKEN_PROGRAM_ID
 from spl.token.instructions import (
     transfer_checked,
@@ -53,15 +54,32 @@ MEMO_PROGRAM_ID = PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")  # la
 USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
 USDD_DECIMALS = int(os.getenv("USDD_DECIMALS", "6"))
 
+# Optional refund fee (in USDC base units); default 0 (no deduction)
+REFUND_USDC_FEE_BASE_UNITS = int(os.getenv("REFUND_USDC_FEE_BASE_UNITS", "0"))
+# Optional refund fee (in USDD base units); default 0 (no deduction)
+REFUND_USDD_FEE_BASE_UNITS = int(os.getenv("REFUND_USDD_FEE_BASE_UNITS", "0"))
+
 # Nexus settings
 NEXUS_CLI = os.getenv("NEXUS_CLI_PATH", "./nexus")
 NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_ACCOUNT = os.getenv("NEXUS_USDD_ACCOUNT")  # Your USDD account address for monitoring deposits
 
+# Heartbeat (optional Nexus asset update)
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+NEXUS_HEARTBEAT_ASSET_ADDRESS = os.getenv("NEXUS_HEARTBEAT_ASSET_ADDRESS")  # Asset address to update
+# Free if not more frequent than every 10s. Default to max(10, POLL_INTERVAL) below once POLL_INTERVAL is parsed.
+
 # Polling / state
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 PROCESSED_SIG_FILE = os.getenv("PROCESSED_SIG_FILE", "processed_sigs.json")
+# Attempt state to avoid fee-draining loops
+ATTEMPT_STATE_FILE = os.getenv("ATTEMPT_STATE_FILE", "attempt_state.json")
+MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
+ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
+
+# Heartbeat interval (respect on-chain free threshold of >=10s)
+HEARTBEAT_MIN_INTERVAL_SEC = max(10, int(os.getenv("HEARTBEAT_MIN_INTERVAL_SEC", str(POLL_INTERVAL))))
 
 # Load processed signatures to avoid double-processing
 if os.path.exists(PROCESSED_SIG_FILE):
@@ -78,15 +96,58 @@ if os.path.exists(PROCESSED_NEXUS_FILE):
 else:
     processed_nexus_txs = set()
 
+# Load action attempt state
+if os.path.exists(ATTEMPT_STATE_FILE):
+    try:
+        with open(ATTEMPT_STATE_FILE, "r") as f:
+            attempt_state = json.load(f)
+    except Exception:
+        attempt_state = {}
+else:
+    attempt_state = {}
+
+# Last heartbeat update time (unix seconds)
+last_heartbeat_update = 0
+
 
 def save_state():
     with open(PROCESSED_SIG_FILE, "w") as f:
         json.dump(list(processed_sigs), f)
     with open(PROCESSED_NEXUS_FILE, "w") as f:
         json.dump(list(processed_nexus_txs), f)
+    try:
+        with open(ATTEMPT_STATE_FILE, "w") as f:
+            json.dump(attempt_state, f)
+    except Exception:
+        pass
 
 
 # --- Helpers -----------------------------------------------------------------
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _should_attempt(action_key: str) -> bool:
+    rec = attempt_state.get(action_key)
+    if not rec:
+        return True
+    attempts = int(rec.get("attempts", 0))
+    last = int(rec.get("last", 0))
+    if attempts >= MAX_ACTION_ATTEMPTS:
+        return False
+    if (_now() - last) < ACTION_RETRY_COOLDOWN_SEC:
+        return False
+    return True
+
+
+def _record_attempt(action_key: str):
+    rec = attempt_state.get(action_key, {"attempts": 0, "last": 0})
+    rec["attempts"] = int(rec.get("attempts", 0)) + 1
+    rec["last"] = _now()
+    attempt_state[action_key] = rec
+    save_state()
+
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
     """Scale integer base-unit amount between different decimals."""
@@ -134,20 +195,104 @@ def extract_memo_from_instructions(instructions):
     return None
 
 
-def validate_nexus_address(nexus_addr: str) -> bool:
-    """
-    Validates if a Nexus address exists on the Nexus chain using the correct API format.
-    Uses: ./nexus register/get/finance:account address=<nexus_addr>
-    """
+def get_nexus_account_info(nexus_addr: str):
+    """Fetch Nexus account info JSON for an address; returns dict or None."""
     cmd = [NEXUS_CLI, "register/get/finance:account", f"address={nexus_addr}"]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return res.returncode == 0
+        if res.returncode != 0:
+            return None
+        try:
+            return json.loads(res.stdout)
+        except Exception:
+            return None
     except subprocess.TimeoutExpired:
         print(f"Timeout validating Nexus address: {nexus_addr}")
-        return False
+        return None
     except Exception as e:
         print(f"Error validating Nexus address {nexus_addr}: {e}")
+        return None
+
+
+def _dict_get_case_insensitive(d: dict, key: str):
+    for k, v in d.items():
+        if k.lower() == key.lower():
+            return v
+    return None
+
+
+def is_expected_nexus_token(account_info: dict, expected_token: str) -> bool:
+    """Check if the Nexus account is for the expected token (e.g., USDD)."""
+    if not isinstance(account_info, dict):
+        return False
+    # Flat keys
+    for key in ("ticker", "token", "symbol", "name"):
+        v = _dict_get_case_insensitive(account_info, key)
+        if isinstance(v, str) and v.upper() == expected_token.upper():
+            return True
+    # Nested common containers
+    for container in ("result", "account", "data"):
+        inner = _dict_get_case_insensitive(account_info, container)
+        if isinstance(inner, dict) and is_expected_nexus_token(inner, expected_token):
+            return True
+    return False
+
+
+def create_memo_ix(text: str) -> TransactionInstruction:
+    """Build a Memo program instruction with given UTF-8 text."""
+    return TransactionInstruction(program_id=MEMO_PROGRAM_ID, keys=[], data=text.encode("utf-8"))
+
+
+def refund_usdc_to_source(source_token_account: str, amount: int, reason: str) -> bool:
+    """Refund USDC back to the sender's token account with a memo explaining the reason.
+    Optionally deduct REFUND_USDC_FEE_BASE_UNITS (in base units) from the amount.
+    """
+    try:
+        with open(VAULT_KEYPAIR, "r") as f:
+            kp_data = json.load(f)
+        if isinstance(kp_data, list):
+            vault_kp = Keypair.from_secret_key(bytes(kp_data))
+        else:
+            raise ValueError("Unsupported vault keypair format; expected JSON array of ints.")
+
+        client = Client(RPC_URL)
+        dest_token_acc = PublicKey(source_token_account)
+
+        refund_amount = max(0, int(amount) - max(0, REFUND_USDC_FEE_BASE_UNITS))
+        if refund_amount <= 0:
+            print("Refund amount is zero after fee deduction; skipping refund")
+            return False
+
+        tx = Transaction()
+        tx.fee_payer = vault_kp.public_key
+        tx.add(
+            transfer_checked(
+                program_id=TOKEN_PROGRAM_ID,
+                source=VAULT_USDC_ACCOUNT,
+                mint=USDC_MINT,
+                dest=dest_token_acc,
+                owner=vault_kp.public_key,
+                amount=refund_amount,
+                decimals=USDC_DECIMALS,
+                signers=[],
+            )
+        )
+        # Attach memo with reason (truncate to reasonable length)
+        memo_text = reason
+        if len(memo_text) > 120:
+            memo_text = memo_text[:117] + "..."
+        tx.add(create_memo_ix(memo_text))
+
+        resp = client.send_transaction(tx, vault_kp)
+        sig = resp.get("result") if isinstance(resp, dict) else resp
+        try:
+            Client(RPC_URL).confirm_transaction(sig, commitment="confirmed")
+        except Exception:
+            pass
+        print(f"Refunded USDC tx sig: {sig}")
+        return True
+    except Exception as e:
+        print(f"Error refunding USDC: {e}")
         return False
 
 
@@ -171,7 +316,9 @@ def mint_usdd(to_nexus_addr: str, amount: int, usdc_txid: str):
         f"reference=USDC_TX:{usdc_txid}",
         f"pin={pin}",
     ]
-    print(">>> Sending USDD on Nexus:", cmd[:-1] + ["pin=***"])  # Hide PIN in logs
+    print(
+        ">>> Sending USDD on Nexus:", cmd[:-1] + ["pin=***"]
+    )  # Hide PIN in logs
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if res.returncode != 0:
@@ -244,10 +391,119 @@ def send_usdc(to_solana_addr: str, amount: int):
         return False
 
 
+def get_nexus_sender_address(tx: dict) -> Optional[str]:
+    """Best-effort extraction of the sender Nexus address from a transaction object."""
+    if not isinstance(tx, dict):
+        return None
+    # Common keys
+    for key in ("from", "sender", "source", "addressFrom", "origin"):
+        val = _dict_get_case_insensitive(tx, key)
+        if isinstance(val, str) and val:
+            return val
+    # Nested containers we might see
+    for container in ("result", "tx", "transaction", "data", "details"):
+        inner = _dict_get_case_insensitive(tx, container)
+        if isinstance(inner, dict):
+            addr = get_nexus_sender_address(inner)
+            if addr:
+                return addr
+    return None
+
+
+def refund_usdd_to_sender(sender_nexus_addr: str, amount_usdd_units: int, reason: str) -> bool:
+    """Refund USDD back to the sender on Nexus with a reference explaining the reason.
+    Optionally deduct REFUND_USDD_FEE_BASE_UNITS (in base units) from the amount.
+    """
+    pin = os.getenv("NEXUS_PIN", "")
+    if not pin:
+        print("ERROR: NEXUS_PIN environment variable not set")
+        return False
+
+    refund_amount = max(0, int(amount_usdd_units) - max(0, REFUND_USDD_FEE_BASE_UNITS))
+    if refund_amount <= 0:
+        print("Refund USDD amount is zero after fee deduction; skipping refund")
+        return False
+
+    # Truncate reason for safety
+    ref = f"REFUND_USDC_INVALID: {reason}"
+    if len(ref) > 120:
+        ref = ref[:117] + "..."
+
+    cmd = [
+        NEXUS_CLI,
+        "finance/debit/account",
+        "from=USDD",
+        f"to={sender_nexus_addr}",
+        f"amount={refund_amount}",
+        f"reference={ref}",
+        f"pin={pin}",
+    ]
+    print(
+        ">>> Refunding USDD on Nexus:", cmd[:-1] + ["pin=***"]
+    )  # Hide PIN in logs
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            print("ERROR refunding USDD:", res.stderr)
+            return False
+        print("USDD refund successful:", res.stdout)
+        return True
+    except subprocess.TimeoutExpired:
+        print("ERROR: Nexus CLI timeout (refund)")
+        return False
+    except Exception as e:
+        print(f"ERROR executing Nexus CLI (refund): {e}")
+        return False
+
+
+def update_heartbeat_asset(force: bool = False) -> None:
+    """Optionally update a Nexus Asset with last_poll_timestamp to signal liveness.
+    Free on-chain if not updated more often than every 10 seconds.
+    Controlled by HEARTBEAT_ENABLED, NEXUS_HEARTBEAT_ASSET_ADDRESS, HEARTBEAT_MIN_INTERVAL_SEC.
+    """
+    global last_heartbeat_update
+    if not HEARTBEAT_ENABLED or not NEXUS_HEARTBEAT_ASSET_ADDRESS:
+        return
+    now = _now()
+    if not force and (now - last_heartbeat_update) < HEARTBEAT_MIN_INTERVAL_SEC:
+        return
+
+    pin = os.getenv("NEXUS_PIN", "")
+    cmd = [
+        NEXUS_CLI,
+        "assets/update/asset",
+        f"address={NEXUS_HEARTBEAT_ASSET_ADDRESS}",
+        "format=basic",
+        f"last_poll_timestamp={now}",
+    ]
+    if pin:
+        cmd.append(f"pin={pin}")
+
+    try:
+        print(
+            "↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if pin else cmd
+        )
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            # Log but don't raise; liveness update failure shouldn't stop swaps
+            print("Heartbeat update failed:", res.stderr.strip() or res.stdout.strip())
+            return
+        last_heartbeat_update = now
+        # Optionally print a short success message
+        out = (res.stdout or "").strip()
+        if out:
+            print("Heartbeat updated:", out)
+    except subprocess.TimeoutExpired:
+        print("Heartbeat update timeout")
+    except Exception as e:
+        print(f"Heartbeat update error: {e}")
+
+
 def poll_nexus_usdd_deposits():
     """
     Poll Nexus for new USDD deposits into our USDD account.
     If we see a memo with a Solana address, send USDC to that address.
+    If the Solana address is invalid or sending fails, refund USDD to sender (minus optional fee).
     """
     cmd = [NEXUS_CLI, "finance/transaction/account", f"address={NEXUS_USDD_ACCOUNT}"]
 
@@ -275,6 +531,7 @@ def poll_nexus_usdd_deposits():
                 usdd_units = parse_amount_to_base_units(raw_amount, USDD_DECIMALS)
                 amount_usdc_units = scale_amount(usdd_units, USDD_DECIMALS, USDC_DECIMALS)
                 reference = tx.get("reference", "") or ""
+                sender_nexus_addr = get_nexus_sender_address(tx)
 
                 # Look for Solana address in reference (solana:<SOLANA_ADDRESS>)
                 if reference.startswith("solana:"):
@@ -284,17 +541,52 @@ def poll_nexus_usdd_deposits():
                     )
 
                     # Validate Solana address strictly
+                    valid_pk = True
                     try:
                         _ = PublicKey(solana_addr)
                     except Exception:
+                        valid_pk = False
+
+                    if not valid_pk:
                         print(f"✗ Invalid Solana address format: {solana_addr}")
-                    else:
-                        if send_usdc(solana_addr, amount_usdc_units):
-                            print(f"✓ Successfully sent {amount_usdc_units} USDC to {solana_addr}")
+                        refund_key = f"refund_usdd:{tx_id}"
+                        if _should_attempt(refund_key) and sender_nexus_addr:
+                            _record_attempt(refund_key)
+                            if refund_usdd_to_sender(
+                                sender_nexus_addr, usdd_units, reason="Invalid Solana address in reference"
+                            ):
+                                print("✓ Refunded USDD to sender")
+                            else:
+                                print("✗ Failed to refund USDD to sender")
+                                mark_processed = False
                         else:
-                            print(f"✗ Failed to send USDC to {solana_addr}")
-                            # Don't mark as processed if sending failed
-                            mark_processed = False
+                            print("↷ Skipping refund attempt (cooldown/max attempts reached)")
+                    else:
+                        send_key = f"send_usdc:{tx_id}"
+                        if _should_attempt(send_key):
+                            _record_attempt(send_key)
+                            if send_usdc(solana_addr, amount_usdc_units):
+                                print(f"✓ Successfully sent {amount_usdc_units} USDC to {solana_addr}")
+                            else:
+                                print(
+                                    f"✗ Failed to send USDC to {solana_addr}; attempting USDD refund if allowed"
+                                )
+                                refund_key = f"refund_usdd:{tx_id}"
+                                if _should_attempt(refund_key) and sender_nexus_addr:
+                                    _record_attempt(refund_key)
+                                    if refund_usdd_to_sender(
+                                        sender_nexus_addr, usdd_units, reason="USDC send failed"
+                                    ):
+                                        print("✓ Refunded USDD to sender")
+                                    else:
+                                        print("✗ Failed to refund USDD to sender")
+                                        mark_processed = False
+                                else:
+                                    print(
+                                        "↷ Skipping refund attempt (cooldown/max attempts reached or missing sender)"
+                                    )
+                        else:
+                            print("↷ Skipping USDC send attempt (cooldown/max attempts reached)")
                 else:
                     print(f"No Solana address found in reference: {reference}")
 
@@ -313,6 +605,7 @@ def poll_solana_deposits():
     """
     Poll Solana for new token-transfer signatures into VAULT_USDC_ACCOUNT.
     If we see a memo with a Nexus address, validate it and call mint_usdd().
+    If invalid or wrong token, refund to sender's source token account with memo.
     """
     try:
         client = Client(RPC_URL)
@@ -355,12 +648,30 @@ def poll_solana_deposits():
                     else:
                         continue
 
+                    source_token_acc = info.get("source")
+
                     # 2) Find Memo instruction for Nexus address
                     memo_data = extract_memo_from_instructions(
                         tx["transaction"]["message"]["instructions"]
                     )
                     if not memo_data:
-                        print("No memo found; skipping")
+                        # No memo provided; refund the USDC to sender
+                        print("No memo found; initiating refund to sender")
+                        reason = (
+                            f"Refund: missing memo 'nexus:<addr>'. Ref tx of {amount_usdc_units} USDC."
+                        )
+                        refund_key = f"refund_usdc:{sig}"
+                        if _should_attempt(refund_key) and source_token_acc:
+                            _record_attempt(refund_key)
+                            if refund_usdc_to_source(
+                                source_token_acc, amount_usdc_units, reason
+                            ):
+                                print("✓ Refund sent to sender's token account")
+                            else:
+                                print("✗ Refund failed")
+                                mark_processed = False
+                        else:
+                            print("↷ Skipping refund attempt (cooldown/max attempts reached)")
                         break
 
                     if memo_data.startswith("nexus:"):
@@ -369,24 +680,64 @@ def poll_solana_deposits():
                             f"→ Deposit of {amount_usdc_units} USDC base units; checking Nexus address {nexus_addr}"
                         )
 
-                        # Validate Nexus address exists
-                        if validate_nexus_address(nexus_addr):
+                        # Validate Nexus address exists and is for expected token
+                        acct_info = get_nexus_account_info(nexus_addr)
+                        if not acct_info or not is_expected_nexus_token(acct_info, NEXUS_TOKEN_NAME):
+                            print(
+                                f"✗ Nexus address invalid or wrong token (expected {NEXUS_TOKEN_NAME}). Initiating refund."
+                            )
+                            reason = (
+                                f"Refund: invalid Nexus addr or not {NEXUS_TOKEN_NAME}. Ref tx of {amount_usdc_units} USDC."
+                            )
+                            refund_key = f"refund_usdc:{sig}"
+                            if _should_attempt(refund_key) and source_token_acc:
+                                _record_attempt(refund_key)
+                                if refund_usdc_to_source(
+                                    source_token_acc, amount_usdc_units, reason
+                                ):
+                                    print("✓ Refund sent to sender's token account")
+                                else:
+                                    print("✗ Refund failed")
+                                    mark_processed = False
+                            else:
+                                print("↷ Skipping refund attempt (cooldown/max attempts reached)")
+                        else:
                             print(f"→ Nexus address validated, minting to {nexus_addr}")
                             usdd_units = scale_amount(
                                 amount_usdc_units, USDC_DECIMALS, USDD_DECIMALS
                             )
-                            if mint_usdd(nexus_addr, usdd_units, sig):
-                                print(
-                                    f"✓ Successfully minted {usdd_units} USDD base units to {nexus_addr}"
-                                )
+                            mint_key = f"mint_usdd:{sig}"
+                            if _should_attempt(mint_key):
+                                _record_attempt(mint_key)
+                                if mint_usdd(nexus_addr, usdd_units, sig):
+                                    print(
+                                        f"✓ Successfully minted {usdd_units} USDD base units to {nexus_addr}"
+                                    )
+                                else:
+                                    print(f"✗ Failed to mint USDD to {nexus_addr}")
+                                    # Don't mark as processed if minting failed
+                                    mark_processed = False
                             else:
-                                print(f"✗ Failed to mint USDD to {nexus_addr}")
-                                # Don't mark as processed if minting failed
+                                print("↷ Skipping mint attempt (cooldown/max attempts reached)")
+                    else:
+                        # Bad memo format; refund USDC back
+                        print("Bad memo format; initiating refund to sender:", memo_data)
+                        reason = (
+                            f"Refund: invalid memo format. Expect 'nexus:<addr>'. Ref tx of {amount_usdc_units} USDC."
+                        )
+                        refund_key = f"refund_usdc:{sig}"
+                        if _should_attempt(refund_key) and source_token_acc:
+                            _record_attempt(refund_key)
+                            if refund_usdc_to_source(
+                                source_token_acc, amount_usdc_units, reason
+                            ):
+                                print("✓ Refund sent to sender's token account")
+                            else:
+                                print("✗ Refund failed")
                                 mark_processed = False
                         else:
-                            print(f"✗ Invalid Nexus address: {nexus_addr}")
-                    else:
-                        print("Skipping, bad memo format:", memo_data)
+                            print("↷ Skipping refund attempt (cooldown/max attempts reached)")
+                        break
                     break
 
         if mark_processed:
@@ -413,6 +764,9 @@ def main():
 
             # Save state after each polling cycle
             save_state()
+
+            # Update on-chain heartbeat (free when not more often than every 10s)
+            update_heartbeat_asset()
 
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
