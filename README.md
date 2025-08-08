@@ -1,250 +1,187 @@
 # USDC ↔ USDD Bidirectional Swap Service
 
-A Python service that enables automatic swapping between USDC (Solana) and USDD (Nexus) tokens in both directions.
+A Python service that enables automatic swapping between USDC (Solana) and USDD (Nexus) in both directions, with strict validation, automatic refunds on invalid input, loop-safety, and an optional on-chain heartbeat for public status checking.
 
-## 🔄 How It Works
+## How It Works
 
 ### USDC → USDD (Solana to Nexus)
-1. User sends USDC to your Solana vault with memo: `nexus:<NEXUS_ADDRESS>`
-2. Service validates the Nexus address exists
-3. Service sends equivalent USDD to the Nexus address
+1. User sends USDC to your vault USDC token account (`VAULT_USDC_ACCOUNT`).
+2. The same transaction must include a Memo: `nexus:<NEXUS_ADDRESS>`.
+3. Service validates the Nexus address exists and is for the expected token (`NEXUS_TOKEN_NAME`, e.g., USDD).
+4. If valid, the service mints/sends USDD on Nexus to that address (amount normalized by decimals).
+5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. Optional fee may be deducted: `REFUND_USDC_FEE_BASE_UNITS`.
+
+Notes:
+- Amounts are handled in base units and normalized between `USDC_DECIMALS` and `USDD_DECIMALS`.
+- The refund is sent to the original SPL token account the deposit came from (not a wallet owner).
 
 ### USDD → USDC (Nexus to Solana)
-1. User sends USDD to your Nexus account with reference: `solana:<SOLANA_ADDRESS>`
-2. Service validates the Solana address format
-3. Service sends equivalent USDC from vault to the Solana address
+1. User sends USDD to your Nexus USDD account (`NEXUS_USDD_ACCOUNT`).
+2. The transaction’s reference must be: `solana:<SOLANA_ADDRESS>`.
+3. Service validates the Solana address format.
+4. If valid, the service sends USDC from the vault to that address. If the recipient’s USDC ATA doesn’t exist, it is created automatically.
+5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. Optional fee may be deducted: `REFUND_USDD_FEE_BASE_UNITS`.
 
-## 📋 Prerequisites
+### Loop-Safety and Reliability
+- Actions that can incur fees (mint, send, refunds) are guarded by attempt limits and cooldowns:
+  - `MAX_ACTION_ATTEMPTS` attempts per unique item (tx/signature).
+  - `ACTION_RETRY_COOLDOWN_SEC` between attempts.
+- Processed state is persisted; items are only marked processed after a successful outcome.
+- Solana transfers include confirmation attempts.
 
+## Optional Public Heartbeat (Free, On-Chain)
+The service can update a Nexus Asset’s mutable field `last_poll_timestamp` after each poll cycle. Anyone can read this on-chain to determine whether the service is online.
+
+- One-time cost: create an Asset (about 1 NXS once). Updates are free as long as they are not more frequent than every 10 seconds.
+- The service enforces a minimum update interval: `HEARTBEAT_MIN_INTERVAL_SEC` (defaults to `max(10, POLL_INTERVAL)`).
+
+Setup steps:
+1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds):
+   - Use Nexus API/CLI: `assets/create/asset` (only once).
+   - Or use the helper script below to create it quickly.
+2. Put the asset’s address in `.env` as `NEXUS_HEARTBEAT_ASSET_ADDRESS`.
+3. Ensure `HEARTBEAT_ENABLED=true`.
+
+Create the heartbeat asset via helper script:
+```powershell
+python .\create_heartbeat_asset.py --name local:swapServiceHeartbeat
+# If you omit --name, an unnamed asset is created; read it by address
+```
+The script initializes a mutable `last_poll_timestamp` field and prints the asset address to set in `.env`.
+
+How clients check status:
+- Read the asset: `assets/get/asset address=<ASSET_ADDRESS>`
+  - Or by name: `assets/get/asset name=<ASSET_NAME>`
+- Extract `results.last_poll_timestamp` (unix seconds).
+- Consider the service online if `now - last_poll_timestamp <= grace`, where `grace ≈ 2–3 × POLL_INTERVAL`.
+
+## Prerequisites
 - Python 3.8+
-- A Solana wallet with USDC vault setup
-- A Nexus node running locally
-- USDD tokens in your Nexus account for outgoing swaps
+- Solana wallet and USDC vault token account (ATA)
+- Nexus node/CLI available locally
+- Sufficient balances: SOL for fees, USDC in vault for payouts, USDD for payouts
 
-## 🛠️ Setup Instructions
+## Install Dependencies
 
-### 1. Install Dependencies
-
-```bash
-pip install python-dotenv solana anchorpy spl-token
+Using pinned versions:
+```powershell
+python -m pip install -r requirements.txt
+```
+Or explicitly:
+```powershell
+python -m pip install python-dotenv solana solders spl-token
 ```
 
-### 2. Solana Wallet Setup
-
-#### Create or Import Vault Wallet
-```bash
-# Generate new keypair (or use existing)
-solana-keygen new --outfile vault-keypair.json
-
-# Get your wallet address
-solana address --keypair vault-keypair.json
-```
-
-#### Create USDC Token Account
-```bash
-# Create USDC token account for your vault
-spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --keypair vault-keypair.json
-
-# Note down the token account address - this is your VAULT_USDC_ACCOUNT
-```
-
-#### Fund Your Vault
-```bash
-# Transfer some SOL for transaction fees
-solana transfer <VAULT_ADDRESS> 0.1 --keypair your-main-keypair.json
-
-# Transfer USDC for swaps (optional - will be received from users)
-spl-token transfer EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v <AMOUNT> <VAULT_USDC_ACCOUNT> --keypair your-main-keypair.json
-```
-
-### 3. Nexus Node Setup
-
-#### Install and Run Nexus Node
-```bash
-# Download Nexus from https://github.com/Nexusoft/LLL-TAO
-# Build and start the node locally
-./nexus
-```
-
-#### Create USDD Account for receival
-```bash
-# Create or use existing USDD account
-./nexus finance/create/account token=USDD name=USDD_account pin=<YOUR_PIN>
-
-# Note down the account address - this is your NEXUS_USDD_ACCOUNT
-```
-
-#### Fund USDD Account (if you're not the owner of the token)
-Ensure your USDD account has sufficient USDD tokens for outgoing swaps.
-
-### 4. Environment Configuration
-
+## Environment Configuration
 Create a `.env` file in the project directory:
 
 ```env
-# Solana Configuration
+# Solana
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-# For devnet: https://api.devnet.solana.com
-# For local: http://127.0.0.1:8899
-
-# Vault Settings
 VAULT_KEYPAIR=./vault-keypair.json
 VAULT_USDC_ACCOUNT=<YOUR_VAULT_USDC_TOKEN_ACCOUNT_ADDRESS>
 USDC_MINT=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-# For devnet USDC: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+# Devnet USDC: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
 
-# Nexus Configuration
+# Decimals (base units)
+USDC_DECIMALS=6
+USDD_DECIMALS=6
+
+# Nexus
 NEXUS_CLI_PATH=./nexus
 NEXUS_PIN=<YOUR_NEXUS_PIN>
 NEXUS_USDD_ACCOUNT=<YOUR_USDD_ACCOUNT_ADDRESS>
 NEXUS_TOKEN_NAME=USDD
+NEXUS_RPC_HOST=http://127.0.0.1:8399
 
-# Optional Settings
+# Polling & State
 POLL_INTERVAL=10
 PROCESSED_SIG_FILE=processed_sigs.json
 PROCESSED_NEXUS_FILE=processed_nexus_txs.json
+ATTEMPT_STATE_FILE=attempt_state.json
+MAX_ACTION_ATTEMPTS=3
+ACTION_RETRY_COOLDOWN_SEC=300
+
+# Optional refund fees (base units)
+REFUND_USDC_FEE_BASE_UNITS=0
+REFUND_USDD_FEE_BASE_UNITS=0
+
+# Optional on-chain heartbeat
+HEARTBEAT_ENABLED=true
+NEXUS_HEARTBEAT_ASSET_ADDRESS=<OPTIONAL_HEARTBEAT_ASSET_ADDRESS>
+# Updates free if >= 10 seconds apart
+HEARTBEAT_MIN_INTERVAL_SEC=10
 ```
 
-### 5. Security Setup
-
-#### Secure Your Private Keys
-```bash
-# Set restrictive permissions on keypair file
-chmod 600 vault-keypair.json
-
-# Consider using a hardware wallet for production
+## Running the Service
+```powershell
+python .\swapService.py
 ```
-
-#### Environment Variables Security
-```bash
-# Set restrictive permissions on .env file
-chmod 600 .env
-
-# Never commit .env to version control
-echo ".env" >> .gitignore
-```
-
-## 🚀 Running the Service
-
-### Start the Swap Service
-```bash
-python swapService.py
-```
-
-### Expected Output
+Expected startup output:
 ```
 🌐 Starting bidirectional swap service
-   Solana RPC: https://api.mainnet-beta.solana.com
-   USDC Vault: <YOUR_VAULT_ADDRESS>
-   USDD Account: <YOUR_USDD_ACCOUNT>
+   Solana RPC: <RPC_URL>
+   USDC Vault: <VAULT_USDC_ACCOUNT>
+   USDD Account: <NEXUS_USDD_ACCOUNT>
    Monitoring:
    - USDC → USDD: Solana deposits with Nexus address in memo
    - USDD → USDC: USDD deposits with Solana address in reference
 ```
 
-## 📖 User Instructions
+## User Instructions
 
-### For Users Swapping USDC → USDD
+### Swap USDC → USDD (on Solana)
+- Send USDC to `VAULT_USDC_ACCOUNT` with a Memo in the same transaction:
+  - `nexus:<YOUR_NEXUS_ADDRESS>`
+- If the memo is missing/invalid or the Nexus address is not a valid `NEXUS_TOKEN_NAME` account, your USDC is refunded to the source SPL token account with a reason memo. A fee may be deducted if configured.
 
-1. **Send USDC to the vault address** with memo format:
-   ```
-   nexus:<YOUR_NEXUS_ADDRESS>
-   ```
+### Swap USDD → USDC (on Nexus)
+- Send USDD to `NEXUS_USDD_ACCOUNT` with reference:
+  - `solana:<YOUR_SOLANA_ADDRESS>`
+- The service creates your USDC ATA automatically if needed and sends USDC. If the address is invalid or a send fails, your USDD is refunded with a reason in the reference. A fee may be deducted if configured.
 
-2. **Example using Solana CLI:**
-   ```bash
-   spl-token transfer EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 100 <VAULT_USDC_ACCOUNT> --memo "nexus:YOUR_NEXUS_ADDRESS"
-   ```
-
-3. **Wait for confirmation** - USDD will be sent to your Nexus address
-
-### For Users Swapping USDD → USDC
-
-1. **Send USDD to the service's USDD account** with reference:
-   ```bash
-   ./nexus finance/debit/account from=<YOUR_USDD_ACCOUNT> to=<SERVICE_USDD_ACCOUNT> amount=100 reference="solana:<YOUR_SOLANA_ADDRESS>" pin=<YOUR_PIN>
-   ```
-
-2. **Wait for confirmation** - USDC will be sent to your Solana address
-
-## 🔧 Configuration Options
+## Configuration Reference
 
 | Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `SOLANA_RPC_URL` | Solana RPC endpoint | ✅ | - |
-| `VAULT_KEYPAIR` | Path to vault keypair JSON | ✅ | - |
-| `VAULT_USDC_ACCOUNT` | Vault's USDC token account | ✅ | - |
-| `USDC_MINT` | USDC mint address | ✅ | - |
-| `NEXUS_PIN` | Nexus account PIN | ✅ | - |
-| `NEXUS_USDD_ACCOUNT` | Your USDD account address | ✅ | - |
-| `NEXUS_CLI_PATH` | Path to Nexus CLI | ❌ | `./nexus` |
-| `NEXUS_TOKEN_NAME` | Token name in Nexus | ❌ | `USDD` |
-| `POLL_INTERVAL` | Polling interval in seconds | ❌ | `10` |
+|---|---|---|---|
+| SOLANA_RPC_URL | Solana RPC endpoint | ✅ | - |
+| VAULT_KEYPAIR | Path to vault keypair JSON (array of ints) | ✅ | - |
+| VAULT_USDC_ACCOUNT | Vault’s USDC token account (ATA) | ✅ | - |
+| USDC_MINT | USDC mint address | ✅ | - |
+| USDC_DECIMALS | USDC token decimals (base units) | ❌ | 6 |
+| USDD_DECIMALS | USDD token decimals (base units) | ❌ | 6 |
+| NEXUS_PIN | Nexus account PIN | ✅ | - |
+| NEXUS_USDD_ACCOUNT | Your USDD account address | ✅ | - |
+| NEXUS_CLI_PATH | Path to Nexus CLI | ❌ | ./nexus |
+| NEXUS_TOKEN_NAME | Token ticker used for validation | ❌ | USDD |
+| NEXUS_RPC_HOST | Nexus RPC host (if applicable) | ❌ | http://127.0.0.1:8399 |
+| POLL_INTERVAL | Poll interval (seconds) | ❌ | 10 |
+| PROCESSED_SIG_FILE | File for processed Solana signatures | ❌ | processed_sigs.json |
+| PROCESSED_NEXUS_FILE | File for processed Nexus txids | ❌ | processed_nexus_txs.json |
+| ATTEMPT_STATE_FILE | File for attempt/cooldown state | ❌ | attempt_state.json |
+| MAX_ACTION_ATTEMPTS | Max attempts per action (mint/send/refund) | ❌ | 3 |
+| ACTION_RETRY_COOLDOWN_SEC | Cooldown between attempts | ❌ | 300 |
+| REFUND_USDC_FEE_BASE_UNITS | Fee deducted from USDC refunds (base units) | ❌ | 0 |
+| REFUND_USDD_FEE_BASE_UNITS | Fee deducted from USDD refunds (base units) | ❌ | 0 |
+| HEARTBEAT_ENABLED | Enable on-chain heartbeat | ❌ | true |
+| NEXUS_HEARTBEAT_ASSET_ADDRESS | Asset to update with last_poll_timestamp | ❌ | - |
+| HEARTBEAT_MIN_INTERVAL_SEC | Min seconds between heartbeat updates | ❌ | max(10, POLL_INTERVAL) |
 
-## 🔍 Monitoring & Logs
+## Security Notes
+- Keep `vault-keypair.json` and `.env` secure. Never commit them.
+- Ensure the vault has enough SOL to cover fees and ATA creation.
+- PIN is masked in logs for Nexus CLI calls.
 
-### Service Logs
-The service outputs detailed logs for all operations:
-- ✅ Successful swaps
-- ❌ Failed operations
-- 🔍 Address validations
-- 📝 Transaction processing
+## Troubleshooting
+- Unresolved imports: run `python -m pip install -r requirements.txt`.
+- No memo found (USDC → USDD): Wallet must include a Memo in the same transaction.
+- Wrong token or invalid Nexus address: USDC is refunded with a reason memo.
+- Invalid Solana address (USDD → USDC): USDD is refunded to sender with a reason.
+- Heartbeat not updating: Check `HEARTBEAT_ENABLED`, asset address, and that updates are not more frequent than 10s.
+- Repeated attempts skipped: You may be within cooldown or max attempts; adjust `MAX_ACTION_ATTEMPTS` / `ACTION_RETRY_COOLDOWN_SEC`.
 
-### State Files
-- `processed_sigs.json` - Tracks processed Solana transactions
-- `processed_nexus_txs.json` - Tracks processed Nexus transactions
+## Nexus API Docs
+Official Nexus API docs are included in the `Nexus API docs/` folder for reference.
 
-## ⚠️ Important Notes
-
-### Security Considerations
-- **Keep your vault keypair secure** - it controls USDC funds
-- **Monitor your USDD balance** - ensure sufficient funds for swaps
-- **Use hardware wallets** for production environments
-- **Regular backups** of keypairs and state files
-
-### Network Considerations
-- **Transaction fees** - Ensure SOL balance for Solana transactions
-- **Confirmation times** - Wait for network confirmations
-- **Rate limiting** - Be mindful of RPC rate limits
-
-### Error Handling
-- Failed transactions are not marked as processed
-- Service retries failed operations on next poll
-- Check logs for detailed error information
-
-## 🆘 Troubleshooting
-
-### Common Issues
-
-#### "Required environment variable not set"
-- Check your `.env` file exists and has all required variables
-- Verify file permissions allow reading
-
-#### "Error validating Nexus address"
-- Ensure Nexus node is running and accessible
-- Check if the provided Nexus address exists
-
-#### "Error sending USDC/USDD"
-- Verify sufficient balances in vault/USDD account
-- Check network connectivity
-- Ensure proper permissions and PINs
-
-#### "Timeout errors"
-- Check network connectivity
-- Verify RPC endpoints are responsive
-- Consider increasing timeout values
-
-### Getting Help
-
-1. **Check the logs** for detailed error messages
-2. **Verify network status** (Solana/Nexus)
-3. **Test with small amounts** first
-4. **Check account balances** before swapping
-
-## 📝 License
-
-This project is provided as-is for educational and development purposes. Use at your own risk in production environments.
-
-## 🤝 Contributing
-
-Feel free to submit issues and enhancement requests!
+## License
+This project is provided as-is. Use at your own risk.
