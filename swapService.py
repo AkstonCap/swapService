@@ -55,9 +55,13 @@ USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
 USDD_DECIMALS = int(os.getenv("USDD_DECIMALS", "6"))
 
 # Optional refund fee (in USDC base units); default 0 (no deduction)
-REFUND_USDC_FEE_BASE_UNITS = int(os.getenv("REFUND_USDC_FEE_BASE_UNITS", "0"))
+REFUND_USDC_FEE_EXPR = os.getenv("REFUND_USDC_FEE_BASE_UNITS", "0")  # may be decimal string; parsed later
 # Optional refund fee (in USDD base units); default 0 (no deduction)
-REFUND_USDD_FEE_BASE_UNITS = int(os.getenv("REFUND_USDD_FEE_BASE_UNITS", "0"))
+REFUND_USDD_FEE_EXPR = os.getenv("REFUND_USDD_FEE_BASE_UNITS", "0")  # may be decimal string; parsed later
+
+# Swap fee on USDC (applies to both directions). Defaults: 0.1% (10 bps) and minimum 0.01 USDC
+SWAP_USDC_FEE_BPS = int(os.getenv("SWAP_USDC_FEE_BPS", "10"))  # 10 bps = 0.10%
+SWAP_USDC_FEE_MIN_DECIMAL = os.getenv("SWAP_USDC_FEE_MIN_DECIMAL", "0.01")  # parsed with USDC_DECIMALS
 
 # Nexus settings
 NEXUS_CLI = os.getenv("NEXUS_CLI_PATH", "./nexus")
@@ -173,6 +177,18 @@ def parse_amount_to_base_units(val, decimals: int) -> int:
         return 0
 
 
+def compute_usdc_swap_fee(amount_usdc_units: int) -> int:
+    """Compute the USDC swap fee in base units: max(bps, min), capped at amount."""
+    try:
+        bps = max(0, int(SWAP_USDC_FEE_BPS))
+    except Exception:
+        bps = 0
+    bps_fee = (int(amount_usdc_units) * bps) // 10000
+    min_units = parse_amount_to_base_units(SWAP_USDC_FEE_MIN_DECIMAL, USDC_DECIMALS)
+    fee = max(bps_fee, max(0, min_units))
+    return min(fee, int(amount_usdc_units))
+
+
 def extract_memo_from_instructions(instructions):
     """Extract memo text from jsonParsed transaction instructions."""
     for ix in instructions:
@@ -258,7 +274,8 @@ def refund_usdc_to_source(source_token_account: str, amount: int, reason: str) -
         client = Client(RPC_URL)
         dest_token_acc = PublicKey(source_token_account)
 
-        refund_amount = max(0, int(amount) - max(0, REFUND_USDC_FEE_BASE_UNITS))
+        refund_fee_units = parse_amount_to_base_units(REFUND_USDC_FEE_EXPR, USDC_DECIMALS)
+        refund_amount = max(0, int(amount) - max(0, refund_fee_units))
         if refund_amount <= 0:
             print("Refund amount is zero after fee deduction; skipping refund")
             return False
@@ -419,7 +436,8 @@ def refund_usdd_to_sender(sender_nexus_addr: str, amount_usdd_units: int, reason
         print("ERROR: NEXUS_PIN environment variable not set")
         return False
 
-    refund_amount = max(0, int(amount_usdd_units) - max(0, REFUND_USDD_FEE_BASE_UNITS))
+    refund_fee_units = parse_amount_to_base_units(REFUND_USDD_FEE_EXPR, USDD_DECIMALS)
+    refund_amount = max(0, int(amount_usdd_units) - max(0, refund_fee_units))
     if refund_amount <= 0:
         print("Refund USDD amount is zero after fee deduction; skipping refund")
         return False
@@ -562,31 +580,56 @@ def poll_nexus_usdd_deposits():
                         else:
                             print("↷ Skipping refund attempt (cooldown/max attempts reached)")
                     else:
-                        send_key = f"send_usdc:{tx_id}"
-                        if _should_attempt(send_key):
-                            _record_attempt(send_key)
-                            if send_usdc(solana_addr, amount_usdc_units):
-                                print(f"✓ Successfully sent {amount_usdc_units} USDC to {solana_addr}")
+                        # Apply USDC swap fee
+                        fee_usdc_units = compute_usdc_swap_fee(amount_usdc_units)
+                        net_usdc_units = max(0, amount_usdc_units - fee_usdc_units)
+                        if net_usdc_units <= 0:
+                            print("✗ Deposit below minimum after USDC fee; refunding USDD to sender")
+                            refund_key = f"refund_usdd:{tx_id}"
+                            if _should_attempt(refund_key) and sender_nexus_addr:
+                                _record_attempt(refund_key)
+                                if refund_usdd_to_sender(
+                                    sender_nexus_addr,
+                                    usdd_units,
+                                    reason="Deposit below minimum after USDC fee",
+                                ):
+                                    print("✓ Refunded USDD to sender")
+                                else:
+                                    print("✗ Failed to refund USDD to sender")
+                                    mark_processed = False
                             else:
-                                print(
-                                    f"✗ Failed to send USDC to {solana_addr}; attempting USDD refund if allowed"
-                                )
-                                refund_key = f"refund_usdd:{tx_id}"
-                                if _should_attempt(refund_key) and sender_nexus_addr:
-                                    _record_attempt(refund_key)
-                                    if refund_usdd_to_sender(
-                                        sender_nexus_addr, usdd_units, reason="USDC send failed"
-                                    ):
-                                        print("✓ Refunded USDD to sender")
-                                    else:
-                                        print("✗ Failed to refund USDD to sender")
-                                        mark_processed = False
+                                print("↷ Skipping refund attempt (cooldown/max attempts reached or missing sender)")
+                        else:
+                            print(
+                                f"→ Applying USDC fee {fee_usdc_units} base units; net send {net_usdc_units} base units"
+                            )
+                            send_key = f"send_usdc:{tx_id}"
+                            if _should_attempt(send_key):
+                                _record_attempt(send_key)
+                                if send_usdc(solana_addr, net_usdc_units):
+                                    print(
+                                        f"✓ Successfully sent {net_usdc_units} USDC base units (after fee) to {solana_addr}"
+                                    )
                                 else:
                                     print(
-                                        "↷ Skipping refund attempt (cooldown/max attempts reached or missing sender)"
+                                        f"✗ Failed to send USDC to {solana_addr}; attempting USDD refund if allowed"
                                     )
-                        else:
-                            print("↷ Skipping USDC send attempt (cooldown/max attempts reached)")
+                                    refund_key = f"refund_usdd:{tx_id}"
+                                    if _should_attempt(refund_key) and sender_nexus_addr:
+                                        _record_attempt(refund_key)
+                                        if refund_usdd_to_sender(
+                                            sender_nexus_addr, usdd_units, reason="USDC send failed"
+                                        ):
+                                            print("✓ Refunded USDD to sender")
+                                        else:
+                                            print("✗ Failed to refund USDD to sender")
+                                            mark_processed = False
+                                    else:
+                                        print(
+                                            "↷ Skipping refund attempt (cooldown/max attempts reached or missing sender)"
+                                        )
+                            else:
+                                print("↷ Skipping USDC send attempt (cooldown/max attempts reached)")
                 else:
                     print(f"No Solana address found in reference: {reference}")
 
@@ -702,23 +745,49 @@ def poll_solana_deposits():
                             else:
                                 print("↷ Skipping refund attempt (cooldown/max attempts reached)")
                         else:
-                            print(f"→ Nexus address validated, minting to {nexus_addr}")
-                            usdd_units = scale_amount(
-                                amount_usdc_units, USDC_DECIMALS, USDD_DECIMALS
-                            )
-                            mint_key = f"mint_usdd:{sig}"
-                            if _should_attempt(mint_key):
-                                _record_attempt(mint_key)
-                                if mint_usdd(nexus_addr, usdd_units, sig):
-                                    print(
-                                        f"✓ Successfully minted {usdd_units} USDD base units to {nexus_addr}"
-                                    )
+                            # Apply USDC swap fee and mint net amount as USDD
+                            fee_usdc_units = compute_usdc_swap_fee(amount_usdc_units)
+                            net_usdc_units = max(0, amount_usdc_units - fee_usdc_units)
+                            if net_usdc_units <= 0:
+                                print("✗ Deposit below minimum after USDC fee; refunding USDC to sender")
+                                reason = (
+                                    "Refund: deposit below minimum after USDC fee."
+                                )
+                                refund_key = f"refund_usdc:{sig}"
+                                if _should_attempt(refund_key) and source_token_acc:
+                                    _record_attempt(refund_key)
+                                    if refund_usdc_to_source(
+                                        source_token_acc, amount_usdc_units, reason
+                                    ):
+                                        print("✓ Refund sent to sender's token account")
+                                    else:
+                                        print("✗ Refund failed")
+                                        mark_processed = False
                                 else:
-                                    print(f"✗ Failed to mint USDD to {nexus_addr}")
-                                    # Don't mark as processed if minting failed
-                                    mark_processed = False
+                                    print(
+                                        "↷ Skipping refund attempt (cooldown/max attempts reached)"
+                                    )
                             else:
-                                print("↷ Skipping mint attempt (cooldown/max attempts reached)")
+                                print(
+                                    f"→ Applying USDC fee {fee_usdc_units} base units; net to convert {net_usdc_units} base units"
+                                )
+                                print(f"→ Nexus address validated, minting to {nexus_addr}")
+                                usdd_units = scale_amount(
+                                    net_usdc_units, USDC_DECIMALS, USDD_DECIMALS
+                                )
+                                mint_key = f"mint_usdd:{sig}"
+                                if _should_attempt(mint_key):
+                                    _record_attempt(mint_key)
+                                    if mint_usdd(nexus_addr, usdd_units, sig):
+                                        print(
+                                            f"✓ Successfully minted {usdd_units} USDD base units to {nexus_addr} (after fee)"
+                                        )
+                                    else:
+                                        print(f"✗ Failed to mint USDD to {nexus_addr}")
+                                        # Don't mark as processed if minting failed
+                                        mark_processed = False
+                                else:
+                                    print("↷ Skipping mint attempt (cooldown/max attempts reached)")
                     else:
                         # Bad memo format; refund USDC back
                         print("Bad memo format; initiating refund to sender:", memo_data)
