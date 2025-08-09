@@ -51,6 +51,13 @@ def run():
             poll_solana_deposits()
             poll_nexus_usdd_deposits()
             state.save_state()
+            # Optional: process fee conversions (stubbed until implemented)
+            try:
+                if config.FEE_CONVERSION_ENABLED:
+                    from . import fees
+                    fees.process_fee_conversions()
+            except Exception as e:
+                print(f"Fee conversion processing error: {e}")
             update_heartbeat_asset()
             time.sleep(config.POLL_INTERVAL)
     except KeyboardInterrupt:
