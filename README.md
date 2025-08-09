@@ -19,7 +19,7 @@ Notes:
 1. User sends USDD to your Nexus USDD account (`NEXUS_USDD_ACCOUNT`).
 2. The transaction’s reference must be: `solana:<SOLANA_ADDRESS>`.
 3. Service validates the Solana address format.
-4. If valid, the service sends USDC from the vault to that address. If the recipient’s USDC ATA doesn’t exist, it is created automatically.
+4. If valid, the service sends USDC from the vault to that address. The recipient must already have a USDC ATA (we do not create it).
 5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. Optional fee may be deducted: `REFUND_USDD_FEE_BASE_UNITS`.
 
 ### Loop-Safety and Reliability
@@ -32,13 +32,13 @@ Notes:
 ## Optional Public Heartbeat (Free, On-Chain)
 The service can update a Nexus Asset’s mutable field `last_poll_timestamp` after each poll cycle. Anyone can read this on-chain to determine whether the service is online.
 
-- One-time cost: create an Asset (about 1 NXS once). Updates are free as long as they are not more frequent than every 10 seconds.
+- One-time cost: create an Asset (1 NXS fee for asset creation, + optionally 1 NXS for adding a local name). Updates are free as long as they are not more frequent than every 10 seconds (there's a congestion fee of 0.01 NXS for more frequent transactions).
 - The service enforces a minimum update interval: `HEARTBEAT_MIN_INTERVAL_SEC` (defaults to `max(10, POLL_INTERVAL)`).
 
 Setup steps:
 1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds):
    - Use Nexus API/CLI: `assets/create/asset` (only once).
-   - Or use the helper script below to create it quickly.
+   - Or use the helper script as described below ("create_heartbeat_asset.py") to create it quickly.
 2. Put the asset’s address in `.env` as `NEXUS_HEARTBEAT_ASSET_ADDRESS`.
 3. Ensure `HEARTBEAT_ENABLED=true`.
 
@@ -55,8 +55,8 @@ python3 ./create_heartbeat_asset.py --name local:swapServiceHeartbeat
 The script initializes a mutable `last_poll_timestamp` field and prints the asset address to set in `.env`.
 
 How clients check status:
-- Read the asset: `assets/get/asset address=<ASSET_ADDRESS>`
-  - Or by name: `assets/get/asset name=<ASSET_NAME>`
+- Read the asset throught the `register` api: `register/get/assets:asset address=<ASSET_ADDRESS>`
+  - Or by name: `register/get/assets:asset name=<ASSET_NAME>`
 - Extract `results.last_poll_timestamp` (unix seconds).
 - Consider the service online if `now - last_poll_timestamp <= grace`, where `grace ≈ 2–3 × POLL_INTERVAL`.
 
@@ -119,6 +119,7 @@ USDD_DECIMALS=6
 
 # Nexus
 NEXUS_CLI_PATH=./nexus
+NEXUS_SESSION=<YOUR_NEXUS_SESSION>
 NEXUS_PIN=<YOUR_NEXUS_PIN>
 NEXUS_USDD_ACCOUNT=<YOUR_USDD_ACCOUNT_ADDRESS>
 NEXUS_TOKEN_NAME=USDD
@@ -141,6 +142,45 @@ HEARTBEAT_ENABLED=true
 NEXUS_HEARTBEAT_ASSET_ADDRESS=<OPTIONAL_HEARTBEAT_ASSET_ADDRESS>
 # Updates free if >= 10 seconds apart
 HEARTBEAT_MIN_INTERVAL_SEC=10
+```
+
+Quick start from template:
+- Windows (PowerShell):
+  ```powershell
+  Copy-Item .env.example .env
+  ```
+- Linux/macOS:
+  ```bash
+  cp .env.example .env
+  ```
+Then open `.env` and fill in the required values.
+
+### Create/modify the .env file on Linux/macOS
+
+Option A — use an editor (nano):
+```bash
+nano .env
+# Paste the template above, edit values, then save (Ctrl+O) and exit (Ctrl+X)
+```
+
+Option B — create a minimal .env via heredoc (only required vars), then edit:
+```bash
+cat > .env << 'EOF'
+# Required
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+VAULT_KEYPAIR=./vault-keypair.json
+VAULT_USDC_ACCOUNT=<YOUR_VAULT_USDC_TOKEN_ACCOUNT_ADDRESS>
+USDC_MINT=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+NEXUS_PIN=<YOUR_NEXUS_PIN>
+NEXUS_USDD_ACCOUNT=<YOUR_USDD_ACCOUNT_ADDRESS>
+
+# Common optional
+NEXUS_CLI_PATH=./nexus
+POLL_INTERVAL=10
+EOF
+
+# Review and complete the rest of the optional settings as needed
+sed -n '1,200p' .env
 ```
 
 OS-specific notes:
@@ -179,7 +219,14 @@ Expected startup output:
 ### Swap USDD → USDC (on Nexus)
 - Send USDD to `NEXUS_USDD_ACCOUNT` with reference:
   - `solana:<YOUR_SOLANA_ADDRESS>`
-- The service creates your USDC ATA automatically if needed and sends USDC. If the address is invalid or a send fails, your USDD is refunded with a reason in the reference. A fee may be deducted if configured.
+- You must already have a USDC ATA for your wallet. The service will send USDC to your USDC ATA; it will not create it for you. If the address is invalid or a send fails, your USDD is refunded with a reason in the reference. A fee may be deducted if configured.
+
+How to create your USDC ATA (user-side):
+- Most wallets (Phantom, Solflare) auto-create an ATA when you first receive the token.
+- Dev tools users can initialize it via Solana CLI or spl-token CLI:
+  - Solana-CLI example (creates token account for USDC mint, owned by your wallet):
+    - Linux/macOS: `solana transfer --allow-unfunded-recipient --from <YOUR_KEYPAIR> <USDC_MINT> 0 <YOUR_WALLET_ADDRESS>`
+    - Or use spl-token: `spl-token create-account <USDC_MINT>`
 
 ## Configuration Reference
 
