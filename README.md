@@ -183,6 +183,9 @@ EOF
 sed -n '1,200p' .env
 ```
 
+Note on NEXUS_SESSION:
+- `NEXUS_SESSION` is optional. The current service does not read it, but if your Nexus node/CLI is configured to require a session token, you can set it in `.env` and configure your CLI wrapper accordingly.
+
 OS-specific notes:
 - Linux/macOS: ensure the Nexus CLI is executable. If you keep it in the repo root, run:
   - `chmod +x ./nexus`
@@ -256,9 +259,15 @@ How to create your USDC ATA (user-side):
 | HEARTBEAT_MIN_INTERVAL_SEC | Min seconds between heartbeat updates | ❌ | max(10, POLL_INTERVAL) |
 
 ## Security Notes
-- Keep `vault-keypair.json` and `.env` secure. Never commit them.
-- Ensure the vault has enough SOL to cover fees and ATA creation.
-- PIN is masked in logs for Nexus CLI calls.
+- Keep secrets out of git: ensure `.env` and `vault-keypair.json` are ignored and stored securely.
+- Least-privilege vault key: use a dedicated Solana keypair for this service and fund it only with what’s needed (SOL for tx fees; USDC for payouts). Avoid reusing personal keys.
+- RPC integrity: use trusted Solana RPC endpoints (self-hosted or reputable providers). Consider rate limits and lags when setting `POLL_INTERVAL`.
+- Nexus CLI integrity: pin a specific CLI build and verify its checksum when updating. Restrict execute permissions to the service user.
+- State file permissions: `processed_sigs.json`, `processed_nexus_txs.json`, and `attempt_state.json` should be writable only by the service user (e.g., `chmod 600` on Linux/macOS).
+- Logging hygiene: the service masks the PIN in CLI logs; avoid shell tracing that could echo command arguments.
+- Refund loops: attempts/cooldowns help prevent fee-draining loops. If you reduce cooldowns, monitor logs for repeating failures.
+- Test safely: try on Solana Devnet or a Nexus test environment first; verify both swap directions and refund paths.
+- Backups and rotation: back up the vault keypair securely; rotate immediately if compromised.
 
 ## Troubleshooting
 - Unresolved imports: run `python -m pip install -r requirements.txt`.
