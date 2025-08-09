@@ -82,11 +82,38 @@ def poll_nexus_usdd_deposits():
                             else:
                                 print("Cannot determine sender Nexus address; skipping refund")
                                 mark_processed = False
-                        elif solana_client.ensure_send_usdc(sol_addr, usdc_units):
-                            print(f"Sent {usdc_units} USDC units to {sol_addr}")
                         else:
-                            print("USDC send failed")
-                            mark_processed = False
+                            send_key = f"send_usdc:{tx_id}"
+                            if state.should_attempt(send_key):
+                                state.record_attempt(send_key)
+                                if solana_client.ensure_send_usdc(sol_addr, usdc_units):
+                                    print(f"Sent {usdc_units} USDC units to {sol_addr}")
+                                else:
+                                    print("USDC send failed")
+                                    attempts = int((state.attempt_state.get(send_key) or {}).get("attempts", 0))
+                                    if attempts >= 2:
+                                        sender_addr = _get_sender_addr(tx)
+                                        if sender_addr:
+                                            reason = f"USDC send failed after retries to {sol_addr}"
+                                            refund_key = f"refund_usdd:{tx_id}"
+                                            if state.should_attempt(refund_key):
+                                                state.record_attempt(refund_key)
+                                                if nexus_client.refund_usdd(sender_addr, usdd_units, reason):
+                                                    print("Refunded USDD to sender after repeated send failures")
+                                                else:
+                                                    print("USDD refund failed")
+                                                    mark_processed = False
+                                            else:
+                                                print("Skipping refund attempt (cooldown/max attempts)")
+                                                mark_processed = False
+                                        else:
+                                            print("Cannot determine sender Nexus address; skipping refund")
+                                            mark_processed = False
+                                    else:
+                                        mark_processed = False
+                            else:
+                                print("Skipping send attempt (cooldown/max attempts)")
+                                mark_processed = False
                     else:
                         print("Invalid Solana address in reference")
                         mark_processed = False
