@@ -65,7 +65,7 @@ def load_vault_keypair() -> Keypair:
 
 
 def ensure_send_usdc(to_owner_addr: str, amount_base_units: int) -> bool:
-    """Send USDC base units to a Solana owner address. Creates ATA if missing."""
+    """Send USDC base units to a Solana owner address. Requires recipient ATA to already exist."""
     try:
         kp = load_vault_keypair()
         client = Client(config.RPC_URL)
@@ -76,7 +76,8 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int) -> bool:
         dest_ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
         ata_info = client.get_account_info(dest_ata).get("result", {}).get("value")
         if ata_info is None:
-            tx.add(create_associated_token_account(payer=kp.public_key, owner=owner, mint=config.USDC_MINT))
+            print("Recipient USDC ATA is missing; not creating it. Ask recipient to initialize their USDC ATA.")
+            return False
 
         tx.add(
             transfer_checked(
@@ -120,3 +121,15 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
             except Exception:
                 continue
     return None
+
+
+def has_usdc_ata(owner_addr: str) -> bool:
+    """Return True if the owner's USDC ATA exists."""
+    try:
+        client = Client(config.RPC_URL)
+        owner = PublicKey(owner_addr)
+        ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
+        info = client.get_account_info(ata).get("result", {}).get("value")
+        return info is not None
+    except Exception:
+        return False
