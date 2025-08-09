@@ -46,3 +46,15 @@ ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")
 NEXUS_HEARTBEAT_ASSET_ADDRESS = os.getenv("NEXUS_HEARTBEAT_ASSET_ADDRESS")
 HEARTBEAT_MIN_INTERVAL_SEC = max(10, int(os.getenv("HEARTBEAT_MIN_INTERVAL_SEC", str(POLL_INTERVAL))))
+
+# Fees (optional)
+FEE_BPS_USDC_TO_USDD = int(os.getenv("FEE_BPS_USDC_TO_USDD", "0"))  # fee on Solana→Nexus path, charged in USDC units
+FEE_BPS_USDD_TO_USDC = int(os.getenv("FEE_BPS_USDD_TO_USDC", "0"))  # fee on Nexus→Solana path, charged in USDC units
+FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
+
+# Fee conversions (scaffolding / optional)
+FEE_CONVERSION_ENABLED = os.getenv("FEE_CONVERSION_ENABLED", "false").lower() in ("1","true","yes","on")
+FEE_CONVERSION_MIN_USDC = int(os.getenv("FEE_CONVERSION_MIN_USDC", "0"))  # minimum USDC base units before attempting conversions
+SOL_TOPUP_MIN_LAMPORTS = int(os.getenv("SOL_TOPUP_MIN_LAMPORTS", "0"))
+SOL_TOPUP_TARGET_LAMPORTS = int(os.getenv("SOL_TOPUP_TARGET_LAMPORTS", "0"))
+NEXUS_NXS_TOPUP_MIN = int(os.getenv("NEXUS_NXS_TOPUP_MIN", "0"))  # units TBD by Nexus, placeholder
