@@ -1,5 +1,5 @@
 from decimal import Decimal
-from . import config, state, nexus_client, solana_client
+from . import config, state, nexus_client, solana_client, fees
 
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
@@ -80,8 +80,12 @@ def poll_solana_deposits():
                                     print("Skipping refund attempt (cooldown/max attempts)")
                                     mark_processed = False
                             else:
-                                # Apply fee? In this modular version we skip fee math and use straight passthrough
-                                usdd_units = scale_amount(amount_usdc_units, config.USDC_DECIMALS, config.USDD_DECIMALS)
+                                # Apply optional fee on USDC→USDD path, retained in USDC units
+                                fee_usdc = (amount_usdc_units * max(0, config.FEE_BPS_USDC_TO_USDD)) // 10000
+                                net_usdc = max(0, amount_usdc_units - fee_usdc)
+                                if fee_usdc > 0:
+                                    fees.add_usdc_fee(fee_usdc)
+                                usdd_units = scale_amount(net_usdc, config.USDC_DECIMALS, config.USDD_DECIMALS)
                                 mint_key = f"mint_usdd:{sig}"
                                 if state.should_attempt(mint_key):
                                     state.record_attempt(mint_key)
