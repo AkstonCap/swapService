@@ -133,3 +133,46 @@ def has_usdc_ata(owner_addr: str) -> bool:
         return info is not None
     except Exception:
         return False
+
+
+def _create_memo_ix(text: str) -> TransactionInstruction:
+    data = text.encode("utf-8")
+    return TransactionInstruction(program_id=config.MEMO_PROGRAM_ID, keys=[], data=data)
+
+
+def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str) -> bool:
+    """Refund USDC back to the sender's token account with a memo reason."""
+    try:
+        kp = load_vault_keypair()
+        client = Client(config.RPC_URL)
+        dest_token_acc = PublicKey(source_token_account)
+
+        memo = reason if len(reason) <= 120 else reason[:117] + "..."
+
+        tx = Transaction()
+        tx.fee_payer = kp.public_key
+        tx.add(
+            transfer_checked(
+                program_id=TOKEN_PROGRAM_ID,
+                source=config.VAULT_USDC_ACCOUNT,
+                mint=config.USDC_MINT,
+                dest=dest_token_acc,
+                owner=kp.public_key,
+                amount=amount_base_units,
+                decimals=config.USDC_DECIMALS,
+                signers=[],
+            )
+        )
+        tx.add(_create_memo_ix(memo))
+
+        resp = client.send_transaction(tx, kp)
+        sig = resp.get("result") if isinstance(resp, dict) else resp
+        try:
+            Client(config.RPC_URL).confirm_transaction(sig, commitment="confirmed")
+        except Exception:
+            pass
+        print(f"Refunded USDC tx sig: {sig}")
+        return True
+    except Exception as e:
+        print(f"Error refunding USDC: {e}")
+        return False
