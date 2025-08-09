@@ -1,6 +1,6 @@
 from decimal import Decimal
 from solana.publickey import PublicKey
-from . import config, state, solana_client, nexus_client
+from . import config, state, solana_client, nexus_client, fees
 
 
 def parse_amount_to_base_units(val, decimals: int) -> int:
@@ -86,8 +86,13 @@ def poll_nexus_usdd_deposits():
                             send_key = f"send_usdc:{tx_id}"
                             if state.should_attempt(send_key):
                                 state.record_attempt(send_key)
-                                if solana_client.ensure_send_usdc(sol_addr, usdc_units):
-                                    print(f"Sent {usdc_units} USDC units to {sol_addr}")
+                                # Apply optional fee on USDD→USDC path before sending
+                                fee_usdc = (usdc_units * max(0, config.FEE_BPS_USDD_TO_USDC)) // 10000
+                                net_usdc = max(0, usdc_units - fee_usdc)
+                                if solana_client.ensure_send_usdc(sol_addr, net_usdc):
+                                    print(f"Sent {net_usdc} USDC units to {sol_addr}")
+                                    if fee_usdc > 0:
+                                        fees.add_usdc_fee(fee_usdc)
                                 else:
                                     print("USDC send failed")
                                     attempts = int((state.attempt_state.get(send_key) or {}).get("attempts", 0))
