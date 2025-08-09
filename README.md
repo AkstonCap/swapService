@@ -74,7 +74,7 @@ python -m pip install -r requirements.txt
 ```
 Or explicitly:
 ```powershell
-python -m pip install python-dotenv solana solders spl-token
+python -m pip install python-dotenv solana solders
 ```
 
 Linux/macOS:
@@ -83,7 +83,7 @@ python3 -m pip install -r requirements.txt
 ```
 Or explicitly:
 ```bash
-python3 -m pip install python-dotenv solana solders spl-token
+python3 -m pip install python-dotenv solana solders
 ```
 
 Optional: create and use a virtual environment
@@ -215,6 +215,7 @@ Expected startup output:
 
 ## Troubleshooting
 - Unresolved imports: run `python -m pip install -r requirements.txt`.
+- ImportError: No module named spl.token: The `spl.token` module is bundled with the `solana` Python package (we no longer install a separate `spl-token`). Ensure `solana>=0.30,<0.31` is installed in the same environment.
 - No memo found (USDC → USDD): Wallet must include a Memo in the same transaction.
 - Wrong token or invalid Nexus address: USDC is refunded with a reason memo.
 - Invalid Solana address (USDD → USDC): USDD is refunded to sender with a reason.
