@@ -85,6 +85,48 @@ def get_vault_sol_balance() -> int:
     except Exception:
         return 0
 
+def get_token_account_balance(token_account_addr: str) -> int:
+    try:
+        client = Client(config.RPC_URL)
+        resp = client.get_token_account_balance(PublicKey(token_account_addr))
+        amt = (((resp or {}).get("result") or {}).get("value") or {}).get("amount")
+        return int(amt or 0)
+    except Exception:
+        return 0
+
+def transfer_usdc_between_accounts(source_token_account: str, dest_token_account: str, amount_base_units: int) -> bool:
+    """Transfer USDC between two token accounts owned by the vault wallet."""
+    try:
+        if amount_base_units <= 0:
+            return True
+        kp = load_vault_keypair()
+        client = Client(config.RPC_URL)
+        tx = Transaction()
+        tx.fee_payer = kp.public_key
+        tx.add(
+            transfer_checked(
+                program_id=TOKEN_PROGRAM_ID,
+                source=PublicKey(source_token_account),
+                mint=config.USDC_MINT,
+                dest=PublicKey(dest_token_account),
+                owner=kp.public_key,
+                amount=amount_base_units,
+                decimals=config.USDC_DECIMALS,
+                signers=[],
+            )
+        )
+        resp = client.send_transaction(tx, kp)
+        sig = resp.get("result") if isinstance(resp, dict) else resp
+        try:
+            client.confirm_transaction(sig, commitment="confirmed")
+        except Exception:
+            pass
+        print(f"USDC transfer token->token sig: {sig}")
+        return True
+    except Exception as e:
+        print(f"Error transferring USDC accounts: {e}")
+        return False
+
 def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int = 50) -> bool:
     """Swap USDC->SOL using Jupiter. Returns True on success.
     Requires: config.USDC_MINT and vault keypair with USDC token account.
@@ -149,8 +191,10 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
         print(f"[fees] Jupiter swap error: {e}")
         return False
 
-def ensure_send_usdc(to_owner_addr: str, amount_base_units: int) -> bool:
-    """Send USDC base units to a Solana owner address. Requires recipient ATA to already exist."""
+def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | None = None) -> bool:
+    """Send USDC base units to a Solana owner address. Requires recipient ATA to already exist.
+    If memo is provided, attach it to the transaction for idempotency tracing.
+    """
     try:
         kp = load_vault_keypair()
         client = Client(config.RPC_URL)
@@ -176,6 +220,11 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int) -> bool:
                 signers=[],
             )
         )
+        if memo:
+            try:
+                tx.add(_create_memo_ix(memo))
+            except Exception:
+                pass
         resp = client.send_transaction(tx, kp)
         sig = resp.get("result") if isinstance(resp, dict) else resp
         try:
@@ -186,6 +235,45 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int) -> bool:
         return True
     except Exception as e:
         print(f"Error sending USDC: {e}")
+        return False
+
+
+def was_usdc_sent_for_nexus_tx(nexus_txid: str, to_owner_addr: str, lookback: int = 40) -> bool:
+    """Check recent vault USDC outgoing txs for a memo 'NEXUS_TX:<txid>'.
+    Returns True if found a confirmed tx to the recipient ATA with that memo.
+    """
+    try:
+        client = Client(config.RPC_URL)
+        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=max(10, lookback))
+        sig_list = [r.get("signature") for r in (sigs_resp.get("result") or []) if r.get("signature")]
+        if not sig_list:
+            return False
+        # Resolve recipient ATA once
+        owner = PublicKey(to_owner_addr)
+        dest_ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
+        target_memo = f"NEXUS_TX:{nexus_txid}"
+        for sig in sig_list:
+            tx = client.get_transaction(sig, encoding="jsonParsed").get("result")
+            if not tx:
+                continue
+            instrs = tx["transaction"]["message"]["instructions"]
+            memo_text = None
+            try:
+                memo_text = extract_memo_from_instructions(instrs)
+            except Exception:
+                memo_text = None
+            if memo_text != target_memo:
+                continue
+            # check transfer destination matches dest_ata
+            for ix in instrs:
+                if ix.get("program") == "spl-token" and ix.get("parsed"):
+                    p = ix["parsed"]
+                    if p.get("type") in ("transfer", "transferChecked"):
+                        info = p.get("info", {})
+                        if info.get("destination") == str(dest_ata):
+                            return True
+        return False
+    except Exception:
         return False
 
 
