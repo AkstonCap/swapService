@@ -17,7 +17,9 @@ def poll_nexus_usdd_deposits():
     import json
     import subprocess
 
-    cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={config.NEXUS_USDD_ACCOUNT}"]
+    # Use Treasury for main credits; tiny deposits can be routed to LOCAL later.
+    treasury_addr = config.NEXUS_USDD_TREASURY_ACCOUNT
+    cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={treasury_addr}"]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if res.returncode != 0:
@@ -43,16 +45,40 @@ def poll_nexus_usdd_deposits():
                         return addr
             return None
 
+        # Read heartbeat waterline and apply a safety margin
+        from .main import read_heartbeat_waterlines
+        _, wl_nexus = read_heartbeat_waterlines()
+        wl_cutoff = int(max(0, wl_nexus - config.HEARTBEAT_WATERLINE_SAFETY_SEC)) if config.HEARTBEAT_WATERLINE_ENABLED else 0
+
         for tx in txs:
             tx_id = tx.get("txid")
             if not tx_id or tx_id in state.processed_nexus_txs:
                 continue
             mark_processed = True
+            ts = int(tx.get("timestamp", 0) or tx.get("time", 0) or tx.get("created", 0) or 0)
+            if wl_cutoff and ts and ts < wl_cutoff:
+                # Older than waterline; skip safely (idempotency protects if we later re-check)
+                continue
 
             confirmed = bool(tx.get("confirmed", False)) or tx.get("confirmation", 0) > 0 or tx.get("confirmations", 0) > 0
             if tx.get("type") == "CREDIT" and confirmed:
                 usdd_units = parse_amount_to_base_units(tx.get("amount", 0), config.USDD_DECIMALS)
                 usdc_units = int(usdd_units)  # same decimals by default; adjust if needed
+                # Tiny USDD routing: if <= flat fee threshold, route to local account (no USDC sent)
+                if usdd_units <= max(0, int(config.FLAT_FEE_USDD_UNITS)):
+                    route_key = f"route_tiny_usdd:{tx_id}"
+                    if state.should_attempt(route_key):
+                        state.record_attempt(route_key)
+                        if nexus_client.send_tiny_usdd_to_local(usdd_units, note=f"TINY_USDD:{tx_id}"):
+                            print(f"Routed tiny USDD {usdd_units} to local account; marked processed")
+                            state.processed_nexus_txs.add(tx_id)
+                            continue
+                        else:
+                            print("Tiny USDD routing failed; will retry after cooldown")
+                            mark_processed = False
+                    else:
+                        print("Skipping tiny USDD routing attempt (cooldown/max attempts)")
+                        mark_processed = False
                 reference = tx.get("reference", "") or ""
                 if reference.startswith("solana:"):
                     sol_addr = reference.split("solana:", 1)[1].strip()
@@ -89,7 +115,13 @@ def poll_nexus_usdd_deposits():
                                 # Apply optional fee on USDD→USDC path before sending
                                 fee_usdc = (usdc_units * max(0, config.FEE_BPS_USDD_TO_USDC)) // 10000
                                 net_usdc = max(0, usdc_units - fee_usdc)
-                                if solana_client.ensure_send_usdc(sol_addr, net_usdc):
+                                # Idempotency: skip if already sent for this Nexus txid
+                                if solana_client.was_usdc_sent_for_nexus_tx(tx_id, sol_addr):
+                                    print("Detected prior USDC send for this Nexus tx; marking processed")
+                                    state.processed_nexus_txs.add(tx_id)
+                                    continue
+                                memo = f"NEXUS_TX:{tx_id}"
+                                if solana_client.ensure_send_usdc(sol_addr, net_usdc, memo=memo):
                                     print(f"Sent {net_usdc} USDC units to {sol_addr}")
                                     if fee_usdc > 0:
                                         fees.add_usdc_fee(fee_usdc)
