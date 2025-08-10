@@ -78,6 +78,73 @@ def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     ref = reason if len(reason) <= 120 else reason[:117] + "..."
     return debit_usdd(to_addr, amount_usdd_units, ref)
 
+def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_units: int, reference: str) -> bool:
+    """Transfer USDD between two Nexus token accounts using finance/debit/account (no mint).
+    from_addr and to_addr are account addresses (registers) for the USDD token.
+    """
+    if not config.NEXUS_PIN:
+        print("ERROR: NEXUS_PIN not set")
+        return False
+    amt_str = _base_units_to_decimal_str(amount_usdd_units, config.USDD_DECIMALS)
+    cmd = [
+        config.NEXUS_CLI,
+        "finance/debit/account",
+        f"from={from_addr}",
+        f"to={to_addr}",
+        f"amount={amt_str}",
+        f"reference={reference}",
+        f"pin={config.NEXUS_PIN}",
+    ]
+    try:
+        code, out, err = _run(cmd, timeout=30)
+        if code != 0:
+            print("Nexus transfer error:", err or out)
+            return False
+        return True
+    except Exception as e:
+        print("Nexus transfer exception:", e)
+        return False
+
+def send_tiny_usdd_to_local(amount_usdd_units: int, note: str = "TINY_USDD") -> bool:
+    to_addr = config.NEXUS_USDD_LOCAL_ACCOUNT or config.NEXUS_USDD_TREASURY_ACCOUNT
+    from_addr = config.NEXUS_USDD_TREASURY_ACCOUNT
+    if not to_addr or not from_addr:
+        print("No local/treasury USDD account configured; skipping tiny USDD routing")
+        return False
+    # Move funds from treasury to local to avoid minting new supply
+    return transfer_usdd_between_accounts(from_addr, to_addr, amount_usdd_units, note)
+
+
+def was_usdd_minted_for_sig(to_addr: str, sol_sig: str, lookback: int = 50) -> bool:
+    """Check recipient account's recent transactions for a CREDIT with reference 'USDC_TX:<sig>'."""
+    ref = f"USDC_TX:{sol_sig}"
+    cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={to_addr}"]
+    try:
+        code, out, err = _run(cmd, timeout=15)
+        if code != 0:
+            return False
+        data = json.loads(out)
+        txs = data if isinstance(data, list) else [data]
+        count = 0
+        for tx in txs:
+            if not isinstance(tx, dict):
+                continue
+            # Only scan up to lookback entries
+            count += 1
+            if count > max(10, lookback):
+                break
+            t = (tx.get("type") or "").upper()
+            if t != "CREDIT":
+                continue
+            r = tx.get("reference") or tx.get("ref") or ""
+            if str(r).strip() == ref:
+                confirmed = bool(tx.get("confirmed", False)) or (tx.get("confirmation", 0) or 0) > 0 or (tx.get("confirmations", 0) or 0) > 0
+                if confirmed:
+                    return True
+        return False
+    except Exception:
+        return False
+
 
 # --- Nexus DEX (market) helpers ---
 def list_market_asks(market: str = "NXS/USDD", limit: int = 10) -> list[Dict[str, Any]]:
@@ -170,7 +237,7 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
 
     # Mint USDD into our own account to cover plan_cost
     mint_units = int((plan_cost * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value())
-    if not debit_usdd(config.NEXUS_USDD_ACCOUNT, mint_units, "FEE_CONV_NXS"):
+    if not debit_usdd(config.NEXUS_USDD_TREASURY_ACCOUNT, mint_units, "FEE_CONV_NXS"):
         print("Nexus: failed to mint USDD for NXS purchase")
         return 0
 
@@ -189,3 +256,41 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
 
     spent_units = int((spent_total * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value())
     return spent_units
+
+
+# --- Treasury and metrics ---
+def get_circulating_usdd_units() -> int:
+    cmd = [config.NEXUS_CLI, "finance/get/token/circulatingsupply", f"name={config.NEXUS_TOKEN_NAME}"]
+    try:
+        code, out, err = _run(cmd, timeout=10)
+        if code != 0:
+            print("Nexus circulating supply error:", err or out)
+            return 0
+        data = json.loads(out)
+        # Accept either raw number or an object containing value/amount
+        if isinstance(data, (int, float, str)):
+            s = str(data)
+            dec = Decimal(s)
+        elif isinstance(data, dict):
+            for k in ("value", "amount", "supply", "result"):
+                if k in data:
+                    try:
+                        dec = Decimal(str(data[k]))
+                        break
+                    except Exception:
+                        continue
+            else:
+                return 0
+        else:
+            return 0
+        units = int((dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value())
+        return units
+    except Exception as e:
+        print("Nexus circulating supply exception:", e)
+        return 0
+
+
+def debit_usdd_to_self(amount_usdd_units: int, reference: str) -> bool:
+    # Mint/credit into our treasury USDD account (config.NEXUS_USDD_TREASURY_ACCOUNT)
+    return debit_usdd(config.NEXUS_USDD_TREASURY_ACCOUNT, amount_usdd_units, reference)
+
