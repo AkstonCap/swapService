@@ -9,18 +9,21 @@ A Python service that enables automatic swapping between USDC (Solana) and USDD 
 2. The same transaction must include a Memo: `nexus:<NEXUS_ADDRESS>`.
 3. Service validates the Nexus address exists and is for the expected token (`NEXUS_TOKEN_NAME`, e.g., USDD).
 4. If valid, the service mints/sends USDD on Nexus to that address (amount normalized by decimals).
-5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. Optional fee may be deducted: `REFUND_USDC_FEE_BASE_UNITS`.
+5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDC`) is always retained on this path. On successful swaps, a dynamic fee in bps (`FEE_BPS_USDC_TO_USDD`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
 
 Notes:
 - Amounts are handled in base units and normalized between `USDC_DECIMALS` and `USDD_DECIMALS`.
 - The refund is sent to the original SPL token account the deposit came from (not a wallet owner).
 
 ### USDD → USDC (Nexus to Solana)
-1. User sends USDD to your Nexus USDD account (`NEXUS_USDD_ACCOUNT`).
+1. User sends USDD to your Nexus USDD Treasury account (`NEXUS_USDD_TREASURY_ACCOUNT`).
 2. The transaction’s reference must be: `solana:<SOLANA_ADDRESS>`.
 3. Service validates the Solana address format.
 4. If valid, the service sends USDC from the vault to that address. The recipient must already have a USDC ATA (we do not create it).
 5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. Optional fee may be deducted: `REFUND_USDD_FEE_BASE_UNITS`.
+
+Policy notes on USDD → USDC:
+- Tiny USDD credits ≤ `FLAT_FEE_USDD` are routed to your `NEXUS_USDD_LOCAL_ACCOUNT` (no USDC is sent) and the item is marked processed.
 
 ### Loop-Safety and Reliability
 - Actions that can incur fees (mint, send, refunds) are guarded by attempt limits and cooldowns:
@@ -121,7 +124,8 @@ USDD_DECIMALS=6
 NEXUS_CLI_PATH=./nexus
 NEXUS_SESSION=<YOUR_NEXUS_SESSION>
 NEXUS_PIN=<YOUR_NEXUS_PIN>
-NEXUS_USDD_ACCOUNT=<YOUR_USDD_ACCOUNT_ADDRESS>
+NEXUS_USDD_TREASURY_ACCOUNT=<YOUR_USDD_TREASURY_ACCOUNT_ADDRESS>
+NEXUS_USDD_LOCAL_ACCOUNT=<YOUR_LOCAL_USDD_ACCOUNT_ADDRESS>
 NEXUS_TOKEN_NAME=USDD
 NEXUS_RPC_HOST=http://127.0.0.1:8399
 
@@ -133,9 +137,15 @@ ATTEMPT_STATE_FILE=attempt_state.json
 MAX_ACTION_ATTEMPTS=3
 ACTION_RETRY_COOLDOWN_SEC=300
 
-# Optional refund fees (base units)
-REFUND_USDC_FEE_BASE_UNITS=0
-REFUND_USDD_FEE_BASE_UNITS=0
+# Fees & policy
+# Flat fee for USDC→USDD (taken even if refund is required)
+FLAT_FEE_USDC=0.1
+# Threshold for tiny USDD deposits; tiny USDD is treated as dust on USDD→USDC
+FLAT_FEE_USDD=0.1
+# Dynamic fee (bps) on successful USDC→USDD swaps (0.1% = 10 bps)
+FEE_BPS_USDC_TO_USDD=10
+# No dynamic fee on USDD→USDC by default
+FEE_BPS_USDD_TO_USDC=0
 
 # Optional on-chain heartbeat
 HEARTBEAT_ENABLED=true
@@ -172,7 +182,8 @@ VAULT_KEYPAIR=./vault-keypair.json
 VAULT_USDC_ACCOUNT=<YOUR_VAULT_USDC_TOKEN_ACCOUNT_ADDRESS>
 USDC_MINT=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 NEXUS_PIN=<YOUR_NEXUS_PIN>
-NEXUS_USDD_ACCOUNT=<YOUR_USDD_ACCOUNT_ADDRESS>
+NEXUS_USDD_TREASURY_ACCOUNT=<YOUR_USDD_TREASURY_ACCOUNT_ADDRESS>
+NEXUS_USDD_LOCAL_ACCOUNT=<YOUR_LOCAL_USDD_ACCOUNT_ADDRESS>
 
 # Common optional
 NEXUS_CLI_PATH=./nexus
@@ -206,7 +217,7 @@ Expected startup output:
 🌐 Starting bidirectional swap service
    Solana RPC: <RPC_URL>
    USDC Vault: <VAULT_USDC_ACCOUNT>
-   USDD Account: <NEXUS_USDD_ACCOUNT>
+  USDD Treasury: <NEXUS_USDD_TREASURY_ACCOUNT>
    Monitoring:
    - USDC → USDD: Solana deposits with Nexus address in memo
    - USDD → USDC: USDD deposits with Solana address in reference
@@ -217,12 +228,14 @@ Expected startup output:
 ### Swap USDC → USDD (on Solana)
 - Send USDC to `VAULT_USDC_ACCOUNT` with a Memo in the same transaction:
   - `nexus:<YOUR_NEXUS_ADDRESS>`
-- If the memo is missing/invalid or the Nexus address is not a valid `NEXUS_TOKEN_NAME` account, your USDC is refunded to the source SPL token account with a reason memo. A fee may be deducted if configured.
+- If the memo is missing/invalid or the Nexus address is not a valid `NEXUS_TOKEN_NAME` account, your USDC is refunded to the source SPL token account with a reason memo. The flat fee is always retained on this path.
+- Tiny USDC deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
 
 ### Swap USDD → USDC (on Nexus)
-- Send USDD to `NEXUS_USDD_ACCOUNT` with reference:
+- Send USDD to `NEXUS_USDD_TREASURY_ACCOUNT` with reference:
   - `solana:<YOUR_SOLANA_ADDRESS>`
 - You must already have a USDC ATA for your wallet. The service will send USDC to your USDC ATA; it will not create it for you. If the address is invalid or a send fails, your USDD is refunded with a reason in the reference. A fee may be deducted if configured.
+- Tiny USDD deposits ≤ `FLAT_FEE_USDD` are routed to the service's local USDD account (no USDC is sent).
 
 How to create your USDC ATA (user-side):
 - Most wallets (Phantom, Solflare) auto-create an ATA when you first receive the token.
@@ -242,7 +255,13 @@ How to create your USDC ATA (user-side):
 | USDC_DECIMALS | USDC token decimals (base units) | ❌ | 6 |
 | USDD_DECIMALS | USDD token decimals (base units) | ❌ | 6 |
 | NEXUS_PIN | Nexus account PIN | ✅ | - |
-| NEXUS_USDD_ACCOUNT | Your USDD account address | ✅ | - |
+| NEXUS_USDD_TREASURY_ACCOUNT | Your USDD treasury account address | ✅ | - |
+| NEXUS_USDD_LOCAL_ACCOUNT | Your local USDD account address (optional) | ❌ | - |
+| USDC_FEES_ACCOUNT | USDC fee token account (SPL) | ❌ | - |
+| FLAT_FEE_USDC | Flat fee (USDC) for Solana→Nexus | ❌ | 0.1 |
+| FLAT_FEE_USDD | Tiny threshold (USDD) for Nexus→Solana | ❌ | 0.1 |
+| FEE_BPS_USDC_TO_USDD | Dynamic fee bps on successful Solana→Nexus | ❌ | 10 |
+| FEE_BPS_USDD_TO_USDC | Dynamic fee bps on Nexus→Solana | ❌ | 0 |
 | NEXUS_CLI_PATH | Path to Nexus CLI | ❌ | ./nexus |
 | NEXUS_TOKEN_NAME | Token ticker used for validation | ❌ | USDD |
 | NEXUS_RPC_HOST | Nexus RPC host (if applicable) | ❌ | http://127.0.0.1:8399 |
