@@ -215,6 +215,99 @@ OS-specific notes:
   - Set `NEXUS_CLI_PATH=./nexus` (or an absolute path) in `.env`.
 - Windows (PowerShell): if the CLI is not in PATH, keep `NEXUS_CLI_PATH=./nexus` and run the service from the repo root so the relative path resolves.
 
+## Set up Solana accounts (vault and fees)
+
+These steps create the dedicated Solana keypair for the service, its USDC token account (ATA) to hold funds, and an optional separate USDC fee account.
+
+Prereqs:
+- Install Solana CLI and SPL Token CLI
+  - Windows: https://docs.solana.com/cli/install-solana-cli-tools#windows
+  - Linux/macOS: https://docs.solana.com/cli/install-solana-cli-tools
+- Have some SOL to pay for transactions (devnet: `solana airdrop 1`)
+
+1) Create a dedicated keypair for the service (vault)
+
+Windows (PowerShell):
+```powershell
+solana-keygen new -o .\vault-keypair.json
+solana config set -k .\vault-keypair.json -u https://api.mainnet-beta.solana.com
+solana address
+```
+Linux/macOS:
+```bash
+solana-keygen new -o ./vault-keypair.json
+solana config set -k ./vault-keypair.json -u https://api.mainnet-beta.solana.com
+solana address
+```
+Copy the printed address into `.env` as the owner of your vault (this is implied by the keypair). Fund it with some SOL.
+
+2) Create the vault USDC token account (ATA)
+
+With the vault keypair selected in `solana config`:
+
+Windows (PowerShell):
+```powershell
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+Linux/macOS:
+```bash
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+This prints a token account address (the ATA). Put that into `.env` as `VAULT_USDC_ACCOUNT`.
+
+3) Fund the vault with USDC
+
+- Mainnet: transfer USDC to `VAULT_USDC_ACCOUNT` from your exchange/custody.
+- Devnet: use the devnet USDC mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` and a test issuer; faucets are not officially provided.
+
+4) Optional: set up a separate USDC fee token account
+
+You can keep fees in the same vault ATA, but we recommend a separate account.
+
+Option A — Use the vault owner (simpler):
+
+Windows (PowerShell):
+```powershell
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+Linux/macOS:
+```bash
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+Record the printed token account address and set it in `.env` as `USDC_FEES_ACCOUNT`.
+
+Option B — Use a distinct fees owner:
+
+Windows (PowerShell):
+```powershell
+solana-keygen new -o .\fees-keypair.json
+setx SOLANA_KEYPAIR "%CD%\fees-keypair.json"
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+Linux/macOS:
+```bash
+solana-keygen new -o ./fees-keypair.json
+export SOLANA_KEYPAIR="$PWD/fees-keypair.json"
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+Use the printed token account address as `USDC_FEES_ACCOUNT` in `.env`. Fund the fees owner with a tiny amount of SOL if you plan to move funds from this account.
+
+5) Verify
+
+Windows (PowerShell):
+```powershell
+spl-token accounts --owner (solana address)
+```
+Linux/macOS:
+```bash
+spl-token accounts --owner "$(solana address)"
+```
+You should see an account for the USDC mint. Optionally check balances:
+
+```bash
+spl-token balance <TOKEN_ACCOUNT_ADDRESS>
+```
+
 ## Running the Service
 ```powershell
 python .\swapService.py
