@@ -20,7 +20,7 @@ Notes:
 2. The transaction’s reference must be: `solana:<SOLANA_ADDRESS>`.
 3. Service validates the Solana address format.
 4. If valid, the service sends USDC from the vault to that address. The recipient must already have a USDC ATA (we do not create it).
-5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. Optional fee may be deducted: `REFUND_USDD_FEE_BASE_UNITS`.
+5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. On successful sends, an optional dynamic fee (`FEE_BPS_USDD_TO_USDC`, default 0) may be retained; no fee is taken on refunds.
 
 Policy notes on USDD → USDC:
 - Tiny USDD credits ≤ `FLAT_FEE_USDD` are routed to your `NEXUS_USDD_LOCAL_ACCOUNT` (no USDC is sent) and the item is marked processed.
@@ -62,6 +62,11 @@ How clients check status:
   - Or by name: `register/get/assets:asset name=<ASSET_NAME>`
 - Extract `results.last_poll_timestamp` (unix seconds).
 - Consider the service online if `now - last_poll_timestamp <= grace`, where `grace ≈ 2–3 × POLL_INTERVAL`.
+
+Waterline (optional):
+- The service can also honor per-chain “waterline” timestamps stored on the same asset to bound how far back it scans:
+  - `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` (field names configurable via env)
+  - Pollers skip on-chain items strictly older than their respective waterline (with a small safety margin). Idempotency still prevents double-processing if you later move the waterline.
 
 ## Prerequisites
 - Python 3.8+
@@ -152,6 +157,13 @@ HEARTBEAT_ENABLED=true
 NEXUS_HEARTBEAT_ASSET_ADDRESS=<OPTIONAL_HEARTBEAT_ASSET_ADDRESS>
 # Updates free if >= 10 seconds apart
 HEARTBEAT_MIN_INTERVAL_SEC=10
+# Optional heartbeat waterline configuration
+HEARTBEAT_WATERLINE_ENABLED=true
+# These control which field names on the asset are used for waterlines
+HEARTBEAT_WATERLINE_SOLANA_FIELD=last_safe_timestamp_solana
+HEARTBEAT_WATERLINE_NEXUS_FIELD=last_safe_timestamp_usdd
+# Safety margin (seconds) subtracted from waterline when filtering
+HEARTBEAT_WATERLINE_SAFETY_SEC=120
 ```
 
 Quick start from template:
@@ -271,11 +283,17 @@ How to create your USDC ATA (user-side):
 | ATTEMPT_STATE_FILE | File for attempt/cooldown state | ❌ | attempt_state.json |
 | MAX_ACTION_ATTEMPTS | Max attempts per action (mint/send/refund) | ❌ | 3 |
 | ACTION_RETRY_COOLDOWN_SEC | Cooldown between attempts | ❌ | 300 |
-| REFUND_USDC_FEE_BASE_UNITS | Fee deducted from USDC refunds (base units) | ❌ | 0 |
-| REFUND_USDD_FEE_BASE_UNITS | Fee deducted from USDD refunds (base units) | ❌ | 0 |
 | HEARTBEAT_ENABLED | Enable on-chain heartbeat | ❌ | true |
 | NEXUS_HEARTBEAT_ASSET_ADDRESS | Asset to update with last_poll_timestamp | ❌ | - |
 | HEARTBEAT_MIN_INTERVAL_SEC | Min seconds between heartbeat updates | ❌ | max(10, POLL_INTERVAL) |
+| HEARTBEAT_WATERLINE_ENABLED | Enable waterline-based scan limits | ❌ | true |
+| HEARTBEAT_WATERLINE_SOLANA_FIELD | Asset field name for Solana waterline | ❌ | last_safe_timestamp_solana |
+| HEARTBEAT_WATERLINE_NEXUS_FIELD | Asset field name for Nexus waterline | ❌ | last_safe_timestamp_usdd |
+| HEARTBEAT_WATERLINE_SAFETY_SEC | Seconds subtracted from waterline when filtering | ❌ | 120 |
+
+Idempotency:
+- USDC → USDD: Nexus mints include reference `USDC_TX:<solana_signature>`. Before minting, the service checks Nexus for a prior confirmed CREDIT with that reference.
+- USDD → USDC: Solana sends include memo `NEXUS_TX:<nexus_txid>`. Before sending, the service checks recent vault transfers for that memo to the recipient ATA.
 
 ## Security Notes
 - Keep secrets out of git: ensure `.env` and `vault-keypair.json` are ignored and stored securely.
