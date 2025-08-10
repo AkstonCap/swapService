@@ -1,4 +1,4 @@
 python-dotenv>=1.0,<2.0
-solana>=0.30,<0.31
-solders>=0.18,<0.19
+solana>=0.34.0,<0.40.0
+solders>=0.22.0,<0.30.0
 requests>=2.31,<3.0
