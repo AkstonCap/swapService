@@ -15,7 +15,24 @@ def poll_solana_deposits():
     try:
         client = Client(config.RPC_URL)
         sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=20)
-        sig_list = [r.get("signature") for r in (sigs_resp.get("result") or []) if r.get("signature")]
+        sig_results = (sigs_resp.get("result") or [])
+        # Read heartbeat waterline and compute cutoff
+        from .main import read_heartbeat_waterlines
+        wl_solana, _ = read_heartbeat_waterlines()
+        wl_cutoff = int(max(0, wl_solana - config.HEARTBEAT_WATERLINE_SAFETY_SEC)) if config.HEARTBEAT_WATERLINE_ENABLED else 0
+        sig_list = []
+        for r in sig_results:
+            sig = r.get("signature")
+            if not sig:
+                continue
+            # If blockTime present, skip older than waterline cutoff
+            try:
+                bt = int(r.get("blockTime", 0) or 0)
+            except Exception:
+                bt = 0
+            if wl_cutoff and bt and bt < wl_cutoff:
+                continue
+            sig_list.append(sig)
         for sig in sig_list:
             if sig in state.processed_sigs:
                 continue
@@ -48,13 +65,24 @@ def poll_solana_deposits():
                         memo_data = solana_client.extract_memo_from_instructions(
                             tx["transaction"]["message"]["instructions"]
                         )
+                        flat_fee_units = max(0, int(config.FLAT_FEE_USDC_UNITS))
+                        # Tiny deposit drop: treat <= flat fee threshold entirely as fee, do nothing else
+                        if amount_usdc_units <= flat_fee_units:
+                            fees.add_usdc_fee(amount_usdc_units)
+                            print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action")
+                            break
                         if not memo_data:
                             print("No memo found; refunding to sender")
                             refund_key = f"refund_usdc:{sig}"
                             if state.should_attempt(refund_key) and source_token_acc:
                                 state.record_attempt(refund_key)
-                                if solana_client.refund_usdc_to_source(source_token_acc, amount_usdc_units, "Missing memo nexus:<addr>"):
-                                    print("Refunded USDC to sender token account")
+                                net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                if net_refund <= 0:
+                                    fees.add_usdc_fee(amount_usdc_units)
+                                    print("Amount entirely consumed by flat fee; no refund sent")
+                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "Missing memo nexus:<addr>"):
+                                    fees.add_usdc_fee(flat_fee_units)
+                                    print(f"Refunded {net_refund} USDC units to sender (flat fee retained)")
                                 else:
                                     print("Refund failed")
                                     mark_processed = False
@@ -71,8 +99,13 @@ def poll_solana_deposits():
                                 refund_key = f"refund_usdc:{sig}"
                                 if state.should_attempt(refund_key) and source_token_acc:
                                     state.record_attempt(refund_key)
-                                    if solana_client.refund_usdc_to_source(source_token_acc, amount_usdc_units, "Invalid or wrong Nexus address"):
-                                        print("Refunded USDC to sender token account")
+                                    net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                    if net_refund <= 0:
+                                        fees.add_usdc_fee(amount_usdc_units)
+                                        print("Amount entirely consumed by flat fee; no refund sent")
+                                    elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "Invalid or wrong Nexus address"):
+                                        fees.add_usdc_fee(flat_fee_units)
+                                        print(f"Refunded {net_refund} USDC units to sender (flat fee retained)")
                                     else:
                                         print("Refund failed")
                                         mark_processed = False
@@ -80,17 +113,28 @@ def poll_solana_deposits():
                                     print("Skipping refund attempt (cooldown/max attempts)")
                                     mark_processed = False
                             else:
-                                # Apply optional fee on USDC→USDD path, retained in USDC units
-                                fee_usdc = (amount_usdc_units * max(0, config.FEE_BPS_USDC_TO_USDD)) // 10000
-                                net_usdc = max(0, amount_usdc_units - fee_usdc)
-                                if fee_usdc > 0:
-                                    fees.add_usdc_fee(fee_usdc)
-                                usdd_units = scale_amount(net_usdc, config.USDC_DECIMALS, config.USDD_DECIMALS)
+                                # Idempotency: skip if we already minted for this Solana signature
+                                if nexus_client.was_usdd_minted_for_sig(nexus_addr, sig):
+                                    print("Detected prior USDD mint for this Solana tx; marking processed")
+                                    break
+                                # Apply fees on USDC→USDD path:
+                                # - Always retain a flat fee (on success or refund)
+                                # - Apply dynamic fee BPS only on successful mint
+                                dynamic_bps = max(0, int(config.FEE_BPS_USDC_TO_USDD))
+                                # Net amount available for mint before dynamic fee
+                                pre_dynamic_net = max(0, amount_usdc_units - flat_fee_units)
+                                dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000 if dynamic_bps > 0 else 0
+                                net_usdc_for_mint = max(0, pre_dynamic_net - dynamic_fee_usdc)
+                                usdd_units = scale_amount(net_usdc_for_mint, config.USDC_DECIMALS, config.USDD_DECIMALS)
                                 mint_key = f"mint_usdd:{sig}"
                                 if state.should_attempt(mint_key):
                                     state.record_attempt(mint_key)
                                     if nexus_client.debit_usdd(nexus_addr, usdd_units, f"USDC_TX:{sig}"):
-                                        print(f"Minted/sent {usdd_units} USDD units to {nexus_addr}")
+                                        # Accrue fees only after success: flat + dynamic
+                                        total_fee = flat_fee_units + dynamic_fee_usdc
+                                        if total_fee > 0:
+                                            fees.add_usdc_fee(total_fee)
+                                        print(f"Minted/sent {usdd_units} USDD units to {nexus_addr} (fees retained: {total_fee})")
                                     else:
                                         print("USDD mint/send failed")
                                         attempts = int((state.attempt_state.get(mint_key) or {}).get("attempts", 0))
@@ -98,8 +142,15 @@ def poll_solana_deposits():
                                             refund_key = f"refund_usdc:{sig}"
                                             if state.should_attempt(refund_key):
                                                 state.record_attempt(refund_key)
-                                                if solana_client.refund_usdc_to_source(source_token_acc, amount_usdc_units, "USDD mint failed after retries"):
-                                                    print("Refunded USDC to sender after repeated USDD mint failures")
+                                                net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                                if net_refund <= 0:
+                                                    fees.add_usdc_fee(amount_usdc_units)
+                                                    print("Amount entirely consumed by flat fee; no refund sent")
+                                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "USDD mint failed after retries"):
+                                                    # Accrue only flat fee on refund path
+                                                    if flat_fee_units > 0:
+                                                        fees.add_usdc_fee(flat_fee_units)
+                                                    print(f"Refunded {net_refund} USDC units to sender after retries (flat fee retained)")
                                                 else:
                                                     print("USDC refund failed")
                                                     mark_processed = False
@@ -116,8 +167,14 @@ def poll_solana_deposits():
                             refund_key = f"refund_usdc:{sig}"
                             if state.should_attempt(refund_key) and source_token_acc:
                                 state.record_attempt(refund_key)
-                                if solana_client.refund_usdc_to_source(source_token_acc, amount_usdc_units, "Invalid memo format; expected nexus:<addr>"):
-                                    print("Refunded USDC to sender token account")
+                                net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                if net_refund <= 0:
+                                    fees.add_usdc_fee(amount_usdc_units)
+                                    print("Amount entirely consumed by flat fee; no refund sent")
+                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "Invalid memo format; expected nexus:<addr>"):
+                                    if flat_fee_units > 0:
+                                        fees.add_usdc_fee(flat_fee_units)
+                                    print(f"Refunded {net_refund} USDC units to sender (flat fee retained)")
                                 else:
                                     print("Refund failed")
                                     mark_processed = False
