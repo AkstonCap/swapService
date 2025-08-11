@@ -69,14 +69,14 @@ Waterline (optional):
   - Pollers skip on-chain items strictly older than their respective waterline (with a small safety margin). Idempotency still prevents double-processing if you later move the waterline.
 
 ## Prerequisites
-- Python 3.8+
+- Python 3.10+ (tested with 3.12 on Ubuntu 24.04.1)
 - Solana wallet and USDC vault token account (ATA)
 - Nexus node/CLI available locally
 - Sufficient balances: SOL for fees, USDC in vault for payouts, USDD for payouts
 
 ## Install Dependencies
 
-Using pinned versions:
+Using pinned versions (see `requirements.txt` for exact tested versions):
 ```powershell
 python -m pip install -r requirements.txt
 ```
@@ -95,6 +95,12 @@ python3 -m pip install python-dotenv solana solders
 ```
 
 Optional: create and use a virtual environment
+
+Ubuntu 24.04.1 build prerequisites (if native wheels unavailable):
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev
+```
 
 Windows (PowerShell):
 ```powershell
@@ -401,7 +407,7 @@ Idempotency:
 
 ## Troubleshooting
 - Unresolved imports: run `python -m pip install -r requirements.txt`.
-- ImportError: No module named spl.token: The `spl.token` module is bundled with the `solana` Python package (we no longer install a separate `spl-token`). Ensure `solana>=0.30,<0.31` is installed in the same environment.
+- ImportError: No module named spl.token: The `spl.token` module ships inside the `solana` package. Ensure the pinned versions from `requirements.txt` (e.g. `solana==0.36.9` and `solders==0.26.0`) are installed in the active virtual environment.
 - No memo found (USDC → USDD): Wallet must include a Memo in the same transaction.
 - Wrong token or invalid Nexus address: USDC is refunded with a reason memo.
 - Invalid Solana address (USDD → USDC): USDD is refunded to sender with a reason.
