@@ -1,4 +1,16 @@
-python-dotenv>=1.0,<2.0
-solana>=0.34.0,<0.40.0
-solders>=0.22.0,<0.30.0
-requests>=2.31,<3.0
+############################################################
+# Runtime dependencies (tested on Ubuntu 24.04.1 / Python 3.12)
+# Pinning exact versions for reproducibility in production.
+# If you deliberately want to upgrade, adjust here and re-test.
+############################################################
+python-dotenv==1.0.1         # Env file loading
+solana==0.36.9               # Solana Python SDK (compatible with solders 0.26.x)
+solders==0.26.0              # Fast serializers / transaction building
+requests==2.32.3             # HTTP (Jupiter quotes, Nexus API wrappers)
+
+# Optional (uncomment if you want faster event loop / DNS on Linux):
+# uvloop==0.19.0
+# aiodns==3.0.0
+
+# If building wheels fails on a minimal system, ensure build tools:
+# sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev
