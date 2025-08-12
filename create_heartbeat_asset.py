@@ -52,7 +52,7 @@ def run_create(
     nex_initial: str,
 ) -> int:
     nexus_cli = os.getenv("NEXUS_CLI_PATH", "./nexus")
-    pin = os.getenv("NEXUS_PIN", "")
+    pin = os.getenv("NEXUS_PIN")
     if not pin:
         print("ERROR: NEXUS_PIN is required in environment or .env")
         return 2
