@@ -11,6 +11,7 @@ REQUIRED_ENV = [
     "USDC_MINT",
     "NEXUS_PIN",
     "NEXUS_USDD_TREASURY_ACCOUNT",
+    "NEXUS_USDD_FEES_ACCOUNT",
 ]
 for var in REQUIRED_ENV:
     if not os.getenv(var):
@@ -33,8 +34,9 @@ NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
 NEXUS_USDD_LOCAL_ACCOUNT = os.getenv("NEXUS_USDD_LOCAL_ACCOUNT")
+NEXUS_USDD_FEES_ACCOUNT = os.getenv("NEXUS_USDD_FEES_ACCOUNT")
 NEXUS_PIN = os.getenv("NEXUS_PIN", "")
-USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # optional: where to hold USDC fees
+USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # deprecated: USDC fees remain in vault
 
 # Polling & State
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
@@ -75,6 +77,7 @@ SOL_TOPUP_TARGET_LAMPORTS = int(os.getenv("SOL_TOPUP_TARGET_LAMPORTS", "0"))
 NEXUS_NXS_TOPUP_MIN = int(os.getenv("NEXUS_NXS_TOPUP_MIN", "0"))  # units TBD by Nexus, placeholder
 BACKING_DEFICIT_BPS_ALERT = int(os.getenv("BACKING_DEFICIT_BPS_ALERT", "10"))  # >0.1% triggers fee transfer to vault
 BACKING_DEFICIT_PAUSE_PCT = int(os.getenv("BACKING_DEFICIT_PAUSE_PCT", "90"))  # vault < 90% of circulating => pause
+BACKING_RECONCILE_INTERVAL_SEC = int(os.getenv("BACKING_RECONCILE_INTERVAL_SEC", "3600"))  # mint USDD fees at most once per hour
 
 # Fee accounts and ranges
 # USDC fee token account already defined above
