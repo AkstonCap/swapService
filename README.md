@@ -39,23 +39,41 @@ The service can update a Nexus Asset’s mutable field `last_poll_timestamp` aft
 - The service enforces a minimum update interval: `HEARTBEAT_MIN_INTERVAL_SEC` (defaults to `max(10, POLL_INTERVAL)`).
 
 Setup steps:
-1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds):
-   - Use Nexus API/CLI: `assets/create/asset` (only once).
-   - Or use the helper script as described below ("create_heartbeat_asset.py") to create it quickly.
+1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds). You can also add optional per-chain waterline fields:
+  - Use Nexus API/CLI: `assets/create/asset` (only once).
+  - Or use the helper script as described below ("create_heartbeat_asset.py") to create it quickly (supports optional waterlines).
 2. Put the asset’s address in `.env` as `NEXUS_HEARTBEAT_ASSET_ADDRESS`.
 3. Ensure `HEARTBEAT_ENABLED=true`.
 
-Create the heartbeat asset via helper script:
+Create the heartbeat asset via helper script (adds last_poll_timestamp; optionally waterlines):
 ```powershell
-python .\create_heartbeat_asset.py --name local:swapServiceHeartbeat
+python .\create_heartbeat_asset.py --name swapServiceHeartbeat --with-waterlines
 # If you omit --name, an unnamed asset is created; read it by address
 ```
 Linux/macOS:
 ```bash
-python3 ./create_heartbeat_asset.py --name local:swapServiceHeartbeat
+python3 ./create_heartbeat_asset.py --name swapServiceHeartbeat --with-waterlines
 # If you omit --name, an unnamed asset is created; read it by address
 ```
-The script initializes a mutable `last_poll_timestamp` field and prints the asset address to set in `.env`.
+The script initializes a mutable `last_poll_timestamp` field and, when `--with-waterlines` is provided, also adds `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` by default (field names configurable via env or flags). It prints the asset address to set in `.env`.
+
+Helper .env requirements:
+- The helper loads `.env` using python-dotenv. Run it from the repo root so `.env` is found.
+- Required entries for the helper:
+  ```env
+  # Nexus CLI location (use absolute path if not in repo root)
+  NEXUS_CLI_PATH=./nexus
+  # Required for asset creation
+  NEXUS_PIN=1234
+  # Optional: override waterline field names used on the asset
+  HEARTBEAT_WATERLINE_SOLANA_FIELD=last_safe_timestamp_solana
+  HEARTBEAT_WATERLINE_NEXUS_FIELD=last_safe_timestamp_usdd
+  ```
+After creation, set these for the service:
+  ```env
+  HEARTBEAT_ENABLED=true
+  NEXUS_HEARTBEAT_ASSET_ADDRESS=<address printed by helper>
+  ```
 
 How clients check status:
 - Read the asset throught the `register` api: `register/get/assets:asset address=<ASSET_ADDRESS>`
@@ -65,7 +83,7 @@ How clients check status:
 
 Waterline (optional):
 - The service can also honor per-chain “waterline” timestamps stored on the same asset to bound how far back it scans:
-  - `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` (field names configurable via env)
+  - Default field names: `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` (configurable via env `HEARTBEAT_WATERLINE_SOLANA_FIELD` / `HEARTBEAT_WATERLINE_NEXUS_FIELD` or helper flags)
   - Pollers skip on-chain items strictly older than their respective waterline (with a small safety margin). Idempotency still prevents double-processing if you later move the waterline.
 
 ## Prerequisites
@@ -408,6 +426,19 @@ Idempotency:
 ## Troubleshooting
 - Unresolved imports: run `python -m pip install -r requirements.txt`.
 - ImportError: No module named spl.token: The `spl.token` module ships inside the `solana` package. Ensure the pinned versions from `requirements.txt` (e.g. `solana==0.36.9` and `solders==0.26.0`) are installed in the active virtual environment.
+- error: externally-managed-environment (PEP 668) on Ubuntu/Debian: use a virtual environment instead of system Python.
+  ```bash
+  sudo apt update
+  sudo apt install -y python3-venv
+  # optional build tools if wheels are unavailable
+  sudo apt install -y build-essential pkg-config libssl-dev
+  # create and activate venv in repo root
+  python3 -m venv .venv
+  source .venv/bin/activate
+  python3 -m pip install --upgrade pip
+  python3 -m pip install -r requirements.txt
+  ```
+  If you must use system Python, append `--break-system-packages` to pip (not recommended).
 - No memo found (USDC → USDD): Wallet must include a Memo in the same transaction.
 - Wrong token or invalid Nexus address: USDC is refunded with a reason memo.
 - Invalid Solana address (USDD → USDC): USDD is refunded to sender with a reason.
