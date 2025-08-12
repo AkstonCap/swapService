@@ -37,8 +37,9 @@ def reset_usdc_fees():
     _save()
 
 def process_fee_conversions():
-    """Placeholder: convert accumulated USDC fees into SOL (for fees) and USDD→NXS on Nexus (for fees).
-    Guarded by FEE_CONVERSION_ENABLED. Keeps logic side-effect free until implemented.
+    """Optional: convert some accumulated USDC fees into SOL via DEX for gas, and mint USDD fees on Nexus.
+    - USDC fees remain in the vault account (single USDC account policy).
+    - If NEXUS_USDD_FEES_ACCOUNT is configured, mint equivalent USDD there for accounting.
     """
     if not config.FEE_CONVERSION_ENABLED:
         return
@@ -73,33 +74,17 @@ def process_fee_conversions():
             else:
                 print("[fees] USDC->SOL swap failed (stub or DEX error)")
 
-    # 3) NXS auto-purchase is disabled per policy; no action
+    # 3) USDD fees are transferred during swap events; no mint here to avoid duplication.
 
 def reconcile_fees_to_fee_account(min_transfer_units: int = 0):
-    """Move accumulated USDC fees from vault to the USDC fee token account if configured.
-    Decrements the fee ledger by the transferred amount.
+    """Deprecated: No separate USDC fee account. USDC fees remain in the vault.
+    This function now performs no USDC movements; use process_fee_conversions for USDD fee minting.
     """
-    if not config.USDC_FEES_ACCOUNT:
-        return
-    amt = get_usdc_fees()
-    if amt <= 0 or amt < int(min_transfer_units or 0):
-        return
-    try:
-        from . import solana_client
-        # transfer from vault USDC token account to fee account
-        moved = min(amt, 10_000_000_000)  # avoid oversized single move; arbitrary cap
-        ok = solana_client.transfer_usdc_between_accounts(
-            str(config.VAULT_USDC_ACCOUNT), config.USDC_FEES_ACCOUNT, moved
-        )
-        if ok:
-            _fees_state["usdc_accumulated"] = max(0, _fees_state["usdc_accumulated"] - moved)
-            _save()
-    except Exception as e:
-        print(f"[fees] reconcile to fee account error: {e}")
+    return
 
 def maintain_backing_and_bounds() -> bool:
     """Maintain invariants and bounds.
-    - Ensure vault USDC ≈ circulating USDD; if deficit > BACKING_DEFICIT_BPS_ALERT, move from fee acct to vault.
+    - Ensure vault USDC ≈ circulating USDD; USDC fees remain in vault (no separate USDC fee account).
     - If vault < BACKING_DEFICIT_PAUSE_PCT% of circulating, request pause (return True).
     - Cap USDC fee account at FEES_USDC_MAX by transferring excess to vault and minting equivalent USDD to fees USDD account.
     Returns True if the service should pause.
@@ -116,26 +101,7 @@ def maintain_backing_and_bounds() -> bool:
         if circ_usdd > 0 and (vault_usdc * 100) < (config.BACKING_DEFICIT_PAUSE_PCT * circ_usdd):
             print("[safety] Vault USDC < 90% of circulating USDD; pausing for manual investigation")
             return True
-        # Fix mild deficit using USDC fee account
-        if ratio_bps_deficit > max(0, config.BACKING_DEFICIT_BPS_ALERT) and config.USDC_FEES_ACCOUNT:
-            fee_bal = solana_client.get_token_account_balance(config.USDC_FEES_ACCOUNT)
-            shortfall = max(0, circ_usdd - vault_usdc)
-            to_move = min(shortfall, fee_bal)
-            if to_move > 0:
-                ok = solana_client.transfer_usdc_between_accounts(config.USDC_FEES_ACCOUNT, str(config.VAULT_USDC_ACCOUNT), to_move)
-                if ok:
-                    print(f"[safety] Moved {to_move} USDC units from fee account to vault to restore backing")
-        # Keep USDC fee account within max bound by moving excess back to vault and minting USDD to fees account
-        if config.USDC_FEES_ACCOUNT and config.FEES_USDC_MAX:
-            fee_bal2 = solana_client.get_token_account_balance(config.USDC_FEES_ACCOUNT)
-            if fee_bal2 > config.FEES_USDC_MAX:
-                excess = fee_bal2 - config.FEES_USDC_MAX
-                if solana_client.transfer_usdc_between_accounts(config.USDC_FEES_ACCOUNT, str(config.VAULT_USDC_ACCOUNT), excess):
-                    # Mint USDD equivalent to the designated fees/local account to keep 1:1 backing
-                    to_addr = getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None) or config.NEXUS_USDD_LOCAL_ACCOUNT or config.NEXUS_USDD_TREASURY_ACCOUNT
-                    if to_addr:
-                        if nexus_client.debit_usdd(to_addr, excess, "FEE_MINT_USDD"):
-                            print(f"[fees] Minted {excess} USDD units to fees account after moving USDC back to vault")
+    # With a single USDC vault account, there's no separate fee account to drain or cap.
         return False
     except Exception as e:
         print(f"[safety] maintain_backing_and_bounds error: {e}")
