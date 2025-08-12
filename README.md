@@ -284,37 +284,14 @@ This prints a token account address (the ATA). Put that into `.env` as `VAULT_US
 - Mainnet: transfer USDC to `VAULT_USDC_ACCOUNT` from your exchange/custody.
 - Devnet: use the devnet USDC mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` and a test issuer; faucets are not officially provided.
 
-4) Optional: set up a separate USDC fee token account
+4) Fees policy: single USDC vault account + USDD fees account
 
-You can keep fees in the same vault ATA, but we recommend a separate account.
-
-Option A — Use the vault owner (simpler):
-
-Windows (PowerShell):
-```powershell
-spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-```
-Linux/macOS:
-```bash
-spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-```
-Record the printed token account address and set it in `.env` as `USDC_FEES_ACCOUNT`.
-
-Option B — Use a distinct fees owner:
-
-Windows (PowerShell):
-```powershell
-solana-keygen new -o .\fees-keypair.json
-setx SOLANA_KEYPAIR "%CD%\fees-keypair.json"
-spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-```
-Linux/macOS:
-```bash
-solana-keygen new -o ./fees-keypair.json
-export SOLANA_KEYPAIR="$PWD/fees-keypair.json"
-spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-```
-Use the printed token account address as `USDC_FEES_ACCOUNT` in `.env`. Fund the fees owner with a tiny amount of SOL if you plan to move funds from this account.
+- All USDC fees remain in the vault USDC ATA (no separate USDC fee account).
+- An equivalent amount of USDD is minted to your designated USDD fees account on Nexus for accounting.
+- Configure your USDD fees account in `.env`:
+  ```env
+  NEXUS_USDD_FEES_ACCOUNT=<YOUR_USDD_FEES_ACCOUNT_ADDRESS>
+  ```
 
 5) Verify
 
@@ -386,7 +363,7 @@ How to create your USDC ATA (user-side):
 | NEXUS_PIN | Nexus account PIN | ✅ | - |
 | NEXUS_USDD_TREASURY_ACCOUNT | Your USDD treasury account address | ✅ | - |
 | NEXUS_USDD_LOCAL_ACCOUNT | Your local USDD account address (optional) | ❌ | - |
-| USDC_FEES_ACCOUNT | USDC fee token account (SPL) | ❌ | - |
+| NEXUS_USDD_FEES_ACCOUNT | USDD account to receive minted fees | ❌ | - |
 | FLAT_FEE_USDC | Flat fee (USDC) for Solana→Nexus | ❌ | 0.1 |
 | FLAT_FEE_USDD | Tiny threshold (USDD) for Nexus→Solana | ❌ | 0.1 |
 | FEE_BPS_USDC_TO_USDD | Dynamic fee bps on successful Solana→Nexus | ❌ | 10 |
