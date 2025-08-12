@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 Helper to create a Nexus Asset for on-chain heartbeat and print its address.
 
 What it creates (by default):
