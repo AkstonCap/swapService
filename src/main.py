@@ -4,6 +4,7 @@ from .swap_solana import poll_solana_deposits
 from .swap_nexus import poll_nexus_usdd_deposits
 
 _last_heartbeat = 0
+_last_reconcile = 0
 _cached_waterlines = {"solana": 0, "nexus": 0}
 
 def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | None = None, set_nexus_waterline: int | None = None):
@@ -83,16 +84,30 @@ def run():
         while True:
             # Safety and maintenance first
             try:
+                from . import fees, nexus_client
+                should_pause = fees.maintain_backing_and_bounds()
+                # Periodic backing reconcile: mint USDD to fees account to bring vault USDC back to 1:1 with circulating
+                now = int(time.time())
+                global _last_reconcile
+                if (now - _last_reconcile) >= max(60, config.BACKING_RECONCILE_INTERVAL_SEC):
+                    try:
+                        # Compute surplus: vault_usdc - circ_usdd
+                        from . import solana_client
+                        vault_usdc = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
+                        circ_usdd = nexus_client.get_circulating_usdd_units()
+                        surplus = max(0, vault_usdc - circ_usdd)
+                        if surplus > 0 and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
+                            if nexus_client.debit_usdd(config.NEXUS_USDD_FEES_ACCOUNT, surplus, "FEE_RECONCILE"):
+                                print(f"[reconcile] Minted {surplus} USDD to fees account to restore 1:1 backing")
+                                _last_reconcile = now
+                    except Exception as e:
+                        print(f"[reconcile] error: {e}")
+                # Optional: DEX conversions (SOL top-ups)
                 if config.FEE_CONVERSION_ENABLED:
-                    from . import fees
-                    should_pause = fees.maintain_backing_and_bounds()
-                    # Move any accumulated ledger fees into the on-chain USDC fee account
-                    fees.reconcile_fees_to_fee_account(min_transfer_units=config.FEE_CONVERSION_MIN_USDC)
-                    # Top up SOL if needed
                     fees.process_fee_conversions()
-                    if should_pause:
-                        time.sleep(config.POLL_INTERVAL)
-                        continue
+                if should_pause:
+                    time.sleep(config.POLL_INTERVAL)
+                    continue
             except Exception as e:
                 print(f"Maintenance error: {e}")
 
