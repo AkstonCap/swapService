@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Thin entrypoint that runs the modular swap service in src/.
+Thin entrypoint that delegates to src.main.run().
+All polling, swapping, refunds, heartbeat, etc. live under src/.
 """
 
 from src.main import run
