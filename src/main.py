@@ -6,6 +6,7 @@ from .swap_nexus import poll_nexus_usdd_deposits
 _last_heartbeat = 0
 _last_reconcile = 0
 _cached_waterlines = {"solana": 0, "nexus": 0}
+_stop_event = None  # set in run()
 
 def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | None = None, set_nexus_waterline: int | None = None):
     from . import config as cfg
@@ -80,8 +81,28 @@ def run():
     print("   - USDC → USDD: Solana deposits with Nexus address in memo")
     print("   - USDD → USDC: USDD deposits with Solana address in reference")
 
+    # Setup graceful shutdown via Ctrl+C (SIGINT) or SIGTERM
+    import signal, threading
+    global _stop_event
+    _stop_event = threading.Event()
+
+    def _request_stop(signum, frame):
+        try:
+            sig_name = {getattr(signal, n): n for n in dir(signal) if n.startswith('SIG')}.get(signum, str(signum))
+        except Exception:
+            sig_name = str(signum)
+        print(f"Received {sig_name}, stopping…")
+        _stop_event.set()
+
+    for _sig in ("SIGINT", "SIGTERM"):
+        if hasattr(signal, _sig):
+            try:
+                signal.signal(getattr(signal, _sig), _request_stop)
+            except Exception:
+                pass
+
     try:
-        while True:
+        while not _stop_event.is_set():
             # Safety and maintenance first
             try:
                 from . import fees, nexus_client
@@ -106,7 +127,8 @@ def run():
                 if config.FEE_CONVERSION_ENABLED:
                     fees.process_fee_conversions()
                 if should_pause:
-                    time.sleep(config.POLL_INTERVAL)
+                    if _stop_event.wait(config.POLL_INTERVAL):
+                        break
                     continue
             except Exception as e:
                 print(f"Maintenance error: {e}")
@@ -115,7 +137,9 @@ def run():
             poll_nexus_usdd_deposits()
             state.save_state()
             update_heartbeat_asset()
-            time.sleep(config.POLL_INTERVAL)
+            if _stop_event.wait(config.POLL_INTERVAL):
+                break
     except KeyboardInterrupt:
         print("Shutting down…")
+    finally:
         state.save_state()
