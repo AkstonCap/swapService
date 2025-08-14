@@ -54,6 +54,7 @@ def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
 
 def poll_solana_deposits():
     from solana.rpc.api import Client
+    from solders.signature import Signature
     try:
         client = Client(config.RPC_URL)
         sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=100)
@@ -82,7 +83,19 @@ def poll_solana_deposits():
 
             mark_processed = True
             try:
-                tx = client.get_transaction(sig, encoding="jsonParsed").get("result")
+                sig_obj = Signature.from_string(sig)
+                tx_resp = client.get_transaction(sig_obj, encoding="jsonParsed")
+                # Support both dict and typed responses
+                tx = None
+                try:
+                    tx = tx_resp.get("result")
+                except AttributeError:
+                    try:
+                        import json as _json
+                        js = _json.loads(tx_resp.to_json())
+                        tx = js.get("result")
+                    except Exception:
+                        tx = None
                 if not tx:
                     continue
             except Exception as e:
