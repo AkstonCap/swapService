@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from solana.publickey import PublicKey
+from solders.pubkey import Pubkey as PublicKey
 
 load_dotenv()
 
@@ -20,9 +20,9 @@ for var in REQUIRED_ENV:
 # Solana
 RPC_URL = os.getenv("SOLANA_RPC_URL")
 VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
-VAULT_USDC_ACCOUNT = PublicKey(os.getenv("VAULT_USDC_ACCOUNT"))
-USDC_MINT = PublicKey(os.getenv("USDC_MINT"))
-MEMO_PROGRAM_ID = PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
+VAULT_USDC_ACCOUNT = PublicKey.from_string(os.getenv("VAULT_USDC_ACCOUNT"))
+USDC_MINT = PublicKey.from_string(os.getenv("USDC_MINT"))
+MEMO_PROGRAM_ID = PublicKey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
 
 # Decimals
 USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
