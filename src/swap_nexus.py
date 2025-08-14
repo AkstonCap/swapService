@@ -46,7 +46,6 @@ def poll_nexus_usdd_deposits():
         "txid,timestamp,confirmations,"
         "contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount,contracts.reference,contracts.ticker,contracts.token",
         f"address={treasury_addr}",
-        "format=json",
     ]
 
     try:
@@ -55,9 +54,12 @@ def poll_nexus_usdd_deposits():
             print("Error fetching USDD transactions:", (res.stderr or res.stdout).strip())
             return
 
+        # Parse leniently to ignore trailing "[Completed in ...]" footer
         try:
-            txs = json.loads(res.stdout)
-        except json.JSONDecodeError:
+            txs = nexus_client._parse_json_lenient(res.stdout)
+        except Exception:
+            txs = None
+        if txs is None:
             print("Failed to parse Nexus CLI JSON output for finance/transaction/account")
             return
 
