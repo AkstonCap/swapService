@@ -42,7 +42,7 @@ def poll_nexus_usdd_deposits():
     # Include contracts.id and contracts.to so we can filter correctly and key per-contract.
     cmd = [
         config.NEXUS_CLI,
-        "finance/transactions/account/"
+        "finance/transactions/token/"
         "txid,timestamp,confirmations,"
         "contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount,contracts.reference,contracts.ticker,contracts.token",
         f"name={treasury_addr}",
@@ -60,7 +60,7 @@ def poll_nexus_usdd_deposits():
         except Exception:
             txs = None
         if txs is None:
-            print("Failed to parse Nexus CLI JSON output for finance/transaction/account")
+            print("Failed to parse Nexus CLI JSON output for finance/transactions/account")
             return
 
         if not isinstance(txs, list):
