@@ -3,7 +3,7 @@ from typing import Optional
 import base64
 import requests
 from solana.rpc.api import Client
-from solana.publickey import PublicKey
+from solders.pubkey import Pubkey as PublicKey
 from solana.keypair import Keypair
 from solana.transaction import Transaction, TransactionInstruction, AccountMeta
 from . import config
@@ -22,8 +22,8 @@ except Exception:
     from struct import pack
 
     # SPL Token Program ID
-    TOKEN_PROGRAM_ID = PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-    ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+    TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+    ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
     def transfer_checked(*, program_id: PublicKey, source: PublicKey, mint: PublicKey, dest: PublicKey,
                          owner: PublicKey, amount: int, decimals: int, signers: list):
@@ -40,6 +40,7 @@ except Exception:
         return TransactionInstruction(program_id=program_id, keys=keys, data=data)
 
     def get_associated_token_address(*, owner: PublicKey, mint: PublicKey) -> PublicKey:
+        # In solders, find_program_address is on Pubkey
         seeds = [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)]
         ata, _ = PublicKey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
         return ata
@@ -51,9 +52,9 @@ except Exception:
             AccountMeta(pubkey=ata, is_signer=False, is_writable=True),
             AccountMeta(pubkey=owner, is_signer=False, is_writable=False),
             AccountMeta(pubkey=mint, is_signer=False, is_writable=False),
-            AccountMeta(pubkey=PublicKey("11111111111111111111111111111111"), is_signer=False, is_writable=False),
+            AccountMeta(pubkey=PublicKey.from_string("11111111111111111111111111111111"), is_signer=False, is_writable=False),
             AccountMeta(pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
-            AccountMeta(pubkey=PublicKey("SysvarRent111111111111111111111111111111111"), is_signer=False, is_writable=False),
+            AccountMeta(pubkey=PublicKey.from_string("SysvarRent111111111111111111111111111111111"), is_signer=False, is_writable=False),
         ]
         return TransactionInstruction(program_id=ASSOCIATED_TOKEN_PROGRAM_ID, keys=keys, data=b"")
 
@@ -88,7 +89,7 @@ def get_vault_sol_balance() -> int:
 def get_token_account_balance(token_account_addr: str) -> int:
     try:
         client = Client(config.RPC_URL)
-        resp = client.get_token_account_balance(PublicKey(token_account_addr))
+        resp = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
         amt = (((resp or {}).get("result") or {}).get("value") or {}).get("amount")
         return int(amt or 0)
     except Exception:
@@ -106,9 +107,9 @@ def transfer_usdc_between_accounts(source_token_account: str, dest_token_account
         tx.add(
             transfer_checked(
                 program_id=TOKEN_PROGRAM_ID,
-                source=PublicKey(source_token_account),
+                source=PublicKey.from_string(source_token_account),
                 mint=config.USDC_MINT,
-                dest=PublicKey(dest_token_account),
+                dest=PublicKey.from_string(dest_token_account),
                 owner=kp.public_key,
                 amount=amount_base_units,
                 decimals=config.USDC_DECIMALS,
@@ -198,7 +199,7 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
     try:
         kp = load_vault_keypair()
         client = Client(config.RPC_URL)
-        owner = PublicKey(to_owner_addr)
+        owner = PublicKey.from_string(to_owner_addr)
         tx = Transaction()
         tx.fee_payer = kp.public_key
 
@@ -249,7 +250,7 @@ def was_usdc_sent_for_nexus_tx(nexus_txid: str, to_owner_addr: str, lookback: in
         if not sig_list:
             return False
         # Resolve recipient ATA once
-        owner = PublicKey(to_owner_addr)
+        owner = PublicKey.from_string(to_owner_addr)
         dest_ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
         target_memo = f"NEXUS_TX:{nexus_txid}"
         for sig in sig_list:
@@ -300,7 +301,7 @@ def has_usdc_ata(owner_addr: str) -> bool:
     """Return True if the owner's USDC ATA exists."""
     try:
         client = Client(config.RPC_URL)
-        owner = PublicKey(owner_addr)
+        owner = PublicKey.from_string(owner_addr)
         ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
         info = client.get_account_info(ata).get("result", {}).get("value")
         return info is not None
@@ -318,8 +319,7 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
     try:
         kp = load_vault_keypair()
         client = Client(config.RPC_URL)
-        dest_token_acc = PublicKey(source_token_account)
-
+        dest_token_acc = PublicKey.from_string(source_token_account)
         memo = reason if len(reason) <= 120 else reason[:117] + "..."
 
         tx = Transaction()
