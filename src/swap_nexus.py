@@ -42,7 +42,7 @@ def poll_nexus_usdd_deposits():
     # Include contracts.id and contracts.to so we can filter correctly and key per-contract.
     cmd = [
         config.NEXUS_CLI,
-        "finance/transaction/account/"
+        "finance/transactions/account/"
         "txid,timestamp,confirmations,"
         "contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount,contracts.reference,contracts.ticker,contracts.token",
         f"address={treasury_addr}",
