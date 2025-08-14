@@ -181,8 +181,8 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
             client.confirm_transaction(sig, commitment="confirmed")
         except Exception:
             pass
-    print(f"[fees] Jupiter swap sent: {sig}")
-    return True
+        print(f"[fees] Jupiter swap sent: {sig}")
+        return True
     except Exception as e:
         print(f"[fees] Jupiter swap error: {e}")
         return False
@@ -221,8 +221,8 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
                 tx.add(_create_memo_ix(memo))
             except Exception:
                 pass
-    resp = client.send_transaction(tx, kp)
-    sig = resp.get("result") if isinstance(resp, dict) else resp
+        resp = client.send_transaction(tx, kp)
+        sig = resp.get("result") if isinstance(resp, dict) else resp
         try:
             Client(config.RPC_URL).confirm_transaction(sig, commitment="confirmed")
         except Exception:
