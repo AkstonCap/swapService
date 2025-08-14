@@ -10,13 +10,54 @@ def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
     return res.returncode, res.stdout, res.stderr
 
 
+def _parse_json_lenient(text: str):
+    """Try to parse JSON from CLI output that may contain extra lines.
+    Attempts full parse, then line-by-line, then substring between first '{'/'[' and last '}'/']'.
+    Returns parsed object or None.
+    """
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # Try per-line
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not (line.startswith("{") or line.startswith("[")):
+            continue
+        try:
+            return json.loads(line)
+        except Exception:
+            continue
+    # Try to extract first JSON-like span
+    start = None
+    for i, ch in enumerate(text):
+        if ch in "[{":
+            start = i
+            break
+    if start is not None:
+        # find matching tail candidate
+        for j in range(len(text) - 1, start, -1):
+            if text[j] in "]}":
+                snippet = text[start : j + 1]
+                try:
+                    return json.loads(snippet)
+                except Exception:
+                    continue
+    return None
+
+
 def get_account_info(nexus_addr: str) -> Optional[Dict[str, Any]]:
     cmd = [config.NEXUS_CLI, "register/get/finance:account", f"address={nexus_addr}"]
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
             return None
-        return json.loads(out)
+        data = _parse_json_lenient(out)
+        if isinstance(data, dict):
+            return data
+        return None
     except Exception:
         return None
 
@@ -154,7 +195,7 @@ def list_market_asks(market: str = "NXS/USDD", limit: int = 10) -> list[Dict[str
         if code != 0:
             print("Nexus market list error:", err or out)
             return []
-        data = json.loads(out)
+        data = _parse_json_lenient(out)
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
@@ -266,7 +307,7 @@ def get_circulating_usdd_units() -> int:
         if code != 0:
             print("Nexus circulating supply error:", err or out)
             return 0
-        data = json.loads(out)
+        data = _parse_json_lenient(out)
         # Accept either raw number or an object containing value/amount
         if isinstance(data, (int, float, str)):
             s = str(data)
