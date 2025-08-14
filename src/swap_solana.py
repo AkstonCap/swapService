@@ -14,7 +14,7 @@ def poll_solana_deposits():
     from solana.rpc.api import Client
     try:
         client = Client(config.RPC_URL)
-        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=20)
+        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=100)
         sig_results = (sigs_resp.get("result") or [])
         # Read heartbeat waterline and compute cutoff
         from .main import read_heartbeat_waterlines
