@@ -2,6 +2,48 @@ from decimal import Decimal
 from . import config, state, nexus_client, solana_client, fees
 
 
+def _normalize_get_sigs_response(resp):
+    """Return a list of signature entries as dicts with at least 'signature' and optional 'blockTime'.
+    Supports both dict-based solana-py responses and solders typed responses.
+    """
+    # Dict-style
+    try:
+        return (resp.get("result") or [])
+    except AttributeError:
+        pass
+    # solders typed: try to_json first
+    try:
+        import json as _json
+        js = _json.loads(resp.to_json())
+        arr = js.get("result") or js.get("value") or []
+        if isinstance(arr, dict):
+            arr = arr.get("value") or arr.get("result") or []
+        if isinstance(arr, list):
+            return arr
+    except Exception:
+        pass
+    # Fallback to .value (commonly a list of objects)
+    try:
+        val = getattr(resp, "value", None)
+        out = []
+        if isinstance(val, list):
+            for r in val:
+                if isinstance(r, dict):
+                    out.append(r)
+                else:
+                    sig = str(getattr(r, "signature", ""))
+                    bt = getattr(r, "block_time", None)
+                    try:
+                        bt = int(bt) if bt is not None else 0
+                    except Exception:
+                        bt = 0
+                    out.append({"signature": sig, "blockTime": bt})
+            return out
+    except Exception:
+        pass
+    return []
+
+
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
     if src_decimals == dst_decimals:
         return int(amount)
@@ -15,12 +57,12 @@ def poll_solana_deposits():
     try:
         client = Client(config.RPC_URL)
         sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=100)
-        sig_results = (sigs_resp.get("result") or [])
+        sig_results = _normalize_get_sigs_response(sigs_resp)
         # Read heartbeat waterline and compute cutoff
         from .main import read_heartbeat_waterlines
         wl_solana, _ = read_heartbeat_waterlines()
         wl_cutoff = int(max(0, wl_solana - config.HEARTBEAT_WATERLINE_SAFETY_SEC)) if config.HEARTBEAT_WATERLINE_ENABLED else 0
-        sig_list = []
+        sig_list: list[str] = []
         for r in sig_results:
             sig = r.get("signature")
             if not sig:
@@ -33,6 +75,7 @@ def poll_solana_deposits():
             if wl_cutoff and bt and bt < wl_cutoff:
                 continue
             sig_list.append(sig)
+
         for sig in sig_list:
             if sig in state.processed_sigs:
                 continue
@@ -49,9 +92,7 @@ def poll_solana_deposits():
             for instr in tx["transaction"]["message"]["instructions"]:
                 if instr.get("program") == "spl-token" and instr.get("parsed"):
                     p = instr["parsed"]
-                    if p.get("type") in ("transfer", "transferChecked") and p.get("info", {}).get(
-                        "destination"
-                    ) == str(config.VAULT_USDC_ACCOUNT):
+                    if p.get("type") in ("transfer", "transferChecked") and p.get("info", {}).get("destination") == str(config.VAULT_USDC_ACCOUNT):
                         info = p["info"]
                         if "amount" in info:
                             amount_usdc_units = int(info["amount"])
@@ -61,16 +102,15 @@ def poll_solana_deposits():
                             continue
 
                         source_token_acc = info.get("source")
-
-                        memo_data = solana_client.extract_memo_from_instructions(
-                            tx["transaction"]["message"]["instructions"]
-                        )
+                        memo_data = solana_client.extract_memo_from_instructions(tx["transaction"]["message"]["instructions"])
                         flat_fee_units = max(0, int(config.FLAT_FEE_USDC_UNITS))
+
                         # Tiny deposit drop: treat <= flat fee threshold entirely as fee, do nothing else
                         if amount_usdc_units <= flat_fee_units:
                             fees.add_usdc_fee(amount_usdc_units)
                             print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action")
                             break
+
                         if not memo_data:
                             print("No memo found; refunding to sender")
                             refund_key = f"refund_usdc:{sig}"
@@ -185,5 +225,7 @@ def poll_solana_deposits():
 
             if mark_processed:
                 state.processed_sigs.add(sig)
+    except Exception as e:
+        print(f"poll_solana_deposits error: {e}")
     finally:
         state.save_state()
