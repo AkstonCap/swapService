@@ -5,58 +5,57 @@ import requests
 from solana.rpc.api import Client
 from solders.pubkey import Pubkey as PublicKey
 from solders.keypair import Keypair
-from solana.transaction import Transaction, TransactionInstruction, AccountMeta
+from solders.instruction import Instruction as TransactionInstruction, AccountMeta
+from solders.hash import Hash
+from solders.transaction import Transaction, VersionedTransaction
+from solders.message import Message
 from . import config
 
-# Optional dependency: spl.token (Python SPL Token helpers). Provide a fallback if missing.
-try:
-    from spl.token.constants import TOKEN_PROGRAM_ID
-    from spl.token.instructions import (
-        transfer_checked,
-        get_associated_token_address,
-        create_associated_token_account,
-    )
-    _HAS_SPL_TOKEN = True
-except Exception:
-    _HAS_SPL_TOKEN = False
-    from struct import pack
+from struct import pack
 
-    # SPL Token Program ID
-    TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-    ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+# SPL Token and ATA Program IDs (constants)
+TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
-    def transfer_checked(*, program_id: PublicKey, source: PublicKey, mint: PublicKey, dest: PublicKey,
-                         owner: PublicKey, amount: int, decimals: int, signers: list):
-        """Minimal TransferChecked instruction builder (no multisig signers support)."""
-        if signers:
-            raise NotImplementedError("Multisig owners not supported without spl.token installed")
-        data = pack("<BQB", 12, int(amount), int(decimals))  # 12 = TransferChecked
-        keys = [
-            AccountMeta(pubkey=source, is_signer=False, is_writable=True),
-            AccountMeta(pubkey=mint, is_signer=False, is_writable=False),
-            AccountMeta(pubkey=dest, is_signer=False, is_writable=True),
-            AccountMeta(pubkey=owner, is_signer=True, is_writable=False),
-        ]
-        return TransactionInstruction(program_id=program_id, keys=keys, data=data)
 
-    def get_associated_token_address(*, owner: PublicKey, mint: PublicKey) -> PublicKey:
-        # In solders, find_program_address is on Pubkey
-        seeds = [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)]
-        ata, _ = PublicKey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
-        return ata
+def transfer_checked(*, program_id: PublicKey, source: PublicKey, mint: PublicKey, dest: PublicKey,
+                     owner: PublicKey, amount: int, decimals: int, signers: list) -> TransactionInstruction:
+    """Minimal TransferChecked instruction builder (no multisig signers support)."""
+    if signers:
+        raise NotImplementedError("Multisig owners not supported without spl.token installed")
+    data = pack("<BQB", 12, int(amount), int(decimals))  # 12 = TransferChecked
+    keys = [
+        AccountMeta(pubkey=source, is_signer=False, is_writable=True),
+        AccountMeta(pubkey=mint, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=dest, is_signer=False, is_writable=True),
+        AccountMeta(pubkey=owner, is_signer=True, is_writable=False),
+    ]
+    return TransactionInstruction(program_id=program_id, accounts=keys, data=data)
 
-    def create_associated_token_account(*, payer: PublicKey, owner: PublicKey, mint: PublicKey) -> TransactionInstruction:
-        ata = get_associated_token_address(owner=owner, mint=mint)
-        keys = [
-            AccountMeta(pubkey=payer, is_signer=True, is_writable=True),
-            AccountMeta(pubkey=ata, is_signer=False, is_writable=True),
-            AccountMeta(pubkey=owner, is_signer=False, is_writable=False),
-            AccountMeta(pubkey=mint, is_signer=False, is_writable=False),
-            AccountMeta(pubkey=PublicKey.from_string("11111111111111111111111111111111"), is_signer=False, is_writable=False),
-            AccountMeta(pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
-            AccountMeta(pubkey=PublicKey.from_string("SysvarRent111111111111111111111111111111111"), is_signer=False, is_writable=False),
-        ]
-        return TransactionInstruction(program_id=ASSOCIATED_TOKEN_PROGRAM_ID, keys=keys, data=b"")
+
+def get_associated_token_address(*, owner: PublicKey, mint: PublicKey) -> PublicKey:
+    # In solders, find_program_address is on Pubkey
+    seeds = [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)]
+    ata, _ = PublicKey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
+    return ata
+
+
+def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Keypair) -> str:
+    """Build, sign (legacy) and send a transaction using solders; return signature string."""
+    client = Client(config.RPC_URL)
+    bh = (client.get_latest_blockhash() or {}).get("result", {}).get("value", {}).get("blockhash")
+    if not bh:
+        raise RuntimeError("Failed to fetch recent blockhash")
+    recent = Hash.from_string(bh)
+    # Build a legacy Message and Transaction using solders
+    msg = Message.new_with_blockhash(instructions, kp.public_key, recent)
+    tx = Transaction.new_signed_with_payer(instructions, kp.public_key, [kp], recent)
+    sig = client.send_raw_transaction(bytes(tx)).get("result")
+    try:
+        client.confirm_transaction(sig, commitment="confirmed")
+    except Exception:
+        pass
+    return sig
 
 
 def _get_vault_secret_bytes() -> bytes:
@@ -97,27 +96,17 @@ def transfer_usdc_between_accounts(source_token_account: str, dest_token_account
         if amount_base_units <= 0:
             return True
         kp = load_vault_keypair()
-        client = Client(config.RPC_URL)
-        tx = Transaction()
-        tx.fee_payer = kp.public_key
-        tx.add(
-            transfer_checked(
-                program_id=TOKEN_PROGRAM_ID,
-                source=PublicKey.from_string(source_token_account),
-                mint=config.USDC_MINT,
-                dest=PublicKey.from_string(dest_token_account),
-                owner=kp.public_key,
-                amount=amount_base_units,
-                decimals=config.USDC_DECIMALS,
-                signers=[],
-            )
+        ix = transfer_checked(
+            program_id=TOKEN_PROGRAM_ID,
+            source=PublicKey.from_string(source_token_account),
+            mint=config.USDC_MINT,
+            dest=PublicKey.from_string(dest_token_account),
+            owner=kp.public_key,
+            amount=amount_base_units,
+            decimals=config.USDC_DECIMALS,
+            signers=[],
         )
-        resp = client.send_transaction(tx, kp)
-        sig = resp.get("result") if isinstance(resp, dict) else resp
-        try:
-            client.confirm_transaction(sig, commitment="confirmed")
-        except Exception:
-            pass
+        sig = _build_and_send_legacy_tx([ix], kp)
         print(f"USDC transfer token->token sig: {sig}")
         return True
     except Exception as e:
@@ -170,7 +159,6 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
             print("[fees] Jupiter: missing swapTransaction")
             return False
 
-        from solders.transaction import VersionedTransaction
         s_kp = load_vault_solders_keypair()
         tx_bytes = base64.b64decode(swap_tx_b64)
         vtx = VersionedTransaction.from_bytes(tx_bytes)
@@ -193,18 +181,15 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
     """
     try:
         kp = load_vault_keypair()
-        client = Client(config.RPC_URL)
         owner = PublicKey.from_string(to_owner_addr)
-        tx = Transaction()
-        tx.fee_payer = kp.public_key
-
         dest_ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
+        client = Client(config.RPC_URL)
         ata_info = client.get_account_info(dest_ata).get("result", {}).get("value")
         if ata_info is None:
             print("Recipient USDC ATA is missing; not creating it. Ask recipient to initialize their USDC ATA.")
             return False
 
-        tx.add(
+        ixs = [
             transfer_checked(
                 program_id=TOKEN_PROGRAM_ID,
                 source=config.VAULT_USDC_ACCOUNT,
@@ -215,18 +200,13 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
                 decimals=config.USDC_DECIMALS,
                 signers=[],
             )
-        )
+        ]
         if memo:
             try:
-                tx.add(_create_memo_ix(memo))
+                ixs.append(_create_memo_ix(memo))
             except Exception:
                 pass
-        resp = client.send_transaction(tx, kp)
-        sig = resp.get("result") if isinstance(resp, dict) else resp
-        try:
-            Client(config.RPC_URL).confirm_transaction(sig, commitment="confirmed")
-        except Exception:
-            pass
+        sig = _build_and_send_legacy_tx(ixs, kp)
         print(f"Sent USDC tx sig: {sig}")
         return True
     except Exception as e:
@@ -306,20 +286,16 @@ def has_usdc_ata(owner_addr: str) -> bool:
 
 def _create_memo_ix(text: str) -> TransactionInstruction:
     data = text.encode("utf-8")
-    return TransactionInstruction(program_id=config.MEMO_PROGRAM_ID, keys=[], data=data)
+    return TransactionInstruction(program_id=config.MEMO_PROGRAM_ID, accounts=[], data=data)
 
 
 def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str) -> bool:
     """Refund USDC back to the sender's token account with a memo reason."""
     try:
         kp = load_vault_keypair()
-        client = Client(config.RPC_URL)
         dest_token_acc = PublicKey.from_string(source_token_account)
         memo = reason if len(reason) <= 120 else reason[:117] + "..."
-
-        tx = Transaction()
-        tx.fee_payer = kp.public_key
-        tx.add(
+        ixs = [
             transfer_checked(
                 program_id=TOKEN_PROGRAM_ID,
                 source=config.VAULT_USDC_ACCOUNT,
@@ -329,16 +305,10 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
                 amount=amount_base_units,
                 decimals=config.USDC_DECIMALS,
                 signers=[],
-            )
-        )
-        tx.add(_create_memo_ix(memo))
-
-        resp = client.send_transaction(tx, kp)
-        sig = resp.get("result") if isinstance(resp, dict) else resp
-        try:
-            Client(config.RPC_URL).confirm_transaction(sig, commitment="confirmed")
-        except Exception:
-            pass
+            ),
+            _create_memo_ix(memo),
+        ]
+        sig = _build_and_send_legacy_tx(ixs, kp)
         print(f"Refunded USDC tx sig: {sig}")
         return True
     except Exception as e:
