@@ -45,7 +45,7 @@ def poll_nexus_usdd_deposits():
         "finance/transactions/account/"
         "txid,timestamp,confirmations,"
         "contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount,contracts.reference,contracts.ticker,contracts.token",
-        f"address={treasury_addr}",
+        f"name={treasury_addr}",
     ]
 
     try:
