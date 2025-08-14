@@ -34,7 +34,7 @@ def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | N
         cmd.append(f"pin={cfg.NEXUS_PIN}")
     try:
         print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
         if res.returncode != 0:
             print("Heartbeat update failed:", res.stderr.strip() or res.stdout.strip())
         else:
@@ -59,7 +59,7 @@ def read_heartbeat_waterlines() -> tuple[int, int]:
             "register/get/assets:asset",
             f"address={config.NEXUS_HEARTBEAT_ASSET_ADDRESS}",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
         if res.returncode != 0:
             return (_cached_waterlines["solana"], _cached_waterlines["nexus"])  # fallback
         data = json.loads(res.stdout or "{}")
@@ -80,6 +80,30 @@ def run():
     print("   Monitoring:")
     print("   - USDC → USDD: Solana deposits with Nexus address in memo")
     print("   - USDD → USDC: USDD deposits with Solana address in reference")
+
+    # Startup balances summary (USDC vault + USDD circulating supply)
+    try:
+        from decimal import Decimal
+        from . import solana_client, nexus_client
+
+        def _fmt_units(units: int, decimals: int) -> str:
+            try:
+                q = Decimal(10) ** -decimals
+                return str((Decimal(int(units)) / (Decimal(10) ** decimals)).quantize(q))
+            except Exception:
+                return str(units)
+
+        usdc_units = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
+        usdc_disp = _fmt_units(usdc_units, config.USDC_DECIMALS)
+        print(f"   USDC Vault Balance: {usdc_disp} USDC ({usdc_units} base) — {config.VAULT_USDC_ACCOUNT}")
+
+        usdd_units = nexus_client.get_circulating_usdd_units()
+        usdd_disp = _fmt_units(usdd_units, config.USDD_DECIMALS)
+        treas = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', '')
+        suffix = f" — Treasury: {treas}" if treas else ""
+        print(f"   USDD Circulating Supply: {usdd_disp} USDD ({usdd_units} base){suffix}")
+    except Exception as e:
+        print(f"   Startup metrics error: {e}")
 
     # Setup graceful shutdown via Ctrl+C (SIGINT) or SIGTERM
     import signal, threading
