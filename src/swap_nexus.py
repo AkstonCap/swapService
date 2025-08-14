@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from solana.publickey import PublicKey
+from solders.pubkey import Pubkey as PublicKey
 from . import config, state, solana_client, nexus_client, fees
 
 
@@ -166,7 +166,7 @@ def poll_nexus_usdd_deposits():
                 # Validate Solana address format
                 valid_sol = True
                 try:
-                    _ = PublicKey(sol_addr)
+                    _ = PublicKey.from_string(sol_addr)
                 except Exception:
                     valid_sol = False
 

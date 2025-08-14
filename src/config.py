@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from solana.publickey import PublicKey
+from solders.pubkey import Pubkey as PublicKey
 
 load_dotenv()
 
