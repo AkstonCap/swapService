@@ -72,10 +72,9 @@ def _dict_get_ci(d: Dict[str, Any], key: str):
 def is_expected_token(account_info: Dict[str, Any], expected: str) -> bool:
     if not isinstance(account_info, dict):
         return False
-    for key in ("ticker", "token", "symbol", "name"):
-        v = _dict_get_ci(account_info, key)
-        if isinstance(v, str) and v.upper() == expected.upper():
-            return True
+    v = _dict_get_ci(account_info, "ticker")
+    if isinstance(v, str) and v.upper() == expected.upper():
+        return True
     for container in ("result", "account", "data"):
         inner = _dict_get_ci(account_info, container)
         if isinstance(inner, dict) and is_expected_token(inner, expected):
@@ -92,13 +91,12 @@ def debit_usdd(to_addr: str, amount_usdd_units: int, reference: str) -> bool:
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
         return False
-    amt_str = _base_units_to_decimal_str(amount_usdd_units, config.USDD_DECIMALS)
     cmd = [
         config.NEXUS_CLI,
         "finance/debit/account",
         "from=USDD",
         f"to={to_addr}",
-        f"amount={amt_str}",
+        f"amount={amount_usdd_units}",
         f"reference={reference}",
         f"pin={config.NEXUS_PIN}",
     ]
@@ -126,13 +124,12 @@ def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_uni
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
         return False
-    amt_str = _base_units_to_decimal_str(amount_usdd_units, config.USDD_DECIMALS)
     cmd = [
         config.NEXUS_CLI,
         "finance/debit/account",
         f"from={from_addr}",
         f"to={to_addr}",
-        f"amount={amt_str}",
+        f"amount={amount_usdd_units}",
         f"reference={reference}",
         f"pin={config.NEXUS_PIN}",
     ]
@@ -188,10 +185,10 @@ def was_usdd_minted_for_sig(to_addr: str, sol_sig: str, lookback: int = 50) -> b
 
 
 # --- Nexus DEX (market) helpers ---
-def list_market_asks(market: str = "NXS/USDD", limit: int = 10) -> list[Dict[str, Any]]:
-    cmd = [config.NEXUS_CLI, "market/list/ask", f"market={market}", "sort=price", "order=asc", f"limit={limit}"]
+def list_market_bids(market: str = "USDD/NXS", limit: int = 20) -> list[Dict[str, Any]]:
+    cmd = [config.NEXUS_CLI, "market/list/bid", f"market={market}", "sort=price", "order=desc", f"limit={limit}"]
     try:
-        code, out, err = _run(cmd, timeout=15)
+        code, out, err = _run(cmd, timeout=5)
         if code != 0:
             print("Nexus market list error:", err or out)
             return []
@@ -199,11 +196,9 @@ def list_market_asks(market: str = "NXS/USDD", limit: int = 10) -> list[Dict[str
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            # Sometimes results might be under a key
-            for k in ("result", "orders", "data", "asks"):
-                v = data.get(k)
-                if isinstance(v, list):
-                    return v
+            v = data.get("bids")
+            if isinstance(v, list):
+                return v
         return []
     except Exception as e:
         print("Nexus market list exception:", e)
@@ -248,38 +243,30 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
     """
     if usdd_budget_units <= 0:
         return 0
-    asks = list_market_asks("NXS/USDD", limit=20)
-    if not asks:
+    bids = list_market_bids("USDD/NXS", limit=20)
+    if not bids:
         return 0
 
-    remaining = Decimal(usdd_budget_units) / (Decimal(10) ** config.USDD_DECIMALS)
+    remaining = Decimal(usdd_budget_units)
     spent_total = Decimal(0)
 
     # Build a plan of orders whose total cost <= budget
     plan: list[dict] = []
     plan_cost = Decimal(0)
-    for ask in asks:
-        txid = ask.get("txid") or ask.get("id") or ask.get("orderId")
-        price = _to_decimal(ask.get("price"))
-        amount = _to_decimal(ask.get("amount"))
+    for bid in bids:
+        txid = bid.get("txid")
+        price = _to_decimal(bid.get("price"))
+        order = bid.get("order")
+        amount = _to_decimal(order.get("amount"))
         if not txid or price <= 0 or amount <= 0:
             continue
-        cost = price * amount
-        if cost <= 0:
-            continue
-        if plan_cost + cost <= remaining:
-            plan.append({"txid": str(txid), "cost": cost})
-            plan_cost += cost
+        if plan_cost + amount <= remaining:
+            plan.append({"txid": str(txid), "cost": amount})
+            plan_cost += amount
         if plan_cost >= remaining:
             break
 
     if plan_cost <= 0:
-        return 0
-
-    # Mint USDD into our own account to cover plan_cost
-    mint_units = int((plan_cost * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value())
-    if not debit_usdd(config.NEXUS_USDD_TREASURY_ACCOUNT, mint_units, "FEE_CONV_NXS"):
-        print("Nexus: failed to mint USDD for NXS purchase")
         return 0
 
     # Execute planned orders until budget is exhausted
@@ -294,9 +281,7 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
         else:
             print(f"Nexus: execute failed for order {txid}")
 
-
-    spent_units = int((spent_total * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value())
-    return spent_units
+    return spent_total
 
 
 # --- Treasury and metrics ---
@@ -313,18 +298,10 @@ def get_circulating_usdd_units() -> int:
             s = str(data)
             dec = Decimal(s)
         elif isinstance(data, dict):
-            for k in ("value", "amount", "supply", "result"):
-                if k in data:
-                    try:
-                        dec = Decimal(str(data[k]))
-                        break
-                    except Exception:
-                        continue
-            else:
-                return 0
+            dec = Decimal(str(data["currentsupply"]))
         else:
             return 0
-        units = int((dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value())
+        units = int(dec)
         return units
     except Exception as e:
         print("Nexus circulating supply exception:", e)
