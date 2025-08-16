@@ -12,18 +12,27 @@ def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | N
     from . import config as cfg
     import subprocess
     global _last_heartbeat
-    if not cfg.HEARTBEAT_ENABLED or not cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS:
+    if not cfg.HEARTBEAT_ENABLED or not cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS or not cfg.NEXUS_HEARTBEAT_ASSET_NAME:
         return
     now = int(time.time())
     if not force and (now - _last_heartbeat) < cfg.HEARTBEAT_MIN_INTERVAL_SEC:
         return
-    fields = [
-        cfg.NEXUS_CLI,
-        "assets/update/asset",
-        f"address={cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS}",
-        "format=basic",
-        f"last_poll_timestamp={now}",
-    ]
+    if cfg.NEXUS_HEARTBEAT_ASSET_NAME:
+        fields = [
+            cfg.NEXUS_CLI,
+            "assets/update/asset",
+            "format=basic",
+            f"name={cfg.NEXUS_HEARTBEAT_ASSET_NAME}",
+            f"last_poll_timestamp={now}",
+        ]
+    else:
+        fields = [
+            cfg.NEXUS_CLI,
+            "assets/update/asset",
+            f"address={cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS}",
+            "format=basic",
+            f"last_poll_timestamp={now}",
+        ]
     if cfg.HEARTBEAT_WATERLINE_ENABLED:
         if set_solana_waterline is not None:
             fields.append(f"{cfg.HEARTBEAT_WATERLINE_SOLANA_FIELD}={int(set_solana_waterline)}")
@@ -51,13 +60,13 @@ def read_heartbeat_waterlines() -> tuple[int, int]:
     Returns tuple (solana_waterline, nexus_waterline).
     """
     try:
-        if not config.HEARTBEAT_ENABLED or not config.NEXUS_HEARTBEAT_ASSET_ADDRESS:
+        if not config.HEARTBEAT_ENABLED or not config.NEXUS_HEARTBEAT_ASSET_NAME:
             return (0, 0)
         import subprocess, json
         cmd = [
             config.NEXUS_CLI,
             "register/get/assets:asset",
-            f"address={config.NEXUS_HEARTBEAT_ASSET_ADDRESS}",
+            f"name={config.NEXUS_HEARTBEAT_ASSET_NAME}",
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
         if res.returncode != 0:
