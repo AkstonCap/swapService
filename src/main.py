@@ -169,7 +169,12 @@ def run():
             poll_solana_deposits()
             poll_nexus_usdd_deposits()
             state.save_state()
-            update_heartbeat_asset()
+            # Apply any conservative waterline proposals, if present
+            try:
+                sol_ts, nex_ts = state.get_and_clear_proposed_waterlines()
+            except Exception:
+                sol_ts, nex_ts = (None, None)
+            update_heartbeat_asset(set_solana_waterline=sol_ts, set_nexus_waterline=nex_ts)
             if _stop_event.wait(config.POLL_INTERVAL):
                 break
     except KeyboardInterrupt:
