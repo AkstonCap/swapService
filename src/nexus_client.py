@@ -283,11 +283,11 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
 
 # --- Treasury and metrics ---
 def get_circulating_usdd_units() -> int:
-    cmd = [config.NEXUS_CLI, "finance/get/token/circulatingsupply", f"name={config.NEXUS_TOKEN_NAME}"]
+    cmd = [config.NEXUS_CLI, "finance/get/token/currentsupply", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus circulating supply error:", err or out)
+            print("Nexus USDD current supply error:", err or out)
             return 0
         data = _parse_json_lenient(out)
         # Accept either raw number or an object containing value/amount
@@ -301,7 +301,7 @@ def get_circulating_usdd_units() -> int:
         units = int(dec)
         return units
     except Exception as e:
-        print("Nexus circulating supply exception:", e)
+        print("Nexus USDD current supply exception:", e)
         return 0
 
 
