@@ -37,44 +37,99 @@ def reset_usdc_fees():
     _save()
 
 def process_fee_conversions():
-    """Optional: convert some accumulated USDC fees into SOL via DEX for gas, and mint USDD fees on Nexus.
-    - USDC fees remain in the vault account (single USDC account policy).
-    - If NEXUS_USDD_FEES_ACCOUNT is configured, mint equivalent USDD there for accounting.
+    """Policy-driven rebalance when backing ratio > 1.
+    - Check balances: SOL (lamports), USDC (vault ATA), NXS (via finance/get/balances), USDD circulating supply.
+    - Only act if vault_usdc > circ_usdd (backing ratio > 1).
+    - Cases:
+      1) Only SOL below min: spend USDC to buy SOL until ratio == 1 or SOL reaches target; if hit target first, move USDD from treasury to local to bring ratio to 1.
+      2) Only NXS below min: move USDD from treasury to local to bring ratio to 1, then buy NXS using up to all local USDD.
+      3) Both SOL and NXS below min: spend 50% of USDC surplus to SOL, 50% via USDD buy path to NXS.
+      4) Neither below min and ratio >= 1.05 and vault USDC > threshold: move USDD from treasury to local to bring ratio to 1.
+    - USDC fees remain in the vault. This function uses actual vault USDC balance, not the "accumulated" tracker.
     """
     if not config.FEE_CONVERSION_ENABLED:
         return
-    total_usdc = get_usdc_fees()
-    if total_usdc <= 0 or total_usdc < config.FEE_CONVERSION_MIN_USDC:
-        return
-    # 1) Invariant: vault USDC == circulating USDD (use fees to restore if needed)
     try:
-        from . import nexus_client
-        circ_usdd_units = nexus_client.get_circulating_usdd_units()
-    except Exception:
-        circ_usdd_units = 0
-    # We can only easily read vault USDC off-chain by querying the token account; skip here and assume
-    # the swap logic mints net=received and sends net=redeemed so drift should be zero.
-    # If you want strict enforcement, add an RPC check of config.VAULT_USDC_ACCOUNT token balance and compare.
-
-    # 2) Keep SOL topped up using USDC fees
-    try:
-        from . import solana_client
+        from . import solana_client, nexus_client
+        # Read balances
+        vault_usdc = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
+        circ_usdd = nexus_client.get_circulating_usdd_units()
         lamports = solana_client.get_vault_sol_balance()
-    except Exception:
-        lamports = None
-    if lamports is not None and config.SOL_TOPUP_MIN_LAMPORTS and lamports < config.SOL_TOPUP_MIN_LAMPORTS:
-        need = max(0, config.SOL_TOPUP_TARGET_LAMPORTS - lamports)
-        # naive conversion target: assume ~1 USDC per 0.01 SOL; actual rate needs DEX quote. Keep small and safe.
-        usdc_for_sol = min(get_usdc_fees(), max(config.FEE_CONVERSION_MIN_USDC, need))
-        if usdc_for_sol > 0:
-            ok = solana_client.swap_usdc_for_sol_via_jupiter(usdc_for_sol)
-            if ok:
-                _fees_state["usdc_accumulated"] = max(0, _fees_state["usdc_accumulated"] - usdc_for_sol)
-                _save()
-            else:
-                print("[fees] USDC->SOL swap failed (stub or DEX error)")
+        nxs_units = nexus_client.get_nxs_default_balance_units()
+        # thresholds
+        sol_min = int(config.SOL_TOPUP_MIN_LAMPORTS or 0)
+        sol_target = int(config.SOL_TOPUP_TARGET_LAMPORTS or 0)
+        nxs_min = int(config.NEXUS_NXS_TOPUP_MIN or 0)
 
-    # 3) USDD fees are transferred during swap events; no mint here to avoid duplication.
+        # Compute backing surplus (USDC - USDD)
+        surplus = max(0, vault_usdc - circ_usdd)
+        if surplus <= 0:
+            return
+
+        sol_below = lamports is not None and sol_min and lamports < sol_min
+        nxs_below = nxs_min and nxs_units < nxs_min
+
+        # Helper to mint USDD from treasury to local up to delta
+        def _mint_usdd_to_local(units: int) -> int:
+            if units <= 0:
+                return 0
+            ok = nexus_client.mint_usdd_to_local(units, "REBALANCE_TO_1")
+            return units if ok else 0
+
+        # Helper to buy SOL using Jupiter spending USDC base units (not exceeding surplus)
+        def _buy_sol_with_usdc(usdc_units: int) -> int:
+            amt = max(0, min(usdc_units, surplus))
+            if amt <= 0:
+                return 0
+            ok = solana_client.swap_usdc_for_sol_via_jupiter(amt)
+            if ok:
+                return amt
+            return 0
+
+        # Helper to buy NXS using local USDD: spends up to given usdd budget
+        def _buy_nxs_with_local_usdd(usdd_budget: int) -> int:
+            return int(nexus_client.buy_nxs_with_usdd_budget(usdd_budget))
+
+        # Case evaluations
+        if sol_below and not nxs_below:
+            # Spend USDC to buy SOL until ratio 1 or SOL reaches target
+            # Spend at most 'surplus' USDC
+            spent_usdc = _buy_sol_with_usdc(surplus)
+            # Recompute surplus after spend
+            vault_usdc2 = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
+            surplus2 = max(0, vault_usdc2 - circ_usdd)
+            # If SOL reached target before ratio 1, move USDD from treasury to local to reduce ratio to 1
+            if sol_target and lamports is not None:
+                lamports = solana_client.get_vault_sol_balance()
+                if lamports >= sol_target and surplus2 > 0:
+                    _mint_usdd_to_local(min(surplus2, vault_usdc2))
+            return
+
+        if nxs_below and not sol_below:
+            # First bring ratio to 1 by moving USDD from treasury to local
+            moved = _mint_usdd_to_local(surplus)
+            # Then purchase NXS with all available local USDD
+            local_usdd = nexus_client.get_usdd_local_balance_units()
+            if local_usdd > 0:
+                _buy_nxs_with_local_usdd(local_usdd)
+            return
+
+        if sol_below and nxs_below:
+            half = surplus // 2
+            _buy_sol_with_usdc(half)
+            moved = _mint_usdd_to_local(surplus - half)
+            local_usdd = nexus_client.get_usdd_local_balance_units()
+            if local_usdd > 0:
+                _buy_nxs_with_local_usdd(local_usdd)
+            return
+
+        # Neither below min: if ratio above 1.05 and vault usdc > threshold, move USDD to local to bring back to 1
+        # Use 5% margin on circulating (ceil): amount to move = min(surplus, vault_usdc)
+        if vault_usdc * 100 >= circ_usdd * 105 and vault_usdc > config.BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS:
+            _mint_usdd_to_local(min(surplus, vault_usdc))
+            return
+    except Exception as e:
+        print(f"[fees] process_fee_conversions error: {e}")
 
 def reconcile_fees_to_fee_account(min_transfer_units: int = 0):
     """Deprecated: No separate USDC fee account. USDC fees remain in the vault.
