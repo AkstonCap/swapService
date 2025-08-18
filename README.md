@@ -9,7 +9,7 @@ A Python service that enables automatic swapping between USDC (Solana) and USDD 
 2. The same transaction must include a Memo: `nexus:<NEXUS_ADDRESS>`.
 3. Service validates the Nexus address exists and is for the expected token (`NEXUS_TOKEN_NAME`, e.g., USDD).
 4. If valid, the service mints/sends USDD on Nexus to that address (amount normalized by decimals).
-5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDC`) is always retained on this path. On successful swaps, a dynamic fee in bps (`FEE_BPS_USDC_TO_USDD`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
+5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDC`) is always retained on this path. On successful swaps, a dynamic fee in bps (`DYNAMIC_FEE_BPS`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
 
 Notes:
 - Amounts are handled in base units and normalized between `USDC_DECIMALS` and `USDD_DECIMALS`.
@@ -20,7 +20,7 @@ Notes:
 2. The transaction’s reference must be: `solana:<SOLANA_ADDRESS>`.
 3. Service validates the Solana address format.
 4. If valid, the service sends USDC from the vault to that address. The recipient must already have a USDC ATA (we do not create it).
-5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. On successful sends, an optional dynamic fee (`FEE_BPS_USDD_TO_USDC`, default 0) may be retained; no fee is taken on refunds.
+5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. On successful sends, an optional dynamic fee (`DYNAMIC_FEE_BPS`, set to 0 if you want no fee on this path) may be retained; no fee is taken on refunds.
 
 Policy notes on USDD → USDC:
 - Tiny USDD credits ≤ `FLAT_FEE_USDD` are routed to your `NEXUS_USDD_LOCAL_ACCOUNT` (no USDC is sent) and the item is marked processed.
@@ -39,41 +39,10 @@ The service can update a Nexus Asset’s mutable field `last_poll_timestamp` aft
 - The service enforces a minimum update interval: `HEARTBEAT_MIN_INTERVAL_SEC` (defaults to `max(10, POLL_INTERVAL)`).
 
 Setup steps:
-1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds). You can also add optional per-chain waterline fields:
-  - Use Nexus API/CLI: `assets/create/asset` (only once).
-  - Or use the helper script as described below ("create_heartbeat_asset.py") to create it quickly (supports optional waterlines).
-2. Put the asset’s address in `.env` as `NEXUS_HEARTBEAT_ASSET_ADDRESS`.
-3. Ensure `HEARTBEAT_ENABLED=true`.
-
-Create the heartbeat asset via helper script (adds last_poll_timestamp; optionally waterlines):
-```powershell
-python .\create_heartbeat_asset.py --name swapServiceHeartbeat --with-waterlines
-# If you omit --name, an unnamed asset is created; read it by address
-```
-Linux/macOS:
-```bash
-python3 ./create_heartbeat_asset.py --name swapServiceHeartbeat --with-waterlines
-# If you omit --name, an unnamed asset is created; read it by address
-```
-The script initializes a mutable `last_poll_timestamp` field and, when `--with-waterlines` is provided, also adds `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` by default (field names configurable via env or flags). It prints the asset address to set in `.env`.
-
-Helper .env requirements:
-- The helper loads `.env` using python-dotenv. Run it from the repo root so `.env` is found.
-- Required entries for the helper:
-  ```env
-  # Nexus CLI location (use absolute path if not in repo root)
-  NEXUS_CLI_PATH=./nexus
-  # Required for asset creation
-  NEXUS_PIN=1234
-  # Optional: override waterline field names used on the asset
-  HEARTBEAT_WATERLINE_SOLANA_FIELD=last_safe_timestamp_solana
-  HEARTBEAT_WATERLINE_NEXUS_FIELD=last_safe_timestamp_usdd
-  ```
-After creation, set these for the service:
-  ```env
-  HEARTBEAT_ENABLED=true
-  NEXUS_HEARTBEAT_ASSET_ADDRESS=<address printed by helper>
-  ```
+1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds). You can also add optional per-chain waterline fields. Use Nexus CLI (example):
+  - `assets/create/asset name=swapServiceHeartbeat mutable=last_poll_timestamp`
+  - Optionally add fields `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` for waterlines.
+2. Put the asset’s address in `.env` as `NEXUS_HEARTBEAT_ASSET_ADDRESS` and ensure `HEARTBEAT_ENABLED=true`.
 
 How clients check status:
 - Read the asset throught the `register` api: `register/get/assets:asset address=<ASSET_ADDRESS>`
@@ -143,6 +112,8 @@ SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 VAULT_KEYPAIR=./vault-keypair.json
 VAULT_USDC_ACCOUNT=<YOUR_VAULT_USDC_TOKEN_ACCOUNT_ADDRESS>
 USDC_MINT=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+# Native SOL (used by fee conversions/Jupiter path). Keep default unless you know otherwise.
+SOL_MINT=So11111111111111111111111111111111111111112
 # Devnet USDC: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
 
 # Decimals (base units)
@@ -155,6 +126,7 @@ NEXUS_SESSION=<YOUR_NEXUS_SESSION>
 NEXUS_PIN=<YOUR_NEXUS_PIN>
 NEXUS_USDD_TREASURY_ACCOUNT=<YOUR_USDD_TREASURY_ACCOUNT_ADDRESS>
 NEXUS_USDD_LOCAL_ACCOUNT=<YOUR_LOCAL_USDD_ACCOUNT_ADDRESS>
+NEXUS_USDD_FEES_ACCOUNT=<YOUR_USDD_FEES_ACCOUNT_ADDRESS>
 NEXUS_TOKEN_NAME=USDD
 NEXUS_RPC_HOST=http://127.0.0.1:8399
 
@@ -171,10 +143,9 @@ ACTION_RETRY_COOLDOWN_SEC=300
 FLAT_FEE_USDC=0.1
 # Threshold for tiny USDD deposits; tiny USDD is treated as dust on USDD→USDC
 FLAT_FEE_USDD=0.1
-# Dynamic fee (bps) on successful USDC→USDD swaps (0.1% = 10 bps)
-FEE_BPS_USDC_TO_USDD=10
-# No dynamic fee on USDD→USDC by default
-FEE_BPS_USDD_TO_USDC=0
+# Single dynamic fee (bps) applied on successful swaps (both directions)
+# Set to 0 if you want no dynamic fee on USDD→USDC.
+DYNAMIC_FEE_BPS=10
 
 # Optional on-chain heartbeat
 HEARTBEAT_ENABLED=true
@@ -327,6 +298,8 @@ Expected startup output:
    Monitoring:
    - USDC → USDD: Solana deposits with Nexus address in memo
    - USDD → USDC: USDD deposits with Solana address in reference
+  USDC Vault Balance: <amount> USDC (<base> base) — <VAULT_USDC_ACCOUNT>
+  USDD Circulating Supply: <amount> USDD (<base> base) — Treasury: <NEXUS_USDD_TREASURY_ACCOUNT>
 ```
 
 ## User Instructions
@@ -363,11 +336,11 @@ How to create your USDC ATA (user-side):
 | NEXUS_PIN | Nexus account PIN | ✅ | - |
 | NEXUS_USDD_TREASURY_ACCOUNT | Your USDD treasury account address | ✅ | - |
 | NEXUS_USDD_LOCAL_ACCOUNT | Your local USDD account address (optional) | ❌ | - |
-| NEXUS_USDD_FEES_ACCOUNT | USDD account to receive minted fees | ❌ | - |
+| NEXUS_USDD_FEES_ACCOUNT | USDD account to receive minted fees | ✅ | - |
 | FLAT_FEE_USDC | Flat fee (USDC) for Solana→Nexus | ❌ | 0.1 |
 | FLAT_FEE_USDD | Tiny threshold (USDD) for Nexus→Solana | ❌ | 0.1 |
-| FEE_BPS_USDC_TO_USDD | Dynamic fee bps on successful Solana→Nexus | ❌ | 10 |
-| FEE_BPS_USDD_TO_USDC | Dynamic fee bps on Nexus→Solana | ❌ | 0 |
+| DYNAMIC_FEE_BPS | Dynamic fee bps on successful swaps (both directions) | ❌ | 10 |
+| SOL_MINT | Native SOL mint (for conversions/Jupiter) | ❌ | So11111111111111111111111111111111111111112 |
 | NEXUS_CLI_PATH | Path to Nexus CLI | ❌ | ./nexus |
 | NEXUS_TOKEN_NAME | Token ticker used for validation | ❌ | USDD |
 | NEXUS_RPC_HOST | Nexus RPC host (if applicable) | ❌ | http://127.0.0.1:8399 |
@@ -402,7 +375,9 @@ Idempotency:
 
 ## Troubleshooting
 - Unresolved imports: run `python -m pip install -r requirements.txt`.
-- ImportError: No module named spl.token: The `spl.token` module ships inside the `solana` package. Ensure the pinned versions from `requirements.txt` (e.g. `solana==0.36.9` and `solders==0.26.0`) are installed in the active virtual environment.
+- Transactions are built/signed with solders; ensure `solana` and `solders` versions from `requirements.txt` are installed in your active environment.
+- Nexus CLI outputs may include a trailing footer like `[Completed in … ms]`. The service parses JSON leniently and ignores this footer by default.
+- Use Ctrl+C to stop the service gracefully; it will save state before exiting.
 - error: externally-managed-environment (PEP 668) on Ubuntu/Debian: use a virtual environment instead of system Python.
   ```bash
   sudo apt update
