@@ -82,11 +82,6 @@ def is_expected_token(account_info: Dict[str, Any], expected: str) -> bool:
     return False
 
 
-def _base_units_to_decimal_str(units: int, decimals: int) -> str:
-    q = Decimal(10) ** -decimals
-    return str((Decimal(int(units)) / (Decimal(10) ** decimals)).quantize(q))
-
-
 def debit_usdd(to_addr: str, amount_usdd_units: int, reference: str) -> bool:
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
@@ -261,9 +256,10 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
         amount = _to_decimal(order.get("amount"))
         if not txid or price <= 0 or amount <= 0:
             continue
-        if plan_cost + amount <= remaining:
-            plan.append({"txid": str(txid), "cost": amount})
-            plan_cost += amount
+        cost_usdd = price * amount
+        if plan_cost + cost_usdd <= remaining:
+            plan.append({"txid": str(txid), "cost": cost_usdd})
+            plan_cost += cost_usdd
         if plan_cost >= remaining:
             break
 
@@ -312,4 +308,51 @@ def get_circulating_usdd_units() -> int:
 def debit_usdd_to_self(amount_usdd_units: int, reference: str) -> bool:
     # Mint/credit into our treasury USDD account (config.NEXUS_USDD_TREASURY_ACCOUNT)
     return debit_usdd(config.NEXUS_USDD_TREASURY_ACCOUNT, amount_usdd_units, reference)
+
+
+def get_nxs_default_balance_units() -> int:
+    """Return available balance of the NXS account named 'default'."""
+    cmd = [config.NEXUS_CLI, "finance/get/account", "name=default"]
+    try:
+        code, out, err = _run(cmd, timeout=10)
+        if code != 0:
+            return 0
+        data = _parse_json_lenient(out)
+        if not isinstance(data, dict):
+            return 0
+        bal = data.get("balance")
+        if bal is None and isinstance(data.get("result"), dict):
+            bal = data["result"].get("balance")
+        return int(_to_decimal(bal)) if bal is not None else 0
+    except Exception:
+        return 0
+
+
+def get_usdd_local_balance_units() -> int:
+    """Return available USDD balance in the local account (if queryable via finance/get/account)."""
+    try:
+        info = get_account_info(config.NEXUS_USDD_LOCAL_ACCOUNT)
+        if not info:
+            return 0
+        # balance may be in "balance" or nested
+        v = info.get("balance")
+        if v is None and isinstance(info.get("result"), dict):
+            v = info["result"].get("balance")
+        return int(_to_decimal(v)) if v is not None else 0
+    except Exception:
+        return 0
+
+
+def transfer_usdd_treasury_to_local(amount_usdd_units: int, reference: str = "REBALANCE") -> bool:
+    """Move USDD from treasury to local account without minting."""
+    if not config.NEXUS_USDD_TREASURY_ACCOUNT or not config.NEXUS_USDD_LOCAL_ACCOUNT:
+        return False
+    return transfer_usdd_between_accounts(config.NEXUS_USDD_TREASURY_ACCOUNT, config.NEXUS_USDD_LOCAL_ACCOUNT, amount_usdd_units, reference)
+
+
+def mint_usdd_to_local(amount_usdd_units: int, reference: str = "REBALANCE_TO_1") -> bool:
+    """Mint new USDD into the local account to increase circulating supply (uses debit to local)."""
+    if not config.NEXUS_USDD_LOCAL_ACCOUNT:
+        return False
+    return debit_usdd(config.NEXUS_USDD_LOCAL_ACCOUNT, amount_usdd_units, reference)
 
