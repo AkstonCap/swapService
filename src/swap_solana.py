@@ -56,14 +56,16 @@ def poll_solana_deposits():
     from solana.rpc.api import Client
     from solders.signature import Signature
     try:
-        client = Client(config.RPC_URL)
-        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=100)
+        client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
+        limit = 100
+        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=limit)
         sig_results = _normalize_get_sigs_response(sigs_resp)
         # Read heartbeat waterline and compute cutoff
         from .main import read_heartbeat_waterlines
         wl_solana, _ = read_heartbeat_waterlines()
         wl_cutoff = int(max(0, wl_solana - config.HEARTBEAT_WATERLINE_SAFETY_SEC)) if config.HEARTBEAT_WATERLINE_ENABLED else 0
         sig_list: list[str] = []
+        sig_bt: dict[str, int] = {}
         for r in sig_results:
             sig = r.get("signature")
             if not sig:
@@ -76,12 +78,13 @@ def poll_solana_deposits():
             if wl_cutoff and bt and bt < wl_cutoff:
                 continue
             sig_list.append(sig)
+            sig_bt[sig] = bt
 
         for sig in sig_list:
             if sig in state.processed_sigs:
                 continue
 
-            mark_processed = True
+            mark_processed = False
             try:
                 sig_obj = Signature.from_string(sig)
                 tx_resp = client.get_transaction(sig_obj, encoding="jsonParsed")
@@ -98,6 +101,12 @@ def poll_solana_deposits():
                         tx = None
                 if not tx:
                     continue
+                # Skip failed transactions
+                try:
+                    if (tx.get("meta") or {}).get("err") is not None:
+                        continue
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"Error fetching transaction {sig}: {e}")
                 continue
@@ -116,12 +125,13 @@ def poll_solana_deposits():
 
                         source_token_acc = info.get("source")
                         memo_data = solana_client.extract_memo_from_instructions(tx["transaction"]["message"]["instructions"])
-                        flat_fee_units = max(0, int(config.FLAT_FEE_USDC_UNITS))
+                        flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
 
                         # Tiny deposit drop: treat <= flat fee threshold entirely as fee, do nothing else
                         if amount_usdc_units <= flat_fee_units:
                             fees.add_usdc_fee(amount_usdc_units)
                             print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action")
+                            mark_processed = True
                             break
 
                         if not memo_data:
@@ -173,7 +183,7 @@ def poll_solana_deposits():
                                 # Apply fees on USDC→USDD path:
                                 # - Always retain a flat fee (on success or refund)
                                 # - Apply dynamic fee BPS only on successful mint
-                                dynamic_bps = max(0, int(config.FEE_BPS_USDC_TO_USDD))
+                                dynamic_bps = max(0, int(getattr(config, "DYNAMIC_FEE_BPS", 0)))
                                 # Net amount available for mint before dynamic fee
                                 pre_dynamic_net = max(0, amount_usdc_units - flat_fee_units)
                                 dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000 if dynamic_bps > 0 else 0
@@ -238,6 +248,17 @@ def poll_solana_deposits():
 
             if mark_processed:
                 state.processed_sigs.add(sig)
+        # Propose a conservative waterline only if page wasn't full.
+        # We use the minimum blockTime among the page's signatures we examined,
+        # ensuring we don't skip any unseen older entries.
+        try:
+            if isinstance(sig_results, list) and len(sig_results) < limit:
+                # Compute min blockTime across the page (non-zero only)
+                bt_candidates = [bt for bt in sig_bt.values() if bt]
+                if bt_candidates:
+                    state.propose_solana_waterline(int(min(bt_candidates)))
+        except Exception:
+            pass
     except Exception as e:
         print(f"poll_solana_deposits error: {e}")
     finally:
