@@ -59,16 +59,18 @@ HEARTBEAT_WATERLINE_NEXUS_FIELD = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "
 HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC", "120"))
 
 # Fees (optional)
-FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.1")  # fixed fee in USDC (e.g., 0.1)
-FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # threshold and fee floor in USDD
+# One flat USDC fee (token units, e.g., 0.1 USDC) and one dynamic fee (bps of USDC amount),
+# used consistently across both swap directions.
+FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.1")  # fixed fee in USDC token units
+FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # tiny routing threshold in USDD token units
 def _to_units(s: str, decimals: int) -> int:
     from decimal import Decimal
     return int((Decimal(s) * (Decimal(10) ** decimals)).to_integral_value())
 FLAT_FEE_USDC_UNITS = _to_units(FLAT_FEE_USDC, USDC_DECIMALS)
 FLAT_FEE_USDD_UNITS = _to_units(FLAT_FEE_USDD, USDD_DECIMALS)
 
-FEE_BPS_USDC_TO_USDD = int(os.getenv("FEE_BPS_USDC_TO_USDD", "10"))  # dynamic fee (0.1%) for successful USDC→USDD swaps
-FEE_BPS_USDD_TO_USDC = int(os.getenv("FEE_BPS_USDD_TO_USDC", "0"))  # no dynamic fee on Nexus→Solana path by default
+# Single dynamic fee setting (bps of USDC amount). Applies to both directions.
+DYNAMIC_FEE_BPS = int(os.getenv("DYNAMIC_FEE_BPS", "10"))  # 10 bps = 0.1%
 FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 
 # Fee conversions (scaffolding / optional)
