@@ -154,30 +154,31 @@ def send_tiny_usdd_to_local(amount_usdd_units: int, note: str = "TINY_USDD") -> 
 
 
 def was_usdd_minted_for_sig(to_addr: str, sol_sig: str, lookback: int = 50) -> bool:
-    """Check recipient account's recent transactions for a CREDIT with reference 'USDC_TX:<sig>'."""
+    """Check recipient account's recent transactions for a CREDIT contract with reference 'USDC_TX:<sig>'."""
     ref = f"USDC_TX:{sol_sig}"
     cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={to_addr}"]
     try:
         code, out, err = _run(cmd, timeout=15)
         if code != 0:
             return False
-        data = json.loads(out)
+        data = _parse_json_lenient(out)
         txs = data if isinstance(data, list) else [data]
-        count = 0
-        for tx in txs:
+        scanned = 0
+        for tx in (txs or []):
             if not isinstance(tx, dict):
                 continue
-            # Only scan up to lookback entries
-            count += 1
-            if count > max(10, lookback):
+            scanned += 1
+            if scanned > max(10, lookback):
                 break
-            t = (tx.get("type") or "").upper()
-            if t != "CREDIT":
+            if int(tx.get("confirmations") or 0) <= 0:
                 continue
-            r = tx.get("reference") or tx.get("ref") or ""
-            if str(r).strip() == ref:
-                confirmed = bool(tx.get("confirmed", False)) or (tx.get("confirmation", 0) or 0) > 0 or (tx.get("confirmations", 0) or 0) > 0
-                if confirmed:
+            for c in (tx.get("contracts") or []):
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("OP") or "").upper() != "CREDIT":
+                    continue
+                r = c.get("reference")
+                if str(r).strip() == ref:
                     return True
         return False
     except Exception:
