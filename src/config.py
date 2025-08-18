@@ -93,3 +93,11 @@ FEES_USDD_MAX = int(os.getenv("FEES_USDD_MAX", "0"))
 # Target accumulation ratio: 1 SOL for every 10000 NXS by default
 TARGET_SOL_PER_NXS_NUM = int(os.getenv("TARGET_SOL_PER_NXS_NUM", "1"))
 TARGET_SOL_PER_NXS_DEN = int(os.getenv("TARGET_SOL_PER_NXS_DEN", "10000"))
+
+# Backing surplus mint threshold: when ratio > 1 + margin and vault USDC > this, mint to bring back to 1
+_SURPLUS_THRESH_USDC = os.getenv("BACKING_SURPLUS_MINT_THRESHOLD_USDC", "20")
+try:
+    from decimal import Decimal as _D
+    BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS = int((_D(_SURPLUS_THRESH_USDC) * (_D(10) ** USDC_DECIMALS)).to_integral_value())
+except Exception:
+    BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS = 20 * (10 ** USDC_DECIMALS)
