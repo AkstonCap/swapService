@@ -62,3 +62,43 @@ def record_attempt(action_key: str):
     rec["last"] = _now()
     attempt_state[action_key] = rec
     save_state()
+
+# --- Ephemeral proposed waterlines (not persisted) ---
+_proposed_solana_waterline: int | None = None
+_proposed_nexus_waterline: int | None = None
+
+def propose_solana_waterline(ts: int):
+    """Propose a conservative Solana waterline timestamp (seconds). Keeps the minimum of proposals."""
+    global _proposed_solana_waterline
+    try:
+        ts = int(ts)
+        if ts <= 0:
+            return
+    except Exception:
+        return
+    if _proposed_solana_waterline is None:
+        _proposed_solana_waterline = ts
+    else:
+        _proposed_solana_waterline = min(_proposed_solana_waterline, ts)
+
+def propose_nexus_waterline(ts: int):
+    """Propose a conservative Nexus waterline timestamp (seconds). Keeps the minimum of proposals."""
+    global _proposed_nexus_waterline
+    try:
+        ts = int(ts)
+        if ts <= 0:
+            return
+    except Exception:
+        return
+    if _proposed_nexus_waterline is None:
+        _proposed_nexus_waterline = ts
+    else:
+        _proposed_nexus_waterline = min(_proposed_nexus_waterline, ts)
+
+def get_and_clear_proposed_waterlines() -> tuple[int | None, int | None]:
+    """Return (solana_ts, nexus_ts) proposals and clear them for the next loop."""
+    global _proposed_solana_waterline, _proposed_nexus_waterline
+    s, n = _proposed_solana_waterline, _proposed_nexus_waterline
+    _proposed_solana_waterline = None
+    _proposed_nexus_waterline = None
+    return s, n
