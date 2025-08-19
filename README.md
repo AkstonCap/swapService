@@ -9,7 +9,7 @@ A Python service that enables automatic swapping between USDC (Solana) and USDD 
 2. The same transaction must include a Memo: `nexus:<NEXUS_ADDRESS>`.
 3. Service validates the Nexus address exists and is for the expected token (`NEXUS_TOKEN_NAME`, e.g., USDD).
 4. If valid, the service mints/sends USDD on Nexus to that address (amount normalized by decimals).
-5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDC`) is always retained on this path. On successful swaps, a dynamic fee in bps (`DYNAMIC_FEE_BPS`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
+5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDC`) is charged per refund attempt on this path. On successful swaps, a dynamic fee in bps (`DYNAMIC_FEE_BPS`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
 
 Notes:
 - Amounts are handled in base units and normalized between `USDC_DECIMALS` and `USDD_DECIMALS`.
@@ -31,6 +31,10 @@ Policy notes on USDD → USDC:
   - `ACTION_RETRY_COOLDOWN_SEC` between attempts.
 - Processed state is persisted; items are only marked processed after a successful outcome.
 - Solana transfers include confirmation attempts.
+ - If all refund attempts fail:
+   - USDC→USDD path: the remaining refundable amount (after the last attempt's flat fee) is moved from the vault USDC token account to a self-owned quarantine USDC token account.
+   - USDD→USDC path: the remaining refundable USDD is moved from the treasury to a self-owned Nexus USDD quarantine account.
+   - In both cases, a JSON line is written to `FAILED_REFUNDS_FILE` for manual inspection.
 
 ## Optional Public Heartbeat (Free, On-Chain)
 The service can update a Nexus Asset’s mutable field `last_poll_timestamp` after each poll cycle. Anyone can read this on-chain to determine whether the service is online.
@@ -129,6 +133,13 @@ NEXUS_USDD_LOCAL_ACCOUNT=<YOUR_LOCAL_USDD_ACCOUNT_ADDRESS>
 NEXUS_USDD_FEES_ACCOUNT=<YOUR_USDD_FEES_ACCOUNT_ADDRESS>
 NEXUS_TOKEN_NAME=USDD
 NEXUS_RPC_HOST=http://127.0.0.1:8399
+NEXUS_USDD_QUARANTINE_ACCOUNT=<YOUR_USDD_QUARANTINE_ACCOUNT_ADDRESS>
+
+# Quarantine and failed refunds
+# Self-owned USDC token account used to quarantine amounts from failed refunds so they don't affect backing ratio
+USDC_QUARANTINE_ACCOUNT=<YOUR_USDC_TOKEN_ACCOUNT_FOR_QUARANTINE>
+# JSON Lines file capturing failed refund events for manual review
+FAILED_REFUNDS_FILE=failed_refunds.jsonl
 
 # Polling & State
 POLL_INTERVAL=10
@@ -139,7 +150,7 @@ MAX_ACTION_ATTEMPTS=3
 ACTION_RETRY_COOLDOWN_SEC=300
 
 # Fees & policy
-# Flat fee for USDC→USDD (taken even if refund is required)
+# Flat fee for USDC→USDD (charged per refund attempt if refunding)
 FLAT_FEE_USDC=0.1
 # Threshold for tiny USDD deposits; tiny USDD is treated as dust on USDD→USDC
 FLAT_FEE_USDD=0.1
@@ -307,7 +318,7 @@ Expected startup output:
 ### Swap USDC → USDD (on Solana)
 - Send USDC to `VAULT_USDC_ACCOUNT` with a Memo in the same transaction:
   - `nexus:<YOUR_NEXUS_ADDRESS>`
-- If the memo is missing/invalid or the Nexus address is not a valid `NEXUS_TOKEN_NAME` account, your USDC is refunded to the source SPL token account with a reason memo. The flat fee is always retained on this path.
+- If the memo is missing/invalid or the Nexus address is not a valid `NEXUS_TOKEN_NAME` account, your USDC is refunded to the source SPL token account with a reason memo. The flat fee is charged per refund attempt on this path. If all attempts fail, the remaining refundable amount is quarantined and the incident is logged for manual review.
 - Tiny USDC deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
 
 ### Swap USDD → USDC (on Nexus)
@@ -336,6 +347,7 @@ How to create your USDC ATA (user-side):
 | NEXUS_PIN | Nexus account PIN | ✅ | - |
 | NEXUS_USDD_TREASURY_ACCOUNT | Your USDD treasury account address | ✅ | - |
 | NEXUS_USDD_LOCAL_ACCOUNT | Your local USDD account address (optional) | ❌ | - |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | USDD quarantine account for failed refunds | ❌ | - |
 | NEXUS_USDD_FEES_ACCOUNT | USDD account to receive minted fees | ✅ | - |
 | FLAT_FEE_USDC | Flat fee (USDC) for Solana→Nexus | ❌ | 0.1 |
 | FLAT_FEE_USDD | Tiny threshold (USDD) for Nexus→Solana | ❌ | 0.1 |
@@ -345,9 +357,10 @@ How to create your USDC ATA (user-side):
 | NEXUS_TOKEN_NAME | Token ticker used for validation | ❌ | USDD |
 | NEXUS_RPC_HOST | Nexus RPC host (if applicable) | ❌ | http://127.0.0.1:8399 |
 | POLL_INTERVAL | Poll interval (seconds) | ❌ | 10 |
-| PROCESSED_SIG_FILE | File for processed Solana signatures | ❌ | processed_sigs.json |
-| PROCESSED_NEXUS_FILE | File for processed Nexus txids | ❌ | processed_nexus_txs.json |
+| PROCESSED_SIG_FILE | File for processed Solana signatures (now key->timestamp JSON) | ❌ | processed_sigs.json |
+| PROCESSED_NEXUS_FILE | File for processed Nexus txids (now key->timestamp JSON) | ❌ | processed_nexus_txs.json |
 | ATTEMPT_STATE_FILE | File for attempt/cooldown state | ❌ | attempt_state.json |
+| FAILED_REFUNDS_FILE | JSONL file logging failed refund cases | ❌ | failed_refunds.jsonl |
 | MAX_ACTION_ATTEMPTS | Max attempts per action (mint/send/refund) | ❌ | 3 |
 | ACTION_RETRY_COOLDOWN_SEC | Cooldown between attempts | ❌ | 300 |
 | HEARTBEAT_ENABLED | Enable on-chain heartbeat | ❌ | true |
@@ -367,7 +380,7 @@ Idempotency:
 - Least-privilege vault key: use a dedicated Solana keypair for this service and fund it only with what’s needed (SOL for tx fees; USDC for payouts). Avoid reusing personal keys.
 - RPC integrity: use trusted Solana RPC endpoints (self-hosted or reputable providers). Consider rate limits and lags when setting `POLL_INTERVAL`.
 - Nexus CLI integrity: pin a specific CLI build and verify its checksum when updating. Restrict execute permissions to the service user.
-- State file permissions: `processed_sigs.json`, `processed_nexus_txs.json`, and `attempt_state.json` should be writable only by the service user (e.g., `chmod 600` on Linux/macOS).
+- State file permissions: `processed_sigs.json`, `processed_nexus_txs.json`, `attempt_state.json`, and `failed_refunds.jsonl` should be writable only by the service user (e.g., `chmod 600` on Linux/macOS).
 - Logging hygiene: the service masks the PIN in CLI logs; avoid shell tracing that could echo command arguments.
 - Refund loops: attempts/cooldowns help prevent fee-draining loops. If you reduce cooldowns, monitor logs for repeating failures.
 - Test safely: try on Solana Devnet or a Nexus test environment first; verify both swap directions and refund paths.
