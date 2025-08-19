@@ -54,6 +54,7 @@ def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
 
 def poll_solana_deposits():
     from solana.rpc.api import Client
+    from solders.signature import Signature
     try:
         client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
         limit = 100
@@ -88,8 +89,13 @@ def poll_solana_deposits():
 
             mark_processed = False
             try:
-                # Pass base58 signature string directly to solana-py client
-                tx_resp = client.get_transaction(sig, encoding="jsonParsed")
+                # Use solders Signature object as expected by solana-py 0.36.x
+                sig_obj = Signature.from_string(sig)
+                tx_resp = client.get_transaction(
+                    sig_obj,
+                    encoding="jsonParsed",
+                    max_supported_transaction_version=0,  # support v0 versioned transactions
+                )
                 # Support both dict and typed responses
                 tx = None
                 try:
