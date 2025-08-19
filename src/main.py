@@ -175,6 +175,12 @@ def run():
             except Exception:
                 sol_ts, nex_ts = (None, None)
             update_heartbeat_asset(set_solana_waterline=sol_ts, set_nexus_waterline=nex_ts)
+            # After committing heartbeat, prune processed markers below waterlines for hygiene
+            try:
+                state.prune_processed(sol_ts, nex_ts)
+                state.save_state()
+            except Exception as e:
+                print(f"Prune error: {e}")
             if _stop_event.wait(config.POLL_INTERVAL):
                 break
     except KeyboardInterrupt:
