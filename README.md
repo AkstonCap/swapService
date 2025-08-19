@@ -2,6 +2,39 @@
 
 A Python service that enables automatic swapping between USDC (Solana) and USDD (Nexus) in both directions, with strict validation, automatic refunds on invalid input, loop-safety, and an optional on-chain heartbeat for public status checking.
 
+## How to swap USDD for USDC
+
+### USDC->USDD
+
+Send USDC from a solana wallet which allow memos (Glow, etc.) in the following format:
+Send to: `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ`
+Memo/note: `nexus:<your Nexus USDD account>`
+Amount: minimum 0.2 USDC
+
+### USDD->USDC
+
+Simple steps to swap USDD for USDC:
+
+1) Ensure your Solana wallet has a USDC ATA
+  - Most wallets (Phantom, Solflare, Glow) auto-create it on first receive.
+  - If you’re a power user, you can pre-create it with spl-token CLI.
+
+2) Send USDD on Nexus to the service’s USDD treasury
+  - Send to: the service’s `NEXUS_USDD_TREASURY_ACCOUNT` (ask the operator or see the service startup banner).
+  - Reference: `solana:<YOUR_SOLANA_ADDRESS>`
+    - Use your wallet owner address; advanced users may supply an existing USDC token account address instead.
+  - Amount: send more than the tiny threshold (default `FLAT_FEE_USDD = 0.1`) so it’s not treated as dust.
+
+3) Receive USDC on Solana
+  - The service sends USDC from its vault to your USDC ATA. It will not create your ATA.
+  - If your ATA doesn’t exist or the reference address is invalid, your USDD is refunded with a reason (a small congestion fee may be deducted if configured).
+
+Notes
+- Reference prefix is case-insensitive (`solana:` or `SOLANA:` both work).
+- Tiny USDD deposits ≤ `FLAT_FEE_USDD` are routed to the service’s local USDD account and not swapped.
+- If a send fails after retries, the deposit is refunded; persistent failures are quarantined and logged for manual review.
+
+
 ## How It Works
 
 ### USDC → USDD (Solana to Nexus)
