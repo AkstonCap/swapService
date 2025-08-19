@@ -153,8 +153,28 @@ def poll_solana_deposits():
                 print(f"Error fetching transaction {sig}: {et} {repr(e)}")
                 continue
 
-            for instr in tx["transaction"]["message"]["instructions"]:
-                if instr.get("program") == "spl-token" and instr.get("parsed"):
+            # Gather all instructions (outer + inner CPIs)
+            def _iter_all_instructions(txobj):
+                try:
+                    for ix in txobj.get("transaction", {}).get("message", {}).get("instructions", []) or []:
+                        yield ix
+                except Exception:
+                    pass
+                try:
+                    for inner in (txobj.get("meta", {}) or {}).get("innerInstructions", []) or []:
+                        for ix in inner.get("instructions", []) or []:
+                            yield ix
+                except Exception:
+                    pass
+
+            all_instrs = list(_iter_all_instructions(tx))
+
+            for instr in all_instrs:
+                is_token_prog = (
+                    instr.get("program") == "spl-token"
+                    or instr.get("programId") == str(solana_client.TOKEN_PROGRAM_ID)
+                )
+                if is_token_prog and instr.get("parsed"):
                     p = instr["parsed"]
                     if p.get("type") in ("transfer", "transferChecked") and p.get("info", {}).get("destination") == str(config.VAULT_USDC_ACCOUNT):
                         found_deposit = True
@@ -167,7 +187,7 @@ def poll_solana_deposits():
                             continue
 
                         source_token_acc = info.get("source")
-                        memo_data = solana_client.extract_memo_from_instructions(tx["transaction"]["message"]["instructions"])
+                        memo_data = solana_client.extract_memo_from_instructions(all_instrs)
                         flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
 
                         # Tiny deposit drop: treat <= flat fee threshold entirely as fee, do nothing else
@@ -408,7 +428,7 @@ def poll_solana_deposits():
                                 break
                         amount_usdc_units = int(delta_in)
                         source_token_acc = src_addr
-                        memo_data = solana_client.extract_memo_from_instructions(tx["transaction"]["message"]["instructions"])
+                        memo_data = solana_client.extract_memo_from_instructions(all_instrs)
                         flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
                         found_deposit = True
 
@@ -569,6 +589,45 @@ def poll_solana_deposits():
             else:
                 # No relevant deposit found touching the vault; treat as benign (e.g., account creation)
                 if not found_deposit:
+                    # Extra certainty: log vault USDC delta before classifying
+                    try:
+                        meta = tx.get("meta") or {}
+                        pre = meta.get("preTokenBalances") or []
+                        post = meta.get("postTokenBalances") or []
+                        acct_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                        def _akey(i):
+                            try:
+                                k = acct_keys[i]
+                                if isinstance(k, str):
+                                    return k
+                                if isinstance(k, dict):
+                                    return k.get("pubkey") or k.get("pubKey") or ""
+                            except Exception:
+                                return ""
+                            return ""
+                        def _amount(entry):
+                            try:
+                                return int(((entry.get("uiTokenAmount") or {}).get("amount")) or 0)
+                            except Exception:
+                                return 0
+                        vault_addr = str(config.VAULT_USDC_ACCOUNT)
+                        pre_amt = 0
+                        post_amt = 0
+                        for e in pre:
+                            try:
+                                if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
+                                    pre_amt = _amount(e)
+                            except Exception:
+                                pass
+                        for e in post:
+                            try:
+                                if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
+                                    post_amt = _amount(e)
+                            except Exception:
+                                pass
+                        print(f"Classifying NOT A DEPOSIT sig={sig} vault_pre={pre_amt} vault_post={post_amt} delta={post_amt - pre_amt}")
+                    except Exception:
+                        pass
                     ts_bt = sig_bt.get(sig) or 0
                     state.mark_solana_processed(sig, ts=ts_bt, reason="not a deposit")
                     if ts_bt:
