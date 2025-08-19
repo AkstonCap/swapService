@@ -64,8 +64,11 @@ def poll_solana_deposits():
         from .main import read_heartbeat_waterlines
         wl_solana, _ = read_heartbeat_waterlines()
         wl_cutoff = int(max(0, wl_solana - config.HEARTBEAT_WATERLINE_SAFETY_SEC)) if config.HEARTBEAT_WATERLINE_ENABLED else 0
+
         sig_list: list[str] = []
         sig_bt: dict[str, int] = {}
+        confirmed_bt_candidates: list[int] = []
+
         for r in sig_results:
             sig = r.get("signature")
             if not sig:
@@ -107,6 +110,10 @@ def poll_solana_deposits():
                         continue
                 except Exception:
                     pass
+                # Consider this tx confirmed enough for waterline (we fetched it and it wasn't failed)
+                bt_val = sig_bt.get(sig)
+                if bt_val:
+                    confirmed_bt_candidates.append(int(bt_val))
             except Exception as e:
                 print(f"Error fetching transaction {sig}: {e}")
                 continue
@@ -139,46 +146,86 @@ def poll_solana_deposits():
                             refund_key = f"refund_usdc:{sig}"
                             if state.should_attempt(refund_key) and source_token_acc:
                                 state.record_attempt(refund_key)
-                                net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                # Flat fee per attempt: compute remaining after taking this attempt's fee
+                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                                remaining_before_fee = max(0, amount_usdc_units - max(0, (attempts - 1) * flat_fee_units))
+                                fee_this_attempt = min(flat_fee_units, remaining_before_fee)
+                                net_refund = max(0, remaining_before_fee - fee_this_attempt)
                                 if net_refund <= 0:
-                                    fees.add_usdc_fee(amount_usdc_units)
+                                    if fee_this_attempt > 0:
+                                        fees.add_usdc_fee(fee_this_attempt)
                                     print("Amount entirely consumed by flat fee; no refund sent")
-                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "Missing memo nexus:<addr>"):
-                                    fees.add_usdc_fee(flat_fee_units)
+                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, f"Missing memo nexus:<addr> USDC_TX:{sig}"):
+                                    if fee_this_attempt > 0:
+                                        fees.add_usdc_fee(fee_this_attempt)
                                     print(f"Refunded {net_refund} USDC units to sender (flat fee retained)")
                                 else:
                                     print("Refund failed")
-                                    mark_processed = False
+                                    # If we've hit max attempts, quarantine and log
+                                    max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
+                                    if attempts >= max_tries:
+                                        # Keep the USDC out of vault backing by moving to quarantine
+                                        if solana_client.move_usdc_to_quarantine(net_refund, note=f"FAILED_REFUND USDC_TX:{sig}"):
+                                            state.log_failed_refund({
+                                                "type": "refund_failure",
+                                                "sig": sig,
+                                                "reason": "Missing memo",
+                                                "source_token_acc": source_token_acc,
+                                                "amount_units": net_refund,
+                                            })
+                                            print("Quarantined failed refund amount and logged for manual inspection")
+                                        mark_processed = True
+                                    else:
+                                        mark_processed = False
                             else:
                                 print("Skipping refund attempt (cooldown/max attempts)")
                                 mark_processed = False
                             break
 
-                        if memo_data.startswith("nexus:"):
-                            nexus_addr = memo_data.split("nexus:", 1)[1].strip()
+                        if isinstance(memo_data, str) and memo_data.lower().startswith("nexus:"):
+                            # Accept case-insensitive prefix; keep address case as-is
+                            nexus_addr = memo_data[memo_data.find(":") + 1 :].strip()
                             acct = nexus_client.get_account_info(nexus_addr)
                             if not acct or not nexus_client.is_expected_token(acct, config.NEXUS_TOKEN_NAME):
                                 print("Invalid Nexus address or token; require USDD account")
                                 refund_key = f"refund_usdc:{sig}"
                                 if state.should_attempt(refund_key) and source_token_acc:
                                     state.record_attempt(refund_key)
-                                    net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                    attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                                    remaining_before_fee = max(0, amount_usdc_units - max(0, (attempts - 1) * flat_fee_units))
+                                    fee_this_attempt = min(flat_fee_units, remaining_before_fee)
+                                    net_refund = max(0, remaining_before_fee - fee_this_attempt)
                                     if net_refund <= 0:
-                                        fees.add_usdc_fee(amount_usdc_units)
+                                        if fee_this_attempt > 0:
+                                            fees.add_usdc_fee(fee_this_attempt)
                                         print("Amount entirely consumed by flat fee; no refund sent")
-                                    elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "Invalid or wrong Nexus address"):
-                                        fees.add_usdc_fee(flat_fee_units)
+                                    elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, f"Invalid or wrong Nexus address USDC_TX:{sig}"):
+                                        if fee_this_attempt > 0:
+                                            fees.add_usdc_fee(fee_this_attempt)
                                         print(f"Refunded {net_refund} USDC units to sender (flat fee retained)")
                                     else:
                                         print("Refund failed")
-                                        mark_processed = False
+                                        max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
+                                        if attempts >= max_tries:
+                                            if solana_client.move_usdc_to_quarantine(net_refund, note=f"FAILED_REFUND USDC_TX:{sig}"):
+                                                state.log_failed_refund({
+                                                    "type": "refund_failure",
+                                                    "sig": sig,
+                                                    "reason": "Invalid Nexus address",
+                                                    "source_token_acc": source_token_acc,
+                                                    "amount_units": net_refund,
+                                                })
+                                                print("Quarantined failed refund amount and logged for manual inspection")
+                                            mark_processed = True
+                                        else:
+                                            mark_processed = False
                                 else:
                                     print("Skipping refund attempt (cooldown/max attempts)")
                                     mark_processed = False
                             else:
-                                # Idempotency: skip if we already minted for this Solana signature
-                                if nexus_client.was_usdd_minted_for_sig(nexus_addr, sig):
-                                    print("Detected prior USDD mint for this Solana tx; marking processed")
+                                # Idempotency: skip if we already debited treasury for this Solana signature
+                                if nexus_client.was_usdd_debited_from_treasury_for_sig(sig, lookback=60, min_confirmations=0):
+                                    print("Detected prior USDD debit from treasury (pending/confirmed); waiting for confirmations")
                                     break
                                 # Apply fees on USDC→USDD path:
                                 # - Always retain a flat fee (on success or refund)
@@ -209,7 +256,7 @@ def poll_solana_deposits():
                                                 if net_refund <= 0:
                                                     fees.add_usdc_fee(amount_usdc_units)
                                                     print("Amount entirely consumed by flat fee; no refund sent")
-                                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "USDD mint failed after retries"):
+                                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, f"USDD mint failed after retries USDC_TX:{sig}"):
                                                     # Accrue only flat fee on refund path
                                                     if flat_fee_units > 0:
                                                         fees.add_usdc_fee(flat_fee_units)
@@ -230,33 +277,47 @@ def poll_solana_deposits():
                             refund_key = f"refund_usdc:{sig}"
                             if state.should_attempt(refund_key) and source_token_acc:
                                 state.record_attempt(refund_key)
-                                net_refund = max(0, amount_usdc_units - flat_fee_units)
+                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                                remaining_before_fee = max(0, amount_usdc_units - max(0, (attempts - 1) * flat_fee_units))
+                                fee_this_attempt = min(flat_fee_units, remaining_before_fee)
+                                net_refund = max(0, remaining_before_fee - fee_this_attempt)
                                 if net_refund <= 0:
-                                    fees.add_usdc_fee(amount_usdc_units)
+                                    if fee_this_attempt > 0:
+                                        fees.add_usdc_fee(fee_this_attempt)
                                     print("Amount entirely consumed by flat fee; no refund sent")
-                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, "Invalid memo format; expected nexus:<addr>"):
-                                    if flat_fee_units > 0:
-                                        fees.add_usdc_fee(flat_fee_units)
+                                elif solana_client.refund_usdc_to_source(source_token_acc, net_refund, f"Invalid memo format; expected nexus:<addr> USDC_TX:{sig}"):
+                                    if fee_this_attempt > 0:
+                                        fees.add_usdc_fee(fee_this_attempt)
                                     print(f"Refunded {net_refund} USDC units to sender (flat fee retained)")
                                 else:
                                     print("Refund failed")
-                                    mark_processed = False
+                                    max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
+                                    if attempts >= max_tries:
+                                        if solana_client.move_usdc_to_quarantine(net_refund, note=f"FAILED_REFUND USDC_TX:{sig}"):
+                                            state.log_failed_refund({
+                                                "type": "refund_failure",
+                                                "sig": sig,
+                                                "reason": "Bad memo format",
+                                                "source_token_acc": source_token_acc,
+                                                "amount_units": net_refund,
+                                            })
+                                            print("Quarantined failed refund amount and logged for manual inspection")
+                                        mark_processed = True
+                                    else:
+                                        mark_processed = False
                             else:
                                 print("Skipping refund attempt (cooldown/max attempts)")
                                 mark_processed = False
                         break
 
             if mark_processed:
-                state.processed_sigs.add(sig)
-        # Propose a conservative waterline only if page wasn't full.
-        # We use the minimum blockTime among the page's signatures we examined,
-        # ensuring we don't skip any unseen older entries.
+                # Record processed with best-known timestamp for pruning later
+                state.mark_solana_processed(sig, ts=sig_bt.get(sig) or 0)
+
+        # Propose a conservative waterline only if page wasn't full and only using confirmed txs we inspected
         try:
-            if isinstance(sig_results, list) and len(sig_results) < limit:
-                # Compute min blockTime across the page (non-zero only)
-                bt_candidates = [bt for bt in sig_bt.values() if bt]
-                if bt_candidates:
-                    state.propose_solana_waterline(int(min(bt_candidates)))
+            if isinstance(sig_results, list) and len(sig_results) < limit and confirmed_bt_candidates:
+                state.propose_solana_waterline(int(min(confirmed_bt_candidates)))
         except Exception:
             pass
     except Exception as e:
