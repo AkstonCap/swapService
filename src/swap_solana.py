@@ -58,7 +58,8 @@ def poll_solana_deposits():
     try:
         client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
         limit = 100
-        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=limit)
+        # Use string for address to avoid cross-type mismatches between solders and solana-py
+        sigs_resp = client.get_signatures_for_address(str(config.VAULT_USDC_ACCOUNT), limit=limit)
         sig_results = _normalize_get_sigs_response(sigs_resp)
         # Read heartbeat waterline and compute cutoff
         from .main import read_heartbeat_waterlines
@@ -83,30 +84,55 @@ def poll_solana_deposits():
             sig_list.append(sig)
             sig_bt[sig] = bt
 
+        # Helper: robust get_transaction with fallbacks for signature type and version flag
+        def _get_tx_result(sig_str: str):
+            last_exc = None
+            # Build Signature object once; if invalid, we still try string mode
+            sig_obj = None
+            try:
+                sig_obj = Signature.from_string(sig_str)
+            except Exception as e:
+                last_exc = e
+                sig_obj = None
+            attempts = []
+            if sig_obj is not None:
+                attempts.append({"arg": sig_obj, "msv": 0})
+                attempts.append({"arg": sig_obj, "msv": None})
+            attempts.append({"arg": sig_str, "msv": 0})
+            attempts.append({"arg": sig_str, "msv": None})
+
+            for att in attempts:
+                try:
+                    kwargs = {"encoding": "jsonParsed"}
+                    if att["msv"] is not None:
+                        kwargs["max_supported_transaction_version"] = att["msv"]
+                    tx_resp = client.get_transaction(att["arg"], **kwargs)
+                    # Parse result from dict or typed response
+                    try:
+                        tx = tx_resp.get("result")
+                        return tx
+                    except AttributeError:
+                        try:
+                            import json as _json
+                            js = _json.loads(tx_resp.to_json())
+                            return js.get("result")
+                        except Exception as e2:
+                            last_exc = e2
+                            continue
+                except Exception as e3:
+                    last_exc = e3
+                    continue
+            if last_exc:
+                raise last_exc
+            return None
+
         for sig in sig_list:
             if sig in state.processed_sigs:
                 continue
 
             mark_processed = False
             try:
-                # Use solders Signature object as expected by solana-py 0.36.x
-                sig_obj = Signature.from_string(sig)
-                tx_resp = client.get_transaction(
-                    sig_obj,
-                    encoding="jsonParsed",
-                    max_supported_transaction_version=0,  # support v0 versioned transactions
-                )
-                # Support both dict and typed responses
-                tx = None
-                try:
-                    tx = tx_resp.get("result")
-                except AttributeError:
-                    try:
-                        import json as _json
-                        js = _json.loads(tx_resp.to_json())
-                        tx = js.get("result")
-                    except Exception:
-                        tx = None
+                tx = _get_tx_result(sig)
                 if not tx:
                     continue
                 # Skip failed transactions
@@ -120,7 +146,12 @@ def poll_solana_deposits():
                 if bt_val:
                     confirmed_bt_candidates.append(int(bt_val))
             except Exception as e:
-                print(f"Error fetching transaction {sig}: {e}")
+                # Print exception type and repr for better diagnostics across platforms
+                try:
+                    et = type(e).__name__
+                except Exception:
+                    et = "Exception"
+                print(f"Error fetching transaction {sig}: {et} {repr(e)}")
                 continue
 
             for instr in tx["transaction"]["message"]["instructions"]:
