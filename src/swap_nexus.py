@@ -122,7 +122,7 @@ def poll_nexus_usdd_deposits():
                             amt_str = _format_token_amount(usdd_amount_dec, config.USDD_DECIMALS)
                             if nexus_client.send_tiny_usdd_to_local(amt_str, note=f"TINY_USDD:{tx_id}:{cid}"):
                                 print(f"Routed tiny USDD {amt_str} to local; processed ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts)
+                                state.mark_nexus_processed(processed_key, ts=ts, reason="tiny routed")
                                 continue
                             else:
                                 print(f"Tiny USDD routing failed; will retry ({processed_key})")
@@ -163,7 +163,7 @@ def poll_nexus_usdd_deposits():
                             amt_str = _format_token_amount(net_refund_dec, config.USDD_DECIMALS)
                             if ok_fee and nexus_client.refund_usdd(sender_addr, amt_str, reason):
                                 print(f"Refunded USDD due to invalid/missing reference ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts)
+                                state.mark_nexus_processed(processed_key, ts=ts, reason="refund invalid reference")
                             else:
                                 # If we've reached max attempts, quarantine remaining refund and log
                                 max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
@@ -183,7 +183,7 @@ def poll_nexus_usdd_deposits():
                                             "amount_usdd": amt_str,
                                         })
                                         print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                        state.mark_nexus_processed(processed_key, ts=ts)
+                                        state.mark_nexus_processed(processed_key, ts=ts, reason="quarantined failed refund")
                         else:
                             print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
                         continue
@@ -217,7 +217,7 @@ def poll_nexus_usdd_deposits():
                             amt_str = _format_token_amount(net_refund_dec, config.USDD_DECIMALS)
                             if ok_fee and nexus_client.refund_usdd(sender_addr, amt_str, reason):
                                 print(f"Refunded USDD due to invalid Solana address ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts)
+                                state.mark_nexus_processed(processed_key, ts=ts, reason="refund invalid sol addr")
                             else:
                                 max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
                                 attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
@@ -236,7 +236,7 @@ def poll_nexus_usdd_deposits():
                                             "amount_usdd": amt_str,
                                         })
                                         print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                        state.mark_nexus_processed(processed_key, ts=ts)
+                                        state.mark_nexus_processed(processed_key, ts=ts, reason="quarantined failed refund")
                         else:
                             print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
                         continue
@@ -262,7 +262,7 @@ def poll_nexus_usdd_deposits():
                             amt_str = _format_token_amount(final_refund_dec, config.USDD_DECIMALS)
                             if nexus_client.refund_usdd(sender_addr, amt_str, reason):
                                 print(f"Refunded USDD due to zero-net after fee ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts)
+                                state.mark_nexus_processed(processed_key, ts=ts, reason="refund zero-net")
                             else:
                                 max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
                                 attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
@@ -292,14 +292,19 @@ def poll_nexus_usdd_deposits():
                         memo = f"NEXUS_TX:{tx_id}:{cid}"
                         if solana_client.was_usdc_sent_for_nexus_tx(processed_key, sol_addr):
                             print(f"Detected prior USDC send for {processed_key}; marking processed")
-                            state.mark_nexus_processed(processed_key, ts=ts)
+                            state.mark_nexus_processed(processed_key, ts=ts, reason="idempotent already sent")
                             continue
                         if solana_client.ensure_send_usdc_owner_or_ata(sol_addr, net_usdc, memo=memo):
                             print(f"Sent {net_usdc} USDC units to {sol_addr} ({processed_key})")
+                            # Explicit success marker for USDD->USDC path
+                            try:
+                                print(f"SWAP SUCCESS USDD->USDC key={processed_key} usdd={_format_token_amount(usdd_amount_dec, config.USDD_DECIMALS)} usdc_units={net_usdc} to={sol_addr}")
+                            except Exception:
+                                pass
                             total_fee_units = flat_fee_units + dynamic_fee_usdc
                             if total_fee_units > 0:
                                 fees.add_usdc_fee(total_fee_units)
-                            state.mark_nexus_processed(processed_key, ts=ts)
+                            state.mark_nexus_processed(processed_key, ts=ts, reason="send processed")
                         else:
                             print(f"USDC send failed ({processed_key})")
                             attempts = int((state.attempt_state.get(send_key) or {}).get("attempts", 0))
@@ -346,7 +351,7 @@ def poll_nexus_usdd_deposits():
                                     amt_str = _format_token_amount(net_refund_dec, config.USDD_DECIMALS)
                                     if ok_fee and nexus_client.refund_usdd(sender_addr, amt_str, reason):
                                         print(f"Refunded USDD after repeated send failures ({processed_key})")
-                                        state.mark_nexus_processed(processed_key, ts=ts)
+                                        state.mark_nexus_processed(processed_key, ts=ts, reason="refund after retries")
                                     else:
                                         max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
                                         attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
@@ -365,7 +370,7 @@ def poll_nexus_usdd_deposits():
                                                     "amount_usdd": amt_str,
                                                 })
                                                 print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                                state.mark_nexus_processed(processed_key, ts=ts)
+                                                state.mark_nexus_processed(processed_key, ts=ts, reason="quarantined failed refund")
                                 else:
                                     print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
                     else:
