@@ -58,8 +58,8 @@ def poll_solana_deposits():
     try:
         client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
         limit = 100
-        # Use string for address to avoid cross-type mismatches between solders and solana-py
-        sigs_resp = client.get_signatures_for_address(str(config.VAULT_USDC_ACCOUNT), limit=limit)
+        # Pass Pubkey (solders) as required by solana-py 0.36.x
+        sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=limit)
         sig_results = _normalize_get_sigs_response(sigs_resp)
         # Read heartbeat waterline and compute cutoff
         from .main import read_heartbeat_waterlines
