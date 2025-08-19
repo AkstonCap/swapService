@@ -11,7 +11,6 @@ REQUIRED_ENV = [
     "USDC_MINT",
     "NEXUS_PIN",
     "NEXUS_USDD_TREASURY_ACCOUNT",
-    "NEXUS_USDD_FEES_ACCOUNT",
 ]
 for var in REQUIRED_ENV:
     if not os.getenv(var):
@@ -35,7 +34,7 @@ NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
 NEXUS_USDD_LOCAL_ACCOUNT = os.getenv("NEXUS_USDD_LOCAL_ACCOUNT")
-NEXUS_USDD_FEES_ACCOUNT = os.getenv("NEXUS_USDD_FEES_ACCOUNT")
+NEXUS_USDD_QUARANTINE_ACCOUNT = os.getenv("NEXUS_USDD_QUARANTINE_ACCOUNT")
 NEXUS_PIN = os.getenv("NEXUS_PIN", "")
 USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # deprecated: USDC fees remain in vault
 
@@ -44,6 +43,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 PROCESSED_SIG_FILE = os.getenv("PROCESSED_SIG_FILE", "processed_sigs.json")
 PROCESSED_NEXUS_FILE = os.getenv("PROCESSED_NEXUS_FILE", "processed_nexus_txs.json")
 ATTEMPT_STATE_FILE = os.getenv("ATTEMPT_STATE_FILE", "attempt_state.json")
+FAILED_REFUNDS_FILE = os.getenv("FAILED_REFUNDS_FILE", "failed_refunds.jsonl")
 MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
 ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
 
@@ -73,6 +73,9 @@ FLAT_FEE_USDD_UNITS = _to_units(FLAT_FEE_USDD, USDD_DECIMALS)
 DYNAMIC_FEE_BPS = int(os.getenv("DYNAMIC_FEE_BPS", "10"))  # 10 bps = 0.1%
 FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 
+# Nexus congestion fee for USDD refunds (token units)
+NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
+
 # Fee conversions (scaffolding / optional)
 FEE_CONVERSION_ENABLED = os.getenv("FEE_CONVERSION_ENABLED", "false").lower() in ("1","true","yes","on")
 FEE_CONVERSION_MIN_USDC = int(os.getenv("FEE_CONVERSION_MIN_USDC", "0"))  # minimum USDC base units before attempting conversions
@@ -89,6 +92,9 @@ FEES_USDC_MIN = int(os.getenv("FEES_USDC_MIN", "0"))
 FEES_USDC_MAX = int(os.getenv("FEES_USDC_MAX", "0"))
 FEES_USDD_MIN = int(os.getenv("FEES_USDD_MIN", "0"))
 FEES_USDD_MAX = int(os.getenv("FEES_USDD_MAX", "0"))
+
+# Quarantine account for failed refunds (USDC token account we own)
+USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
 
 # Target accumulation ratio: 1 SOL for every 10000 NXS by default
 TARGET_SOL_PER_NXS_NUM = int(os.getenv("TARGET_SOL_PER_NXS_NUM", "1"))
