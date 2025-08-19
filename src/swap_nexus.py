@@ -37,8 +37,8 @@ def poll_nexus_usdd_deposits():
     # Use the configured treasury account name consistently
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
 
-    # Query finance/transaction/account and explicitly select fields we need.
-    # Include contracts.id and contracts.to so we can filter correctly and key per-contract.
+    # Query recent transactions affecting the treasury account and parse nested parties.
+    # Use finance/transactions/token and filter by name to avoid ambiguity.
     cmd = [
         config.NEXUS_CLI,
         "finance/transactions/token/"
@@ -96,8 +96,19 @@ def poll_nexus_usdd_deposits():
                     processed_key = f"{tx_id}:{cid if cid is not None else 'x'}"
                     if processed_key in state.processed_nexus_txs:
                         continue
-                    if c.get("to") != treasury_addr:
-                        continue
+                    # Extract nested 'to' and 'from' addresses robustly
+                    def _addr(obj) -> str:
+                        if isinstance(obj, dict):
+                            a = obj.get("address")
+                            if isinstance(a, str):
+                                return a
+                            # Some outputs might just include name strings
+                            n = obj.get("name")
+                            return str(n) if n else ""
+                        if isinstance(obj, str):
+                            return obj
+                        return ""
+                    
                     usdd_amount_dec = _parse_decimal_amount(c.get("amount"))
                     if usdd_amount_dec <= 0:
                         state.mark_nexus_processed(processed_key, ts=ts)
@@ -124,7 +135,7 @@ def poll_nexus_usdd_deposits():
                     ref_str = str(ref_raw).strip() if ref_raw is not None else ""
                     is_solana_ref = isinstance(ref_str, str) and ref_str.lower().startswith("solana:")
                     sol_addr = (ref_str[ref_str.find(":") + 1:].strip() if is_solana_ref else "")
-                    sender_addr = c.get("from")
+                    sender_addr = _addr(c.get("from"))
                     # Base refund equals full USDD unless adjusted by congestion fee at send time
                     refund_amount_dec = usdd_amount_dec
 
