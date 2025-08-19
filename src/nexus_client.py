@@ -109,8 +109,13 @@ def debit_usdd(to_addr: str, amount_usdd_units: int, reference: str) -> bool:
 
 
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
+    """Refund USDD by transferring from treasury to the recipient (no mint)."""
     ref = reason if len(reason) <= 120 else reason[:117] + "..."
-    return debit_usdd(to_addr, amount_usdd_units, ref)
+    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
+    if not treas:
+        print("Refund failed: NEXUS_USDD_TREASURY_ACCOUNT not set")
+        return False
+    return transfer_usdd_between_accounts(treas, to_addr, amount_usdd_units, ref)
 
 def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_units: int, reference: str) -> bool:
     """Transfer USDD between two Nexus token accounts using finance/debit/account (no mint).
@@ -180,6 +185,43 @@ def was_usdd_minted_for_sig(to_addr: str, sol_sig: str, lookback: int = 50) -> b
         return False
 
 
+def was_usdd_debited_from_treasury_for_sig(sol_sig: str, lookback: int = 50, min_confirmations: int = 1) -> bool:
+    """Check our USDD treasury account's recent transactions for a DEBIT contract with reference 'USDC_TX:<sig>'.
+    This guards against double-debiting when the receiver hasn't credited yet.
+    """
+    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
+    if not treas:
+        return False
+    ref = f"USDC_TX:{sol_sig}"
+    cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={treas}"]
+    try:
+        code, out, err = _run(cmd, timeout=15)
+        if code != 0:
+            return False
+        data = _parse_json_lenient(out)
+        txs = data if isinstance(data, list) else [data]
+        scanned = 0
+        for tx in (txs or []):
+            if not isinstance(tx, dict):
+                continue
+            scanned += 1
+            if scanned > max(10, lookback):
+                break
+            conf = int(tx.get("confirmations") or 0)
+            if conf < int(min_confirmations or 0):
+                continue
+            for c in (tx.get("contracts") or []):
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("OP") or "").upper() != "DEBIT":
+                    continue
+                if str(c.get("reference") or "").strip() == ref:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 # --- Nexus DEX (market) helpers ---
 def list_market_bids(market: str = "USDD/NXS", limit: int = 20) -> list[Dict[str, Any]]:
     cmd = [config.NEXUS_CLI, "market/list/bid", f"market={market}", "sort=price", "order=desc", f"limit={limit}"]
@@ -200,6 +242,24 @@ def list_market_bids(market: str = "USDD/NXS", limit: int = 20) -> list[Dict[str
         print("Nexus market list exception:", e)
         return []
 
+def list_market_asks(market: str = "NXS/USDD", limit: int = 20) -> list[Dict[str, Any]]:
+    cmd = [config.NEXUS_CLI, "market/list/ask", f"market={market}", "sort=price", "order=asc", f"limit={limit}"]
+    try:
+        code, out, err = _run(cmd, timeout=5)
+        if code != 0:
+            print("Nexus market list error:", err or out)
+            return []
+        data = _parse_json_lenient(out)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            v = data.get("asks")
+            if isinstance(v, list):
+                return v
+        return []
+    except Exception as e:
+        print("Nexus market list exception:", e)
+        return []
 
 def execute_market_order(txid: str) -> bool:
     if not config.NEXUS_PIN:
@@ -233,40 +293,73 @@ def _to_decimal(x) -> Decimal:
 
 
 def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
-    """Buy NXS using up to usdd_budget_units. Returns spent USDD units (<= budget).
-    Strategy: list top asks (cheapest first), execute orders whose total cost fits remaining budget, one by one.
-    Assumptions: list_market_asks returns items with fields: txid, price (USDD per NXS), amount (NXS quantity).
+    """Buy NXS using up to usdd_budget_units (USDD token units).
+    Strategy: consider best prices from both sides:
+    - bids on market=USDD/NXS
+    - asks on market=NXS/USDD
+    Normalize to USDD-per-NXS price and NXS quantity, pick lowest price orders first,
+    and execute full orders that fit in remaining budget. Returns total USDD spent (<= budget).
     """
     if usdd_budget_units <= 0:
-        return 0
-    bids = list_market_bids("USDD/NXS", limit=20)
-    if not bids:
         return 0
 
     remaining = Decimal(usdd_budget_units)
     spent_total = Decimal(0)
 
-    # Build a plan of orders whose total cost <= budget
-    plan: list[dict] = []
-    plan_cost = Decimal(0)
-    for bid in bids:
+    # Gather candidate sell offers (we're buying NXS):
+    offers: list[dict] = []  # { txid: str, price: Decimal (USDD/NXS), qty_nxs: Decimal }
+
+    # 1) From USDD/NXS bids (interpreted per API as executable opposite when we pay USDD)
+    try:
+        bids = list_market_bids("USDD/NXS", limit=20)
+    except Exception:
+        bids = []
+    for bid in bids or []:
         txid = bid.get("txid")
-        price = _to_decimal(bid.get("price"))
-        order = bid.get("order")
-        amount = _to_decimal(order.get("amount"))
-        if not txid or price <= 0 or amount <= 0:
+        price = _to_decimal(bid.get("price"))  # USDD per NXS
+        order = bid.get("order") or {}
+        qty_nxs = _to_decimal(order.get("amount"))  # NXS amount
+        if not txid or price <= 0 or qty_nxs <= 0:
             continue
-        cost_usdd = price * amount
-        if plan_cost + cost_usdd <= remaining:
-            plan.append({"txid": str(txid), "cost": cost_usdd})
-            plan_cost += cost_usdd
+        offers.append({"txid": str(txid), "price": price, "qty_nxs": qty_nxs})
+
+    # 2) From NXS/USDD asks (sellers of NXS)
+    try:
+        asks = list_market_asks("NXS/USDD", limit=20)
+    except Exception:
+        asks = []
+    for ask in asks or []:
+        txid = ask.get("txid")
+        price = _to_decimal(ask.get("price"))  # USDD per NXS (since quote is USDD)
+        contract = ask.get("contract") or {}
+        qty_nxs = _to_decimal(contract.get("amount"))  # NXS amount being sold
+        if not txid or price <= 0 or qty_nxs <= 0:
+            continue
+        offers.append({"txid": str(txid), "price": price, "qty_nxs": qty_nxs})
+
+    if not offers:
+        return 0
+
+    # Sort by best (lowest) price, then larger qty to reduce tx count
+    offers.sort(key=lambda o: (o["price"], -o["qty_nxs"]))
+
+    # Plan: include full orders that fit in remaining USDD budget
+    plan: list[dict] = []  # { txid, cost }
+    plan_cost = Decimal(0)
+    for o in offers:
+        cost = o["price"] * o["qty_nxs"]
+        if cost <= 0:
+            continue
+        if plan_cost + cost <= remaining:
+            plan.append({"txid": o["txid"], "cost": cost})
+            plan_cost += cost
         if plan_cost >= remaining:
             break
 
     if plan_cost <= 0:
         return 0
 
-    # Execute planned orders until budget is exhausted
+    # Execute planned orders
     for item in plan:
         txid = item["txid"]
         cost = item["cost"]
@@ -278,7 +371,11 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
         else:
             print(f"Nexus: execute failed for order {txid}")
 
-    return spent_total
+    # Return truncated integer token units of USDD spent
+    try:
+        return int(spent_total)
+    except Exception:
+        return 0
 
 
 # --- Treasury and metrics ---
