@@ -131,6 +131,7 @@ def poll_solana_deposits():
                 continue
 
             mark_processed = False
+            found_deposit = False
             try:
                 tx = _get_tx_result(sig)
                 if not tx:
@@ -158,6 +159,7 @@ def poll_solana_deposits():
                 if instr.get("program") == "spl-token" and instr.get("parsed"):
                     p = instr["parsed"]
                     if p.get("type") in ("transfer", "transferChecked") and p.get("info", {}).get("destination") == str(config.VAULT_USDC_ACCOUNT):
+                        found_deposit = True
                         info = p["info"]
                         if "amount" in info:
                             amount_usdc_units = int(info["amount"])
@@ -349,6 +351,10 @@ def poll_solana_deposits():
             if mark_processed:
                 # Record processed with best-known timestamp for pruning later
                 state.mark_solana_processed(sig, ts=sig_bt.get(sig) or 0)
+            else:
+                # No relevant deposit found touching the vault; treat as benign (e.g., account creation)
+                if not found_deposit:
+                    state.mark_solana_processed(sig, ts=sig_bt.get(sig) or 0)
 
         # Propose a conservative waterline only if page wasn't full and only using confirmed txs we inspected
         try:
