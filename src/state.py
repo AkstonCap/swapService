@@ -130,6 +130,10 @@ def mark_solana_processed(signature: str, ts: int | None = None, reason: str | N
         "reason": reason or "processed",
     }
     _append_jsonl(config.PROCESSED_SIG_FILE, row)
+    try:
+        print(f"PROCESSED SOLANA sig={row['sig']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
+    except Exception:
+        pass
 
 def mark_nexus_processed(key: str, ts: int | None = None, reason: str | None = None):
     try:
@@ -153,6 +157,10 @@ def mark_nexus_processed(key: str, ts: int | None = None, reason: str | None = N
         "reason": reason or "processed",
     }
     _append_jsonl(config.PROCESSED_NEXUS_FILE, row)
+    try:
+        print(f"PROCESSED NEXUS tx={row['tx']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
+    except Exception:
+        pass
 
 def prune_processed(solana_waterline: int | None = None, nexus_waterline: int | None = None):
     """Prune processed markers strictly older than the given waterlines minus safety.
