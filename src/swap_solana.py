@@ -328,6 +328,7 @@ def poll_solana_deposits():
                                             print(f"SWAP SUCCESS USDC->USDD sig={sig} usdc_units={net_usdc_for_mint} usdd_units={usdd_units} to={nexus_addr}")
                                         except Exception:
                                             pass
+                                        mark_processed = True
                                     else:
                                         print("USDD mint/send failed")
                                         attempts = int((state.attempt_state.get(mint_key) or {}).get("attempts", 0))
