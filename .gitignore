@@ -1,3 +1,7 @@
+# Local files
+Nexus API docs
+sol_testclient.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
