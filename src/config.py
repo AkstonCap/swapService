@@ -12,6 +12,7 @@ REQUIRED_ENV = [
     "SOL_MINT",
     "NEXUS_PIN",
     "NEXUS_USDD_TREASURY_ACCOUNT",
+    "SOL_MAIN_ACCOUNT",
 ]
 for var in REQUIRED_ENV:
     if not os.getenv(var):

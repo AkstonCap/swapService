@@ -2,13 +2,18 @@ import json
 from typing import Optional
 import base64
 import requests
+import asyncio
 from solana.rpc.api import Client
+from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey as PublicKey
 from solders.keypair import Keypair
 from solders.instruction import Instruction as TransactionInstruction, AccountMeta
 from solders.hash import Hash
 from solders.transaction import Transaction, VersionedTransaction
-from solders.message import Message
+from solders.message import Message, MessageV0
+from spl.memo.instructions import create_memo, MemoParams
+from solders.system_program import transfer, TransferParams
+
 from . import config
 
 from struct import pack
@@ -106,18 +111,19 @@ def load_vault_solders_keypair():
 def get_vault_sol_balance() -> int:
     """Return vault wallet SOL balance in lamports."""
     try:
-        client = Client(config.RPC_URL)
-        kp = load_vault_keypair()
-        bal = client.get_balance(kp.pubkey())
-        return int((bal or {}).get("result", {}).get("value", 0))
+        client = AsyncClient(config.RPC_URL)
+        # kp = load_vault_keypair()
+
+        bal = client.get_balance(PublicKey.from_string(config.SOL_MAIN_ACCOUNT))
+        return int(bal.value or 0)
     except Exception:
         return 0
 
 def get_token_account_balance(token_account_addr: str) -> int:
     try:
-        client = Client(config.RPC_URL)
-        resp = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
-        amt = (((resp or {}).get("result") or {}).get("value") or {}).get("amount")
+        client = AsyncClient(config.RPC_URL)
+        amt = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
+        # amt = (((resp or {}).get("result") or {}).get("value") or {}).get("amount")
         return int(amt or 0)
     except Exception:
         return 0
@@ -379,7 +385,7 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
     for ix in instructions or []:
         try:
             prog = ix.get("program") or ""
-            pid = ix.get("programId") or ""
+            pid = ix.get("programId") or ix.get("program_id") or ""
             parsed = ix.get("parsed")
 
             # Parsed spl-memo
