@@ -420,9 +420,59 @@ def is_valid_usdc_token_account(addr: str) -> bool:
 def extract_memo_from_instructions(instructions) -> Optional[str]:
     """
     Extract memo text from a list of transaction instructions (outer+inner).
-    Supports parsed 'spl-memo' and raw Memo program data in base64 or base58 with UTF-8 fallback.
+    Supports:
+    - Parsed 'spl-memo' (string or { info: { memo } })
+    - Raw Memo program data for both program IDs (base64/base58/utf-8)
+    - 'spl-memo' with only raw data (no parsed) by decoding data directly
     """
-    MEMO_PID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+    MEMO_PIDS = {
+        "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",  # current
+        "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",  # legacy
+    }
+
+    def _decode_any(data):
+        blob = None
+        if isinstance(data, str):
+            # try base64 then base58 then utf-8
+            try:
+                return base64.b64decode(data)
+            except Exception:
+                try:
+                    from base58 import b58decode  # type: ignore
+                    return b58decode(data)
+                except Exception:
+                    try:
+                        return data.encode("utf-8")
+                    except Exception:
+                        return None
+        elif isinstance(data, list) and data:
+            payload = data[0]
+            enc = (data[1] if len(data) > 1 else "").lower()
+            if isinstance(payload, str):
+                if enc == "base64":
+                    try:
+                        return base64.b64decode(payload)
+                    except Exception:
+                        return None
+                if enc == "base58":
+                    try:
+                        from base58 import b58decode  # type: ignore
+                        return b58decode(payload)
+                    except Exception:
+                        return None
+                # unknown encoding: try base64 then base58 then utf-8
+                try:
+                    return base64.b64decode(payload)
+                except Exception:
+                    try:
+                        from base58 import b58decode  # type: ignore
+                        return b58decode(payload)
+                    except Exception:
+                        try:
+                            return payload.encode("utf-8")
+                        except Exception:
+                            return None
+        return blob
 
     for ix in instructions or []:
         try:
@@ -443,56 +493,12 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                     m = parsed.strip()
                     if m:
                         return m
+                # If parsed is present but didn't yield text, fall through to raw decode
 
-            # Raw Memo program
-            if pid == MEMO_PID:
+            # Raw decode for memo program IDs or spl-memo program with only raw data
+            if pid in MEMO_PIDS or prog == "spl-memo":
                 data = ix.get("data")
-                blob = None
-
-                # data as string (unknown encoding): try base64 then base58 then UTF-8
-                if isinstance(data, str):
-                    try:
-                        blob = base64.b64decode(data)
-                    except Exception:
-                        try:
-                            from base58 import b58decode  # type: ignore
-                            blob = b58decode(data)
-                        except Exception:
-                            try:
-                                blob = data.encode("utf-8")
-                            except Exception:
-                                blob = None
-
-                # data as [payload, encoding]
-                elif isinstance(data, list) and data:
-                    payload = data[0]
-                    enc = (data[1] if len(data) > 1 else "").lower()
-                    if isinstance(payload, str):
-                        if enc == "base64":
-                            try:
-                                blob = base64.b64decode(payload)
-                            except Exception:
-                                blob = None
-                        elif enc == "base58":
-                            try:
-                                from base58 import b58decode  # type: ignore
-                                blob = b58decode(payload)
-                            except Exception:
-                                blob = None
-                        else:
-                            # unknown encoding: try base64 then base58 then UTF-8
-                            try:
-                                blob = base64.b64decode(payload)
-                            except Exception:
-                                try:
-                                    from base58 import b58decode  # type: ignore
-                                    blob = b58decode(payload)
-                                except Exception:
-                                    try:
-                                        blob = payload.encode("utf-8")
-                                    except Exception:
-                                        blob = None
-
+                blob = _decode_any(data)
                 if blob:
                     try:
                         m = blob.decode("utf-8", errors="ignore").strip()
