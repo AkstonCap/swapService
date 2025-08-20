@@ -365,7 +365,7 @@ def poll_solana_deposits():
                                 mint_key = f"mint_usdd:{sig}"
                                 if state.should_attempt(mint_key):
                                     state.record_attempt(mint_key)
-                                    if nexus_client.debit_usdd(nexus_addr, usdd_units, f"USDC_TX:{sig}"):
+                                    if nexus_client.debit_usdd(nexus_addr, usdd_units, f"USDC_TX {sig}"):
                                         # Accrue fees only after success: flat + dynamic
                                         total_fee = flat_fee_units + dynamic_fee_usdc
                                         if total_fee > 0:
@@ -611,7 +611,7 @@ def poll_solana_deposits():
                                     mint_key = f"mint_usdd:{sig}"
                                     if state.should_attempt(mint_key):
                                         state.record_attempt(mint_key)
-                                        if nexus_client.debit_usdd(nexus_addr, usdd_units, f"USDC_TX:{sig}"):
+                                        if nexus_client.debit_usdd(nexus_addr, usdd_units, f"USDC_TX {sig}"):
                                             total_fee = flat_fee_units + dynamic_fee_usdc
                                             if total_fee > 0:
                                                 fees.add_usdc_fee(total_fee)
