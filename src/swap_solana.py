@@ -2,6 +2,33 @@ from decimal import Decimal
 from . import config, state, nexus_client, solana_client, fees
 
 
+# Local in-process cache so signatures marked processed (especially non-deposits)
+# are not revisited within the same runtime even if state lookups miss.
+_processed_sig_cache: set[str] = set()
+
+
+def _is_sig_processed(sig: str) -> bool:
+    """Check if a signature has been processed, consulting state and a local cache."""
+    # Preferred explicit API
+    try:
+        is_proc = getattr(state, "is_solana_processed", None)
+        if callable(is_proc) and is_proc(sig):
+            return True
+    except Exception:
+        pass
+    # Common shapes for in-memory set/dict/list
+    try:
+        ps = getattr(state, "processed_sigs", None)
+        if isinstance(ps, dict) and sig in ps:
+            return True
+        if isinstance(ps, (set, list)) and sig in ps:
+            return True
+    except Exception:
+        pass
+    # Fallback to local cache
+    return sig in _processed_sig_cache
+
+
 def _normalize_get_sigs_response(resp):
     """Return a list of signature entries as dicts with at least 'signature' and optional 'blockTime'.
     Supports both dict-based solana-py responses and solders typed responses.
@@ -150,7 +177,8 @@ def poll_solana_deposits():
             return None
 
         for sig in sig_list:
-            if sig in state.processed_sigs:
+            # Skip any signature already processed (state or local cache)
+            if _is_sig_processed(sig):
                 continue
 
             mark_processed = False
@@ -210,6 +238,26 @@ def poll_solana_deposits():
 
                         source_token_acc = info.get("source")
                         memo_data = solana_client.extract_memo_from_instructions(all_instrs)
+                        if not memo_data:
+                            # Fallback: try extracting from runtime logMessages (e.g., "Program log: Memo ...")
+                            try:
+                                logs = (tx.get("meta") or {}).get("logMessages") or []
+                                if isinstance(logs, list):
+                                    for ln in logs:
+                                        if not isinstance(ln, str):
+                                            continue
+                                        # Common patterns seen in logs
+                                        # - "Program log: Memo (len ...): <text>"
+                                        # - "Program log: Memo: <text>"
+                                        if "Program log: Memo" in ln:
+                                            parts = ln.split(":", 2)
+                                            if len(parts) >= 3:
+                                                cand = parts[-1].strip()
+                                                if cand:
+                                                    memo_data = cand
+                                                    break
+                            except Exception:
+                                pass
                         flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
 
                         # Tiny deposit drop: treat <= flat fee threshold entirely as fee, do nothing else
@@ -452,6 +500,22 @@ def poll_solana_deposits():
                         amount_usdc_units = int(delta_in)
                         source_token_acc = src_addr
                         memo_data = solana_client.extract_memo_from_instructions(all_instrs)
+                        if not memo_data:
+                            try:
+                                logs = (tx.get("meta") or {}).get("logMessages") or []
+                                if isinstance(logs, list):
+                                    for ln in logs:
+                                        if not isinstance(ln, str):
+                                            continue
+                                        if "Program log: Memo" in ln:
+                                            parts = ln.split(":", 2)
+                                            if len(parts) >= 3:
+                                                cand = parts[-1].strip()
+                                                if cand:
+                                                    memo_data = cand
+                                                    break
+                            except Exception:
+                                pass
                         flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
                         found_deposit = True
 
@@ -661,6 +725,7 @@ def poll_solana_deposits():
                     pass
                 ts_bt = sig_bt.get(sig) or 0
                 state.mark_solana_processed(sig, ts=ts_bt, reason="not a deposit")
+                _processed_sig_cache.add(sig)
                 if ts_bt:
                     confirmed_bt_candidates.append(int(ts_bt))
 
