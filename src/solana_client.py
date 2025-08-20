@@ -43,7 +43,39 @@ def get_associated_token_address(*, owner: PublicKey, mint: PublicKey) -> Public
 def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Keypair) -> str:
     """Build, sign (legacy) and send a transaction using solders; return signature string."""
     client = Client(config.RPC_URL)
-    bh = (client.get_latest_blockhash() or {}).get("result", {}).get("value", {}).get("blockhash")
+
+    # Helper to get a blockhash string from dict or solders typed response
+    def _get_latest_blockhash_str() -> str | None:
+        try:
+            resp = client.get_latest_blockhash()
+        except Exception:
+            return None
+        # Dict-style
+        try:
+            return ((resp or {}).get("result") or {}).get("value", {}).get("blockhash")
+        except AttributeError:
+            pass
+        # to_json typed
+        try:
+            js = json.loads(resp.to_json())
+            return ((js or {}).get("result") or {}).get("value", {}).get("blockhash")
+        except Exception:
+            pass
+        # Direct typed attributes
+        try:
+            val = getattr(resp, "value", None)
+            if val is not None:
+                bh = getattr(val, "blockhash", None)
+                if bh is not None:
+                    try:
+                        return str(bh)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return None
+
+    bh = _get_latest_blockhash_str()
     if not bh:
         raise RuntimeError("Failed to fetch recent blockhash")
     recent = Hash.from_string(bh)
@@ -378,7 +410,11 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                             from base58 import b58decode  # type: ignore
                             blob = b58decode(data)
                         except Exception:
-                            blob = None
+                            # Fallback: treat as plain UTF-8 literal
+                            try:
+                                blob = data.encode("utf-8")
+                            except Exception:
+                                blob = None
 
                 # data as [payload, encoding]
                 elif isinstance(data, list) and data:
@@ -405,7 +441,11 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                                     from base58 import b58decode  # type: ignore
                                     blob = b58decode(payload)
                                 except Exception:
-                                    blob = None
+                                    # Fallback: treat as plain UTF-8 literal
+                                    try:
+                                        blob = payload.encode("utf-8")
+                                    except Exception:
+                                        blob = None
 
                 if blob:
                     try:
