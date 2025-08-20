@@ -1,6 +1,12 @@
 from decimal import Decimal
 from . import config, state, nexus_client, solana_client, fees
 
+# SPL Token program ID constant for reliable instruction matching
+SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+# Optional: allow extra token program IDs via config (e.g., Token-2022)
+EXTRA_TOKEN_PROGRAM_IDS = set(getattr(config, "EXTRA_TOKEN_PROGRAM_IDS", []))
+
 
 def _normalize_get_sigs_response(resp):
     """Return a list of signature entries as dicts with at least 'signature' and optional 'blockTime'.
@@ -53,12 +59,21 @@ def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
 
 
 def _get_tx_result(sig: str):
-    """Get transaction details with retries"""
+    """Get transaction details with parsed instructions"""
     from solana.rpc.api import Client
+    from solders.signature import Signature
+    
     client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
     
     try:
-        resp = client.get_transaction(sig, max_supported_transaction_version=0)
+        sig_obj = Signature.from_string(sig)
+        # CRITICAL: Must include encoding="jsonParsed" to get parsed instructions
+        resp = client.get_transaction(
+            sig_obj, 
+            encoding="jsonParsed",
+            max_supported_transaction_version=0
+        )
+        
         if hasattr(resp, 'value') and resp.value:
             return resp.value
         elif isinstance(resp, dict) and resp.get("result"):
@@ -86,95 +101,127 @@ def _iter_all_instructions(tx):
     return instructions
 
 
+def _handle_refund(deposit_key: str, sig: str, amount_usdc_units: int, source_token_acc: str, reason: str) -> bool:
+    """Handle refund with flat fee deduction"""
+    flat_fee_units = config.FLAT_FEE_USDC_UNITS
+    refund_amount = amount_usdc_units - flat_fee_units
+    
+    if refund_amount > 0 and source_token_acc and source_token_acc != "unknown":
+        success = solana_client.send_usdc_from_vault(
+            source_token_acc, refund_amount, 
+            memo=f"Refund: {reason} USDC_TX:{sig}"
+        )
+        if success:
+            fees.add_usdc_fee(flat_fee_units)
+            # Mark both deposit and signature as processed
+            if not hasattr(state, 'processed_deposits'):
+                state.processed_deposits = set()
+            state.processed_deposits.add(deposit_key)
+            state.mark_solana_processed(deposit_key, reason=f"refunded - {reason}")
+            return True
+        else:
+            print(f"Deposit {deposit_key}: Refund failed")
+            return False
+    else:
+        # Keep as fee if refund not possible or amount too small
+        fees.add_usdc_fee(amount_usdc_units)
+        # Mark both deposit and signature as processed
+        if not hasattr(state, 'processed_deposits'):
+            state.processed_deposits = set()
+        state.processed_deposits.add(deposit_key)
+        state.mark_solana_processed(deposit_key, reason=f"fee only - {reason}")
+        return True
+
+
 def _process_single_deposit(deposit_key: str, sig: str, amount_usdc_units: int, 
                           source_token_acc: str, memo_data: str, all_instrs: list) -> bool:
     """Process a single deposit within a transaction. Returns True if handled successfully."""
     
-    # Check if this specific deposit was already processed
-    if deposit_key in state.processed_sigs:
+    # Check if this specific deposit was already processed using deposit-specific tracking
+    if not hasattr(state, 'processed_deposits'):
+        state.processed_deposits = set()
+    
+    if deposit_key in state.processed_deposits:
         return True
     
     # Skip tiny amounts (less than flat fee)
     flat_fee_usdc_units = config.FLAT_FEE_USDC_UNITS
     if amount_usdc_units < flat_fee_usdc_units:
         print(f"Deposit {deposit_key}: amount {amount_usdc_units} below minimum fee {flat_fee_usdc_units}")
+        # Mark both deposit and signature as processed
+        state.processed_deposits.add(deposit_key)
         state.mark_solana_processed(deposit_key, reason="amount too small")
         return True
     
     try:
-        # Extract memo - case insensitive
-        memo_addr = None
-        if memo_data:
-            memo_addr = memo_data.strip()
+        # Extract Nexus address from memo (case-insensitive prefix)
+        nexus_addr = None
+        if isinstance(memo_data, str) and memo_data.lower().startswith("nexus:"):
+            nexus_addr = memo_data[memo_data.find(":") + 1:].strip()
         
-        if not memo_addr:
-            print(f"Deposit {deposit_key}: No memo found, refunding")
-            # Charge flat fee and refund remainder
-            refund_amount = amount_usdc_units - flat_fee_usdc_units
-            if refund_amount > 0:
-                # Send refund back to source
-                success = solana_client.send_usdc_from_vault(source_token_acc, refund_amount, 
-                                                           memo=f"Refund: {sig}")
-                if success:
-                    state.mark_solana_processed(deposit_key, reason="refunded - no memo")
-                    return True
-                else:
-                    print(f"Deposit {deposit_key}: Refund failed")
-                    return False
-            else:
-                state.mark_solana_processed(deposit_key, reason="fee only - no memo")
-                return True
+        if not nexus_addr:
+            print(f"Deposit {deposit_key}: No valid nexus:<addr> memo found, refunding")
+            return _handle_refund(deposit_key, sig, amount_usdc_units, source_token_acc, 
+                                "Missing memo nexus:<addr>")
         
-        # Process swap to USDD
+        # Validate Nexus account
         try:
-            # Calculate amounts
-            amount_usdc_decimal = Decimal(amount_usdc_units) / (10 ** config.USDC_DECIMALS)
-            flat_fee_decimal = Decimal(config.FLAT_FEE_USDC)
-            
-            # Deduct flat fee first
-            net_amount_decimal = amount_usdc_decimal - flat_fee_decimal
-            if net_amount_decimal <= 0:
-                state.mark_solana_processed(deposit_key, reason="fee only")
+            acct = nexus_client.get_account_info(nexus_addr)
+            if not acct or not nexus_client.is_expected_token(acct, config.NEXUS_TOKEN_NAME):
+                return _handle_refund(deposit_key, sig, amount_usdc_units, source_token_acc,
+                                    "Invalid or wrong Nexus address")
+        except Exception as e:
+            print(f"Deposit {deposit_key}: Nexus validation error: {e}")
+            return _handle_refund(deposit_key, sig, amount_usdc_units, source_token_acc,
+                                "Nexus validation failed")
+        
+        # Check for duplicate mint
+        try:
+            if nexus_client.was_usdd_debited_from_treasury_for_sig(sig, lookback=60, min_confirmations=0):
+                print(f"Deposit {deposit_key}: Already minted, skipping")
+                # Mark both deposit and signature as processed
+                state.processed_deposits.add(deposit_key)
+                state.mark_solana_processed(deposit_key, reason="already minted")
                 return True
-            
-            # Calculate dynamic fee
-            dynamic_fee_decimal = net_amount_decimal * (Decimal(config.DYNAMIC_FEE_BPS) / Decimal("10000"))
-            final_usdd_amount = net_amount_decimal - dynamic_fee_decimal
-            
-            if final_usdd_amount <= 0:
-                print(f"Deposit {deposit_key}: Final amount after fees is zero or negative")
-                state.mark_solana_processed(deposit_key, reason="no amount after fees")
-                return True
-            
-            # Scale to USDD units (same decimals as USDC in this system)
-            final_usdd_units = int(final_usdd_amount * (10 ** config.USDD_DECIMALS))
-            
-            # Perform Nexus transfer
-            success = nexus_client.send_usdd_to_account(memo_addr, final_usdd_units)
-            
-            if success:
-                state.mark_solana_processed(deposit_key, reason="swapped successfully")
+        except Exception as e:
+            print(f"Deposit {deposit_key}: Duplicate check failed: {e}")
+        
+        # Calculate fees and net amount
+        dynamic_bps = config.DYNAMIC_FEE_BPS
+        pre_dynamic_net = max(0, amount_usdc_units - flat_fee_usdc_units)
+        dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000
+        net_usdc_for_mint = max(0, pre_dynamic_net - dynamic_fee_usdc)
+        
+        if net_usdc_for_mint <= 0:
+            print(f"Deposit {deposit_key}: No amount left after fees")
+            fees.add_usdc_fee(amount_usdc_units)
+            # Mark both deposit and signature as processed
+            state.processed_deposits.add(deposit_key)
+            state.mark_solana_processed(deposit_key, reason="fee only")
+            return True
+        
+        # Convert to USDD units
+        usdd_units = scale_amount(net_usdc_for_mint, config.USDC_DECIMALS, config.USDD_DECIMALS)
+        
+        # Mint USDD on Nexus
+        try:
+            if nexus_client.debit_usdd(nexus_addr, usdd_units, f"USDC_TX:{sig}"):
+                # Success - record fees
+                total_fee = flat_fee_usdc_units + dynamic_fee_usdc
+                fees.add_usdc_fee(total_fee)
+                # Mark both deposit and signature as processed
+                state.processed_deposits.add(deposit_key)
+                state.mark_solana_processed(deposit_key, reason="minted successfully")
+                print(f"Minted {usdd_units} USDD units to {nexus_addr} (fees: {total_fee})")
                 return True
             else:
-                print(f"Deposit {deposit_key}: Nexus transfer failed, scheduling refund")
-                # Schedule refund attempt
-                refund_amount = amount_usdc_units - flat_fee_usdc_units
-                if refund_amount > 0:
-                    success = solana_client.send_usdc_from_vault(source_token_acc, refund_amount,
-                                                               memo=f"Refund: {sig}")
-                    if success:
-                        state.mark_solana_processed(deposit_key, reason="refunded - nexus failed")
-                        return True
-                    else:
-                        print(f"Deposit {deposit_key}: Both swap and refund failed")
-                        return False
-                else:
-                    state.mark_solana_processed(deposit_key, reason="nexus failed - fee only")
-                    return True
-                    
+                # Mint failed - refund
+                return _handle_refund(deposit_key, sig, amount_usdc_units, source_token_acc,
+                                    "USDD mint failed")
         except Exception as e:
-            print(f"Deposit {deposit_key}: Processing error: {e}")
-            return False
+            print(f"Deposit {deposit_key}: Mint error: {e}")
+            return _handle_refund(deposit_key, sig, amount_usdc_units, source_token_acc,
+                                "USDD mint error")
             
     except Exception as e:
         print(f"Deposit {deposit_key}: Unexpected error: {e}")
@@ -230,15 +277,28 @@ def poll_solana_deposits():
                 if sig in state.processed_sigs:
                     continue
 
-                # Get transaction details
+                # Get transaction details with better error handling
                 try:
                     tx = _get_tx_result(sig)
                     if not tx:
+                        # Couldn't fetch transaction - retry later, don't mark as processed
+                        page_has_unprocessed_deposit = True
                         continue
-                    if (tx.get("meta") or {}).get("err") is not None:
+                        
+                    meta = tx.get("meta")
+                    if meta is None:
+                        # Missing meta - can't parse instructions or balances, retry later
+                        page_has_unprocessed_deposit = True
                         continue
+                        
+                    if meta.get("err") is not None:
+                        # Failed transaction - safe to skip
+                        continue
+                        
                 except Exception as e:
                     print(f"Error fetching transaction {sig}: {e}")
+                    # Network/RPC error - retry later
+                    page_has_unprocessed_deposit = True
                     continue
 
                 # Get ALL instructions (top-level + inner/CPI)
@@ -249,10 +309,23 @@ def poll_solana_deposits():
                 
                 # Parse all instructions for USDC transfers to our vault
                 for instr in all_instrs:
+                    # Fix SPL Token program matching - check both program name and programId
+                    prog = instr.get("program")
+                    prog_id_raw = instr.get("programId")
+                    prog_id = None
+                    if prog_id_raw is not None:
+                        # programId can be a dict with 'pubkey' or a string
+                        prog_id = (
+                            prog_id_raw.get("pubkey")
+                            if isinstance(prog_id_raw, dict)
+                            else str(prog_id_raw)
+                        )
                     is_token_prog = (
-                        instr.get("program") == "spl-token"
-                        or instr.get("programId") == str(solana_client.TOKEN_PROGRAM_ID)
+                        prog == "spl-token" or 
+                        (prog_id and str(prog_id) == SPL_TOKEN_PROGRAM_ID) or
+                        (prog_id and str(prog_id) in EXTRA_TOKEN_PROGRAM_IDS)
                     )
+                    
                     if is_token_prog and instr.get("parsed"):
                         p = instr["parsed"]
                         # Support ALL transfer types
@@ -273,33 +346,43 @@ def poll_solana_deposits():
                                         "authority": info.get("authority")  # For transferCheckedWithFee
                                     })
                 
-                # Fallback: Check balance deltas if no parsed transfers found
+                # Fallback: Check balance deltas only if we have required data
                 if not deposits_found:
-                    meta = tx.get("meta", {})
-                    pre_balances = meta.get("preTokenBalances", [])
-                    post_balances = meta.get("postTokenBalances", [])
-                    
-                    # Find our USDC account in the balances
-                    vault_pre = None
-                    vault_post = None
-                    
-                    for bal in pre_balances:
-                        if bal.get("owner") == str(config.VAULT_USDC_ACCOUNT):
-                            vault_pre = int(bal.get("uiTokenAmount", {}).get("amount", 0))
-                            break
-                    
-                    for bal in post_balances:
-                        if bal.get("owner") == str(config.VAULT_USDC_ACCOUNT):
-                            vault_post = int(bal.get("uiTokenAmount", {}).get("amount", 0))
-                            break
-                    
-                    if vault_pre is not None and vault_post is not None and vault_post > vault_pre:
-                        delta = vault_post - vault_pre
-                        deposits_found.append({
-                            "amount": delta,
-                            "source": "unknown",  # Can't determine from balance delta
-                            "authority": None
-                        })
+                    acct_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                    if not acct_keys:
+                        # No account keys - can't resolve balance deltas, retry later
+                        page_has_unprocessed_deposit = True
+                        continue
+                        
+                    try:
+                        pre_balances = meta.get("preTokenBalances", [])
+                        post_balances = meta.get("postTokenBalances", [])
+                        
+                        def _key_at(idx):
+                            try:
+                                k = acct_keys[idx]
+                                return k.get("pubkey") if isinstance(k, dict) else str(k)
+                            except Exception:
+                                return None
+                        
+                        # Find any post balance entry that corresponds to our vault token account
+                        vault_post_entries = [e for e in post_balances if _key_at(int(e.get("accountIndex", -1))) == str(config.VAULT_USDC_ACCOUNT)]
+                        for post_e in vault_post_entries:
+                            idx = int(post_e["accountIndex"])
+                            post_amt = int((post_e.get("uiTokenAmount") or {}).get("amount") or 0)
+                            # Corresponding pre entry (may not exist if account was empty before)
+                            pre_e = next((e for e in pre_balances if int(e.get("accountIndex", -1)) == idx), None)
+                            pre_amt = int((pre_e.get("uiTokenAmount") or {}).get("amount") or 0) if pre_e else 0
+                            delta = post_amt - pre_amt
+                            if delta > 0:
+                                deposits_found.append({
+                                    "amount": delta, 
+                                    "source": None, 
+                                    "authority": None
+                                })
+                    except Exception:
+                        # Balance parsing failed but we have account keys - probably not a deposit
+                        pass
                 
                 # Process ALL deposits found in this transaction
                 all_deposits_handled = True
@@ -328,12 +411,20 @@ def poll_solana_deposits():
                     state.mark_solana_processed(sig, ts=ts_bt, reason="all deposits processed")
                     if ts_bt:
                         confirmed_bt_candidates.append(int(ts_bt))
-                elif not deposits_found:
-                    # No deposits found - mark as benign transaction
-                    ts_bt = sig_bt.get(sig) or 0
-                    state.mark_solana_processed(sig, ts=ts_bt, reason="not a deposit")
-                    if ts_bt:
-                        confirmed_bt_candidates.append(int(ts_bt))
+                elif not deposits_found and meta is not None:
+                    # Only mark "not a deposit" if we could fully inspect the transaction
+                    acct_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                    if acct_keys:  # Only mark if we had account keys to check balances
+                        ts_bt = sig_bt.get(sig) or 0
+                        state.mark_solana_processed(sig, ts=ts_bt, reason="not a deposit")
+                        if ts_bt:
+                            confirmed_bt_candidates.append(int(ts_bt))
+                    else:
+                        # Incomplete inspection - retry later
+                        page_has_unprocessed_deposit = True
+                else:
+                    # Partial processing or incomplete inspection - retry later
+                    page_has_unprocessed_deposit = True
 
             # Check if we should continue pagination
             if not isinstance(sig_results, list) or len(sig_results) < limit:
