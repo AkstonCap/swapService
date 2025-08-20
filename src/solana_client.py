@@ -48,8 +48,8 @@ def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Ke
         raise RuntimeError("Failed to fetch recent blockhash")
     recent = Hash.from_string(bh)
     # Build a legacy Message and Transaction using solders
-    msg = Message.new_with_blockhash(instructions, kp.public_key, recent)
-    tx = Transaction.new_signed_with_payer(instructions, kp.public_key, [kp], recent)
+    msg = Message.new_with_blockhash(instructions, kp.pubkey(), recent)
+    tx = Transaction.new_signed_with_payer(instructions, kp.pubkey(), [kp], recent)
     sig = client.send_raw_transaction(bytes(tx)).get("result")
     try:
         client.confirm_transaction(sig, commitment="confirmed")
@@ -76,7 +76,7 @@ def get_vault_sol_balance() -> int:
     try:
         client = Client(config.RPC_URL)
         kp = load_vault_keypair()
-        bal = client.get_balance(kp.public_key)
+        bal = client.get_balance(kp.pubkey())
         return int((bal or {}).get("result", {}).get("value", 0))
     except Exception:
         return 0
@@ -101,7 +101,7 @@ def transfer_usdc_between_accounts(source_token_account: str, dest_token_account
             source=PublicKey.from_string(source_token_account),
             mint=config.USDC_MINT,
             dest=PublicKey.from_string(dest_token_account),
-            owner=kp.public_key,
+            owner=kp.pubkey(),
             amount=amount_base_units,
             decimals=config.USDC_DECIMALS,
             signers=[],
@@ -122,7 +122,7 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
             return False
         client = Client(config.RPC_URL)
         kp = load_vault_keypair()
-        owner = kp.public_key
+        owner = kp.pubkey()
 
         # Jupiter Quote API v6
         base = "https://quote-api.jup.ag/v6/quote"
@@ -195,7 +195,7 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
                 source=config.VAULT_USDC_ACCOUNT,
                 mint=config.USDC_MINT,
                 dest=dest_ata,
-                owner=kp.public_key,
+                owner=kp.pubkey(),
                 amount=amount_base_units,
                 decimals=config.USDC_DECIMALS,
                 signers=[],
@@ -251,7 +251,7 @@ def ensure_send_usdc_to_token_account(dest_token_account_addr: str, amount_base_
                 source=config.VAULT_USDC_ACCOUNT,
                 mint=config.USDC_MINT,
                 dest=dest,
-                owner=kp.public_key,
+                owner=kp.pubkey(),
                 amount=amount_base_units,
                 decimals=config.USDC_DECIMALS,
                 signers=[],
@@ -337,21 +337,42 @@ def is_valid_usdc_token_account(addr: str) -> bool:
 
 
 def extract_memo_from_instructions(instructions) -> Optional[str]:
+    """
+    Extract memo text from a list of transaction instructions (outer+inner).
+    Supports both parsed 'spl-memo' and raw Memo program data (base64).
+    """
     import base64
-    for ix in instructions:
-        if ix.get("program") == "spl-memo":
+    MEMO_PID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+    
+    for ix in instructions or []:
+        try:
+            prog = ix.get("program")
+            pid = ix.get("programId") or ""
+            
+            # Parsed memo
             parsed = ix.get("parsed")
-            if isinstance(parsed, dict):
-                memo = parsed.get("info", {}).get("memo")
-                if isinstance(memo, str):
-                    return memo
-            elif isinstance(parsed, str):
-                return parsed
-        if ix.get("programId") == str(config.MEMO_PROGRAM_ID) and "data" in ix:
-            try:
-                return base64.b64decode(ix["data"]).decode("utf-8")
-            except Exception:
-                continue
+            if prog == "spl-memo" and parsed:
+                if isinstance(parsed, dict):
+                    info = parsed.get("info") or {}
+                    memo = info.get("memo")
+                    if isinstance(memo, str) and memo.strip():
+                        return memo.strip()
+                elif isinstance(parsed, str) and parsed.strip():
+                    return parsed.strip()
+            
+            # Raw memo (base64 data)
+            if pid == MEMO_PID:
+                data = ix.get("data")
+                if isinstance(data, str):
+                    try:
+                        raw = base64.b64decode(data)
+                        memo = raw.decode("utf-8", errors="ignore").strip()
+                        if memo:
+                            return memo
+                    except Exception:
+                        pass
+        except Exception:
+            continue
     return None
 
 
@@ -368,8 +389,9 @@ def has_usdc_ata(owner_addr: str) -> bool:
 
 
 def _create_memo_ix(text: str) -> TransactionInstruction:
+    MEMO_PID = PublicKey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
     data = text.encode("utf-8")
-    return TransactionInstruction(program_id=config.MEMO_PROGRAM_ID, accounts=[], data=data)
+    return TransactionInstruction(program_id=MEMO_PID, accounts=[], data=data)
 
 
 def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str) -> bool:
@@ -384,7 +406,7 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
                 source=config.VAULT_USDC_ACCOUNT,
                 mint=config.USDC_MINT,
                 dest=dest_token_acc,
-                owner=kp.public_key,
+                owner=kp.pubkey(),
                 amount=amount_base_units,
                 decimals=config.USDC_DECIMALS,
                 signers=[],
@@ -413,7 +435,7 @@ def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None) -> 
                 source=config.VAULT_USDC_ACCOUNT,
                 mint=config.USDC_MINT,
                 dest=PublicKey.from_string(dest),
-                owner=kp.public_key,
+                owner=kp.pubkey(),
                 amount=amount_base_units,
                 decimals=config.USDC_DECIMALS,
                 signers=[],
