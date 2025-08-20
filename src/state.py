@@ -5,26 +5,63 @@ from . import config
 import datetime
 
 # Load processed state
+processed_sigs: Dict[str, int] = {}
 if os.path.exists(config.PROCESSED_SIG_FILE):
-    with open(config.PROCESSED_SIG_FILE, "r") as f:
-        _loaded = json.load(f)
-        # Backward compatible: previously a list of keys; now a dict of key->timestamp
-        if isinstance(_loaded, dict):
-            processed_sigs: Dict[str, int] = {str(k): int(v or 0) for k, v in _loaded.items()}
-        else:
-            processed_sigs = {str(k): 0 for k in (_loaded or [])}
-else:
-    processed_sigs: Dict[str, int] = {}
+    try:
+        # Try JSON object (legacy)
+        with open(config.PROCESSED_SIG_FILE, "r", encoding="utf-8") as f:
+            data = f.read()
+            try:
+                _loaded = json.loads(data)
+                if isinstance(_loaded, dict):
+                    processed_sigs = {str(k): int(v or 0) for k, v in _loaded.items()}
+                else:
+                    processed_sigs = {str(k): 0 for k in (_loaded or [])}
+            except Exception:
+                # Try JSONL lines
+                processed_sigs = {}
+                for line in data.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        sig = str(row.get("sig") or row.get("signature") or "").strip()
+                        ts = int(row.get("ts") or row.get("timestamp") or 0)
+                        if sig:
+                            processed_sigs[sig] = ts
+                    except Exception:
+                        continue
+    except Exception:
+        processed_sigs = {}
 
+processed_nexus_txs: Dict[str, int] = {}
 if os.path.exists(config.PROCESSED_NEXUS_FILE):
-    with open(config.PROCESSED_NEXUS_FILE, "r") as f:
-        _loaded = json.load(f)
-        if isinstance(_loaded, dict):
-            processed_nexus_txs: Dict[str, int] = {str(k): int(v or 0) for k, v in _loaded.items()}
-        else:
-            processed_nexus_txs = {str(k): 0 for k in (_loaded or [])}
-else:
-    processed_nexus_txs: Dict[str, int] = {}
+    try:
+        with open(config.PROCESSED_NEXUS_FILE, "r", encoding="utf-8") as f:
+            data = f.read()
+            try:
+                _loaded = json.loads(data)
+                if isinstance(_loaded, dict):
+                    processed_nexus_txs = {str(k): int(v or 0) for k, v in _loaded.items()}
+                else:
+                    processed_nexus_txs = {str(k): 0 for k in (_loaded or [])}
+            except Exception:
+                processed_nexus_txs = {}
+                for line in data.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        key = str(row.get("tx") or row.get("key") or row.get("txid") or "").strip()
+                        ts = int(row.get("ts") or row.get("timestamp") or 0)
+                        if key:
+                            processed_nexus_txs[key] = ts
+                    except Exception:
+                        continue
+    except Exception:
+        processed_nexus_txs = {}
 
 if os.path.exists(config.ATTEMPT_STATE_FILE):
     try:
@@ -37,12 +74,9 @@ else:
 
 
 def save_state():
-    with open(config.PROCESSED_SIG_FILE, "w") as f:
-        json.dump(processed_sigs, f)
-    with open(config.PROCESSED_NEXUS_FILE, "w") as f:
-        json.dump(processed_nexus_txs, f)
+    # Do not rewrite processed files; they are append-only JSONL now.
     try:
-        with open(config.ATTEMPT_STATE_FILE, "w") as f:
+        with open(config.ATTEMPT_STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(attempt_state, f)
     except Exception:
         pass
@@ -74,19 +108,59 @@ def record_attempt(action_key: str):
     save_state()
 
 # --- Processed markers with timestamps ---
-def mark_solana_processed(signature: str, ts: int | None = None):
+def _append_jsonl(path: str, row: Dict[str, Any]):
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def mark_solana_processed(signature: str, ts: int | None = None, reason: str | None = None):
     try:
         ts_int = int(ts or 0)
     except Exception:
         ts_int = 0
     processed_sigs[str(signature)] = ts_int
+    row = {
+        "type": "solana",
+        "sig": str(signature),
+        "ts": ts_int,
+        "ts_iso": datetime.datetime.utcfromtimestamp(ts_int).isoformat() + "Z" if ts_int else None,
+        "reason": reason or "processed",
+    }
+    _append_jsonl(config.PROCESSED_SIG_FILE, row)
+    try:
+        print(f"PROCESSED SOLANA sig={row['sig']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
+    except Exception:
+        pass
 
-def mark_nexus_processed(key: str, ts: int | None = None):
+def mark_nexus_processed(key: str, ts: int | None = None, reason: str | None = None):
     try:
         ts_int = int(ts or 0)
     except Exception:
         ts_int = 0
     processed_nexus_txs[str(key)] = ts_int
+    # Attempt to split txid and contract id if key is formatted as "<txid>:<cid>"
+    txid = str(key)
+    cid = None
+    if ":" in txid:
+        parts = txid.split(":", 1)
+        txid, cid = parts[0], parts[1]
+    row = {
+        "type": "nexus",
+        "tx": str(key),
+        "txid": txid,
+        "cid": cid,
+        "ts": ts_int,
+        "ts_iso": datetime.datetime.utcfromtimestamp(ts_int).isoformat() + "Z" if ts_int else None,
+        "reason": reason or "processed",
+    }
+    _append_jsonl(config.PROCESSED_NEXUS_FILE, row)
+    try:
+        print(f"PROCESSED NEXUS tx={row['tx']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
+    except Exception:
+        pass
 
 def prune_processed(solana_waterline: int | None = None, nexus_waterline: int | None = None):
     """Prune processed markers strictly older than the given waterlines minus safety.

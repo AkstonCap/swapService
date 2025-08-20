@@ -12,7 +12,8 @@ def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | N
     from . import config as cfg
     import subprocess
     global _last_heartbeat
-    if not cfg.HEARTBEAT_ENABLED or not cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS or not cfg.NEXUS_HEARTBEAT_ASSET_NAME:
+    # Require heartbeat enabled AND at least one of (asset name, asset address)
+    if not cfg.HEARTBEAT_ENABLED or not (cfg.NEXUS_HEARTBEAT_ASSET_NAME or cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS):
         return
     now = int(time.time())
     if not force and (now - _last_heartbeat) < cfg.HEARTBEAT_MIN_INTERVAL_SEC:
@@ -43,7 +44,7 @@ def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | N
         cmd.append(f"pin={cfg.NEXUS_PIN}")
     try:
         print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if res.returncode != 0:
             print("Heartbeat update failed:", res.stderr.strip() or res.stdout.strip())
         else:
