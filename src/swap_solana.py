@@ -609,55 +609,60 @@ def poll_solana_deposits():
                 state.mark_solana_processed(sig, ts=ts_bt, reason="deposit processed")
                 if ts_bt:
                     confirmed_bt_candidates.append(int(ts_bt))
+            elif found_deposit:
+                # There is a deposit but it wasn't processed yet (e.g., awaiting refund/memo/attempt cooldown)
+                page_has_unprocessed_deposit = True
             else:
                 # No relevant deposit found touching the vault; treat as benign (e.g., account creation)
-                if not found_deposit:
-                    # Extra certainty: log vault USDC delta before classifying
-                    try:
-                        meta = tx.get("meta") or {}
-                        pre = meta.get("preTokenBalances") or []
-                        post = meta.get("postTokenBalances") or []
-                        acct_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
-                        def _akey(i):
-                            try:
-                                k = acct_keys[i]
-                                if isinstance(k, str):
-                                    return k
-                                if isinstance(k, dict):
-                                    return k.get("pubkey") or k.get("pubKey") or ""
-                            except Exception:
-                                return ""
+                # Extra certainty: log vault USDC delta before classifying. If we still see a positive
+                # delta here, treat it as an unprocessed deposit and do not mark as not-a-deposit.
+                try:
+                    meta = tx.get("meta") or {}
+                    pre = meta.get("preTokenBalances") or []
+                    post = meta.get("postTokenBalances") or []
+                    acct_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                    def _akey(i):
+                        try:
+                            k = acct_keys[i]
+                            if isinstance(k, str):
+                                return k
+                            if isinstance(k, dict):
+                                return k.get("pubkey") or k.get("pubKey") or ""
+                        except Exception:
                             return ""
-                        def _amount(entry):
-                            try:
-                                return int(((entry.get("uiTokenAmount") or {}).get("amount")) or 0)
-                            except Exception:
-                                return 0
-                        vault_addr = str(config.VAULT_USDC_ACCOUNT)
-                        pre_amt = 0
-                        post_amt = 0
-                        for e in pre:
-                            try:
-                                if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
-                                    pre_amt = _amount(e)
-                            except Exception:
-                                pass
-                        for e in post:
-                            try:
-                                if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
-                                    post_amt = _amount(e)
-                            except Exception:
-                                pass
-                        print(f"Classifying NOT A DEPOSIT sig={sig} vault_pre={pre_amt} vault_post={post_amt} delta={post_amt - pre_amt}")
-                    except Exception:
-                        pass
-                    ts_bt = sig_bt.get(sig) or 0
-                    state.mark_solana_processed(sig, ts=ts_bt, reason="not a deposit")
-                    if ts_bt:
-                        confirmed_bt_candidates.append(int(ts_bt))
-                else:
-                    # There is a deposit but it wasn't processed yet (e.g., awaiting refund/memo/attempt cooldown)
-                    page_has_unprocessed_deposit = True
+                        return ""
+                    def _amount(entry):
+                        try:
+                            return int(((entry.get("uiTokenAmount") or {}).get("amount")) or 0)
+                        except Exception:
+                            return 0
+                    vault_addr = str(config.VAULT_USDC_ACCOUNT)
+                    pre_amt = 0
+                    post_amt = 0
+                    for e in pre:
+                        try:
+                            if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
+                                pre_amt = _amount(e)
+                        except Exception:
+                            pass
+                    for e in post:
+                        try:
+                            if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
+                                post_amt = _amount(e)
+                        except Exception:
+                            pass
+                    delta_final = post_amt - pre_amt
+                    print(f"Classifying NOT A DEPOSIT sig={sig} vault_pre={pre_amt} vault_post={post_amt} delta={delta_final}")
+                    if delta_final > 0:
+                        # Defensive: do not mark as not-a-deposit if a positive delta is observed here.
+                        page_has_unprocessed_deposit = True
+                        continue
+                except Exception:
+                    pass
+                ts_bt = sig_bt.get(sig) or 0
+                state.mark_solana_processed(sig, ts=ts_bt, reason="not a deposit")
+                if ts_bt:
+                    confirmed_bt_candidates.append(int(ts_bt))
 
         # Propose a conservative waterline only if page wasn't full and only using confirmed txs we inspected
         try:
