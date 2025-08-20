@@ -87,14 +87,41 @@ def poll_solana_deposits():
 
         # Helper: robust get_transaction with fallbacks for signature type and version flag
         def _get_tx_result(sig_str: str):
+            from typing import Any
+            import json as _json
+
+            def _normalize_response(resp: Any):
+                """Convert various response types to a transaction dict"""
+                # If already a dict, check for result wrapper
+                if isinstance(resp, dict):
+                    return resp.get("result") or resp
+
+                # Handle solders typed responses by unwrapping recursively
+                val = getattr(resp, "value", None)
+                if val is not None:
+                    # Recurse so we don't return typed objects directly
+                    return _normalize_response(val)
+
+                # Try to_json() method
+                tj = getattr(resp, "to_json", None)
+                if callable(tj):
+                    try:
+                        parsed = _json.loads(tj())
+                        # Some responses wrap in "result", others are direct
+                        return parsed.get("result") or parsed.get("value") or parsed
+                    except Exception:
+                        pass
+
+                return None
+
             last_exc = None
-            # Build Signature object once; if invalid, we still try string mode
             sig_obj = None
             try:
                 sig_obj = Signature.from_string(sig_str)
             except Exception as e:
                 last_exc = e
                 sig_obj = None
+
             attempts = []
             if sig_obj is not None:
                 attempts.append({"arg": sig_obj, "msv": 0})
@@ -108,21 +135,16 @@ def poll_solana_deposits():
                     if att["msv"] is not None:
                         kwargs["max_supported_transaction_version"] = att["msv"]
                     tx_resp = client.get_transaction(att["arg"], **kwargs)
-                    # Parse result from dict or typed response
-                    try:
-                        tx = tx_resp.get("result")
-                        return tx
-                    except AttributeError:
-                        try:
-                            import json as _json
-                            js = _json.loads(tx_resp.to_json())
-                            return js.get("result")
-                        except Exception as e2:
-                            last_exc = e2
-                            continue
+                    
+                    # Normalize the response to a transaction dict
+                    tx_obj = _normalize_response(tx_resp)
+                    if tx_obj is not None:
+                        return tx_obj
+                        
                 except Exception as e3:
                     last_exc = e3
                     continue
+
             if last_exc:
                 raise last_exc
             return None
