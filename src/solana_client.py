@@ -111,17 +111,17 @@ def load_vault_solders_keypair():
 def get_vault_sol_balance() -> int:
     """Return vault wallet SOL balance in lamports."""
     try:
-        client = AsyncClient(config.RPC_URL)
+        client = Client(config.RPC_URL)
         # kp = load_vault_keypair()
-
-        bal = client.get_balance(PublicKey.from_string(config.SOL_MAIN_ACCOUNT))
-        return int(bal.value or 0)
+        owner = load_vault_keypair().pubkey()
+        bal = client.get_balance(owner)
+        return int(bal.get("value") or 0)
     except Exception:
         return 0
 
 def get_token_account_balance(token_account_addr: str) -> int:
     try:
-        client = AsyncClient(config.RPC_URL)
+        client = Client(config.RPC_URL)
         amt = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
         # amt = (((resp or {}).get("result") or {}).get("value") or {}).get("amount")
         return int(amt or 0)
