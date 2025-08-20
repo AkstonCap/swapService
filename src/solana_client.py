@@ -1,26 +1,50 @@
 import json
-from typing import Optional
 import base64
+from typing import Optional
 import requests
-import asyncio
 from solana.rpc.api import Client
-from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey as PublicKey
 from solders.keypair import Keypair
 from solders.instruction import Instruction as TransactionInstruction, AccountMeta
 from solders.hash import Hash
 from solders.transaction import Transaction, VersionedTransaction
-from solders.message import Message, MessageV0
-from spl.memo.instructions import create_memo, MemoParams
-from solders.system_program import transfer, TransferParams
+from solders.message import Message
+from struct import pack
 
 from . import config
-
-from struct import pack
 
 # SPL Token and ATA Program IDs (constants)
 TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+
+
+def _rpc_to_json(resp):
+    try:
+        if isinstance(resp, dict):
+            return resp
+        tj = getattr(resp, "to_json", None)
+        if callable(tj):
+            return json.loads(tj())
+    except Exception:
+        pass
+    return None
+
+
+def _rpc_get_result(resp):
+    js = _rpc_to_json(resp)
+    if isinstance(js, dict):
+        return js.get("result") or js.get("value") or js
+    # Fallback to .value on typed responses
+    val = getattr(resp, "value", None)
+    return val if val is not None else resp
+
+
+def _rpc_get_value(resp):
+    res = _rpc_get_result(resp)
+    if isinstance(res, dict):
+        v = res.get("value", None)
+        return v if v is not None else res
+    return res
 
 
 def transfer_checked(*, program_id: PublicKey, source: PublicKey, mint: PublicKey, dest: PublicKey,
@@ -45,49 +69,42 @@ def get_associated_token_address(*, owner: PublicKey, mint: PublicKey) -> Public
     return ata
 
 
+def _get_latest_blockhash_str(client: Client) -> Optional[str]:
+    try:
+        resp = client.get_latest_blockhash()
+    except Exception:
+        return None
+    # Prefer to_json for stability
+    js = _rpc_to_json(resp)
+    if isinstance(js, dict):
+        try:
+            return (((js.get("result") or {}).get("value") or {}).get("blockhash"))
+        except Exception:
+            pass
+    # Fallback to typed .value
+    try:
+        val = getattr(resp, "value", None)
+        if val is not None:
+            bh = getattr(val, "blockhash", None)
+            if bh is not None:
+                return str(bh)
+    except Exception:
+        pass
+    return None
+
+
 def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Keypair) -> str:
     """Build, sign (legacy) and send a transaction using solders; return signature string."""
     client = Client(config.RPC_URL)
-
-    # Helper to get a blockhash string from dict or solders typed response
-    def _get_latest_blockhash_str() -> str | None:
-        try:
-            resp = client.get_latest_blockhash()
-        except Exception:
-            return None
-        # Dict-style
-        try:
-            return ((resp or {}).get("result") or {}).get("value", {}).get("blockhash")
-        except AttributeError:
-            pass
-        # to_json typed
-        try:
-            js = json.loads(resp.to_json())
-            return ((js or {}).get("result") or {}).get("value", {}).get("blockhash")
-        except Exception:
-            pass
-        # Direct typed attributes
-        try:
-            val = getattr(resp, "value", None)
-            if val is not None:
-                bh = getattr(val, "blockhash", None)
-                if bh is not None:
-                    try:
-                        return str(bh)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return None
-
-    bh = _get_latest_blockhash_str()
+    bh = _get_latest_blockhash_str(client)
     if not bh:
         raise RuntimeError("Failed to fetch recent blockhash")
     recent = Hash.from_string(bh)
-    # Build a legacy Message and Transaction using solders
-    msg = Message.new_with_blockhash(instructions, kp.pubkey(), recent)
     tx = Transaction.new_signed_with_payer(instructions, kp.pubkey(), [kp], recent)
-    sig = client.send_raw_transaction(bytes(tx)).get("result")
+    send_resp = client.send_raw_transaction(bytes(tx))
+    sig = _rpc_get_result(send_resp)
+    if not isinstance(sig, str):
+        raise RuntimeError(f"Failed to send tx, unexpected response: {send_resp}")
     try:
         client.confirm_transaction(sig, commitment="confirmed")
     except Exception:
@@ -102,31 +119,43 @@ def _get_vault_secret_bytes() -> bytes:
         return bytes(data)
     raise ValueError("Unsupported keypair format; expected JSON array of ints")
 
+
 def load_vault_keypair() -> Keypair:
     return Keypair.from_bytes(_get_vault_secret_bytes())
 
+
 def load_vault_solders_keypair():
     return load_vault_keypair()
+
 
 def get_vault_sol_balance() -> int:
     """Return vault wallet SOL balance in lamports."""
     try:
         client = Client(config.RPC_URL)
-        # kp = load_vault_keypair()
-        owner = load_vault_keypair().pubkey()
-        bal = client.get_balance(owner)
-        return int(bal.get("value") or 0)
+        kp = load_vault_keypair()
+        resp = client.get_balance(kp.pubkey())
+        val = _rpc_get_value(resp)
+        if isinstance(val, dict):
+            return int(val.get("value") or 0)
+        if isinstance(val, int):
+            return int(val)
+        return 0
     except Exception:
         return 0
+
 
 def get_token_account_balance(token_account_addr: str) -> int:
     try:
         client = Client(config.RPC_URL)
-        amt = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
-        # amt = (((resp or {}).get("result") or {}).get("value") or {}).get("amount")
+        resp = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
+        val = _rpc_get_value(resp)
+        amt = None
+        if isinstance(val, dict):
+            amt = val.get("amount")
         return int(amt or 0)
     except Exception:
         return 0
+
 
 def transfer_usdc_between_accounts(source_token_account: str, dest_token_account: str, amount_base_units: int) -> bool:
     """Transfer USDC between two token accounts owned by the vault wallet."""
@@ -150,6 +179,7 @@ def transfer_usdc_between_accounts(source_token_account: str, dest_token_account
     except Exception as e:
         print(f"Error transferring USDC accounts: {e}")
         return False
+
 
 def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int = 50) -> bool:
     """Swap USDC->SOL using Jupiter. Returns True on success.
@@ -197,12 +227,15 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
             print("[fees] Jupiter: missing swapTransaction")
             return False
 
-        s_kp = load_vault_solders_keypair()
         tx_bytes = base64.b64decode(swap_tx_b64)
         vtx = VersionedTransaction.from_bytes(tx_bytes)
-        vtx.sign([s_kp])
+        vtx.sign([kp])
         raw = bytes(vtx)
-        sig = client.send_raw_transaction(raw).get("result")
+        send_resp = client.send_raw_transaction(raw)
+        sig = _rpc_get_result(send_resp)
+        if not isinstance(sig, str):
+            print("[fees] Jupiter: unexpected send response")
+            return False
         try:
             client.confirm_transaction(sig, commitment="confirmed")
         except Exception:
@@ -213,6 +246,13 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
         print(f"[fees] Jupiter swap error: {e}")
         return False
 
+
+def _create_memo_ix(text: str) -> TransactionInstruction:
+    MEMO_PID = PublicKey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
+    data = text.encode("utf-8")
+    return TransactionInstruction(program_id=MEMO_PID, accounts=[], data=data)
+
+
 def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | None = None) -> bool:
     """Send USDC base units to a Solana owner address. Requires recipient ATA to already exist.
     If memo is provided, attach it to the transaction for idempotency tracing.
@@ -222,7 +262,7 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
         owner = PublicKey.from_string(to_owner_addr)
         dest_ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
         client = Client(config.RPC_URL)
-        ata_info = client.get_account_info(dest_ata).get("result", {}).get("value")
+        ata_info = _rpc_get_value(client.get_account_info(dest_ata))
         if ata_info is None:
             print("Recipient USDC ATA is missing; not creating it. Ask recipient to initialize their USDC ATA.")
             return False
@@ -257,8 +297,8 @@ def _is_token_account_for_mint(token_account_addr: str, mint: PublicKey) -> bool
     try:
         client = Client(config.RPC_URL)
         resp = client.get_account_info(PublicKey.from_string(token_account_addr), encoding="jsonParsed")
-        val = (resp or {}).get("result", {}).get("value")
-        if not val:
+        val = _rpc_get_value(resp)
+        if not val or not isinstance(val, dict):
             return False
         if val.get("owner") != str(TOKEN_PROGRAM_ID):
             return False
@@ -266,7 +306,9 @@ def _is_token_account_for_mint(token_account_addr: str, mint: PublicKey) -> bool
         parsed = data.get("parsed") if isinstance(data, dict) else None
         if not isinstance(parsed, dict):
             return False
-        info = (parsed.get("info") or {}) if isinstance(parsed.get("info"), dict) else {}
+        info = parsed.get("info") or {}
+        if not isinstance(info, dict):
+            return False
         mint_str = info.get("mint")
         return str(mint_str) == str(mint)
     except Exception:
@@ -311,10 +353,8 @@ def ensure_send_usdc_to_token_account(dest_token_account_addr: str, amount_base_
 def ensure_send_usdc_owner_or_ata(addr_maybe_owner_or_token: str, amount_base_units: int, memo: str | None = None) -> bool:
     """Send USDC to either a Solana owner address (deriving ATA) or a direct USDC token account address."""
     try:
-        # First, if it's a valid token account for USDC, send directly
         if _is_token_account_for_mint(addr_maybe_owner_or_token, config.USDC_MINT):
             return ensure_send_usdc_to_token_account(addr_maybe_owner_or_token, amount_base_units, memo)
-        # Otherwise treat it as an owner address and send to their ATA (must exist)
         return ensure_send_usdc(addr_maybe_owner_or_token, amount_base_units, memo)
     except Exception as e:
         print(f"Error in ensure_send_usdc_owner_or_ata: {e}")
@@ -330,7 +370,9 @@ def was_usdc_sent_for_nexus_tx(nexus_txid: str, addr_maybe_owner_or_token: str, 
     try:
         client = Client(config.RPC_URL)
         sigs_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=max(10, lookback))
-        sig_list = [r.get("signature") for r in (sigs_resp.get("result") or []) if r.get("signature")]
+        res = _rpc_get_result(sigs_resp)
+        items = res if isinstance(res, list) else (res.get("result") if isinstance(res, dict) else [])
+        sig_list = [r.get("signature") for r in (items or []) if isinstance(r, dict) and r.get("signature")]
         if not sig_list:
             return False
         # Determine expected destination token account
@@ -345,8 +387,9 @@ def was_usdc_sent_for_nexus_tx(nexus_txid: str, addr_maybe_owner_or_token: str, 
             return False
         target_memo = f"NEXUS_TX:{nexus_txid}"
         for sig in sig_list:
-            tx = client.get_transaction(sig, encoding="jsonParsed").get("result")
-            if not tx:
+            tx_resp = client.get_transaction(sig, encoding="jsonParsed")
+            tx = _rpc_get_result(tx_resp)
+            if not tx or not isinstance(tx, dict):
                 continue
             instrs = tx["transaction"]["message"]["instructions"]
             memo_text = None
@@ -377,15 +420,14 @@ def is_valid_usdc_token_account(addr: str) -> bool:
 def extract_memo_from_instructions(instructions) -> Optional[str]:
     """
     Extract memo text from a list of transaction instructions (outer+inner).
-    Supports parsed 'spl-memo' and raw Memo program data in base64 or base58.
+    Supports parsed 'spl-memo' and raw Memo program data in base64 or base58 with UTF-8 fallback.
     """
-    import base64
     MEMO_PID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
 
     for ix in instructions or []:
         try:
             prog = ix.get("program") or ""
-            pid = ix.get("programId") or ix.get("program_id") or ""
+            pid = ix.get("programId") or ""
             parsed = ix.get("parsed")
 
             # Parsed spl-memo
@@ -407,7 +449,7 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                 data = ix.get("data")
                 blob = None
 
-                # data as string (unknown encoding): try base64 then base58
+                # data as string (unknown encoding): try base64 then base58 then UTF-8
                 if isinstance(data, str):
                     try:
                         blob = base64.b64decode(data)
@@ -416,7 +458,6 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                             from base58 import b58decode  # type: ignore
                             blob = b58decode(data)
                         except Exception:
-                            # Fallback: treat as plain UTF-8 literal
                             try:
                                 blob = data.encode("utf-8")
                             except Exception:
@@ -439,7 +480,7 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                             except Exception:
                                 blob = None
                         else:
-                            # unknown encoding: try base64 then base58
+                            # unknown encoding: try base64 then base58 then UTF-8
                             try:
                                 blob = base64.b64decode(payload)
                             except Exception:
@@ -447,7 +488,6 @@ def extract_memo_from_instructions(instructions) -> Optional[str]:
                                     from base58 import b58decode  # type: ignore
                                     blob = b58decode(payload)
                                 except Exception:
-                                    # Fallback: treat as plain UTF-8 literal
                                     try:
                                         blob = payload.encode("utf-8")
                                     except Exception:
@@ -471,16 +511,10 @@ def has_usdc_ata(owner_addr: str) -> bool:
         client = Client(config.RPC_URL)
         owner = PublicKey.from_string(owner_addr)
         ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
-        info = client.get_account_info(ata).get("result", {}).get("value")
+        info = _rpc_get_value(client.get_account_info(ata))
         return info is not None
     except Exception:
         return False
-
-
-def _create_memo_ix(text: str) -> TransactionInstruction:
-    MEMO_PID = PublicKey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
-    data = text.encode("utf-8")
-    return TransactionInstruction(program_id=MEMO_PID, accounts=[], data=data)
 
 
 def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str) -> bool:
@@ -508,6 +542,7 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
     except Exception as e:
         print(f"Error refunding USDC: {e}")
         return False
+
 
 def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None) -> bool:
     """Move USDC from vault token account to a self-owned quarantine USDC token account (does not affect backing ratio)."""
@@ -539,4 +574,4 @@ def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None) -> 
         return True
     except Exception as e:
         print(f"Error moving USDC to quarantine: {e}")
-        return False
+    return False
