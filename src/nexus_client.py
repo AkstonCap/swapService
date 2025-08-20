@@ -88,7 +88,7 @@ def debit_usdd(to_addr: str, amount_usdd_units: int, reference: str) -> bool:
         return False
     cmd = [
         config.NEXUS_CLI,
-        "finance/debit/account",
+        "finance/debit/token",
         "from=USDD",
         f"to={to_addr}",
         f"amount={amount_usdd_units}",
