@@ -244,3 +244,74 @@ def log_failed_refund(payload: Dict[str, Any]):
             print(f"Failed to log refund: {e}")
         except Exception:
             pass
+
+# --- JSONL helpers for swap pipeline ---
+def append_jsonl(path: str, row: Dict[str, Any]):
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def read_jsonl(path: str) -> list[Dict[str, Any]]:
+    out: list[Dict[str, Any]] = []
+    if not os.path.exists(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        out.append(obj)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
+
+def write_jsonl(path: str, rows: list[Dict[str, Any]]):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def update_jsonl_row(path: str, predicate, update_fn) -> bool:
+    rows = read_jsonl(path)
+    changed = False
+    for i, r in enumerate(rows):
+        try:
+            if predicate(r):
+                nr = update_fn(dict(r))
+                rows[i] = nr
+                changed = True
+        except Exception:
+            continue
+    if changed:
+        write_jsonl(path, rows)
+    return changed
+
+# --- Unique integer reference counter ---
+def next_reference() -> int:
+    path = config.REFERENCE_COUNTER_FILE
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                val = int(data.get("next", 1))
+        else:
+            val = 1
+    except Exception:
+        val = 1
+    # persist next+1
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"next": val + 1}, f)
+    except Exception:
+        pass
+    return val
