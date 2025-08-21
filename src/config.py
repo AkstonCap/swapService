@@ -24,7 +24,6 @@ VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
 VAULT_USDC_ACCOUNT = PublicKey.from_string(os.getenv("VAULT_USDC_ACCOUNT"))
 USDC_MINT = PublicKey.from_string(os.getenv("USDC_MINT"))
 SOL_MINT = PublicKey.from_string(os.getenv("SOL_MINT"))
-MEMO_PROGRAM_ID = PublicKey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
 
 # Decimals
 USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
@@ -48,6 +47,15 @@ ATTEMPT_STATE_FILE = os.getenv("ATTEMPT_STATE_FILE", "attempt_state.json")
 FAILED_REFUNDS_FILE = os.getenv("FAILED_REFUNDS_FILE", "failed_refunds.jsonl")
 MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
 ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
+
+# USDC->USDD pipeline files (JSONL lines)
+UNPROCESSED_SIGS_FILE = os.getenv("UNPROCESSED_SIGS_FILE", "unprocessed_sigs.json")
+PROCESSED_SWAPS_FILE = os.getenv("PROCESSED_SWAPS_FILE", "processed_sigs.json")
+NON_DEPOSITS_FILE = os.getenv("NON_DEPOSITS_FILE", "non_deposits.json")
+REFERENCE_COUNTER_FILE = os.getenv("REFERENCE_COUNTER_FILE", "reference_counter.json")
+REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
+REFUNDED_SIGS_FILE = os.getenv("REFUNDED_SIGS_FILE", "refunded_sigs.json")
+USDC_CONFIRM_TIMEOUT_SEC = int(os.getenv("USDC_CONFIRM_TIMEOUT_SEC", "600"))  # 10 minutes default for USDD->USDC confirmations
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")
