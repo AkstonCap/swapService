@@ -32,360 +32,252 @@ def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     return out if out > 0 else Decimal(0)
 
 def poll_nexus_usdd_deposits():
-    import subprocess
+    """USDD->USDC pipeline per spec:
+    1) Detect USDD credits to treasury; append new entries to unprocessed_txids.json
+    2) For each unprocessed entry, resolve receival_account via assets WHERE txid_toService AND owner
+    3) If valid USDC token account, mark ready
+    4) Send USDC minus fees from vault with memo containing a unique integer; record sig and reference
+    5) Confirm sig>2 and move to processed_txids.json with reference
+    6) Move waterline to min ts of unprocessed - buffer
+    Refund USDD if invalid receival_account, send fails, or not confirmed within timeout.
+    """
+    import subprocess, time
+    from solana.rpc.api import Client as SolClient
 
-    # Use the configured treasury account name consistently
+    unprocessed_path = "unprocessed_txids.json"
+    processed_path = "processed_txids.json"
+
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-
-    # Query recent transactions affecting the treasury account and parse nested parties.
-    # Use finance/transactions/token and filter by name to avoid ambiguity.
     cmd = [
         config.NEXUS_CLI,
         "finance/transactions/token/"
-        "txid,timestamp,confirmations,"
-        "contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount,contracts.reference,contracts.ticker,contracts.token",
+        "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount",
         f"name={treasury_addr}",
         "sort=timestamp",
         "order=desc",
         "limit=100",
     ]
 
+    # Load current sets
+    unprocessed = state.read_jsonl(unprocessed_path)
+    processed = state.read_jsonl(processed_path)
+    processed_txids = {r.get("txid") for r in processed}
+    unprocessed_txids = {r.get("txid") for r in unprocessed}
+
+    wl_cutoff = 0
+    if getattr(config, "HEARTBEAT_WATERLINE_ENABLED", False):
+        try:
+            from .main import read_heartbeat_waterlines
+            _, wl_nexus = read_heartbeat_waterlines()
+            wl_cutoff = max(0, int(wl_nexus) - int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0)))
+        except Exception:
+            wl_cutoff = 0
+
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if res.returncode != 0:
             print("Error fetching USDD transactions:", (res.stderr or res.stdout).strip())
             return
-
         txs = nexus_client._parse_json_lenient(res.stdout)
-        if txs is None:
-            print("Failed to parse Nexus CLI JSON output for finance/transactions/token")
-            return
         if not isinstance(txs, list):
             txs = [txs]
 
-        wl_cutoff = 0
-        if getattr(config, "HEARTBEAT_WATERLINE_ENABLED", False):
-            try:
-                from .main import read_heartbeat_waterlines
-                _, wl_nexus = read_heartbeat_waterlines()
-                wl_cutoff = max(0, int(wl_nexus) - int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0)))
-            except Exception:
-                wl_cutoff = 0
-
+        # Step 1+2: collect new credits to treasury
         page_ts_candidates: list[int] = []
         for tx in txs:
-            try:
-                tx_id = (tx or {}).get("txid")
-                if not tx_id:
+            if not isinstance(tx, dict):
+                continue
+            txid = tx.get("txid")
+            ts = int(tx.get("timestamp") or 0)
+            if ts:
+                page_ts_candidates.append(ts)
+            if wl_cutoff and ts and ts < wl_cutoff:
+                continue
+            if not txid or txid in processed_txids:
+                continue
+            contracts = tx.get("contracts") or []
+            for c in contracts:
+                if not isinstance(c, dict):
                     continue
-                ts = int((tx.get("timestamp") or 0) or 0)
-                if ts:
-                    page_ts_candidates.append(ts)
-                if wl_cutoff and ts and ts < wl_cutoff:
+                if str(c.get("OP") or "").upper() != "CREDIT":
                     continue
-                confirmations = int(tx.get("confirmations") or 0)
-                if confirmations <= 0:
+                # Validate credit to treasury
+                to = c.get("to")
+                def _addr(obj) -> str:
+                    if isinstance(obj, dict):
+                        a = obj.get("address") or obj.get("name")
+                        return str(a) if a else ""
+                    if isinstance(obj, str):
+                        return obj
+                    return ""
+                if _addr(to) != treasury_addr:
                     continue
-                contracts = tx.get("contracts") or []
-                if not isinstance(contracts, list):
+                # Extract sender and owner
+                sender = _addr(c.get("from"))
+                amount_dec = _parse_decimal_amount(c.get("amount"))
+                if amount_dec <= 0:
                     continue
-                for c in contracts:
-                    if not isinstance(c, dict):
-                        continue
-                    cid = c.get("id")
-                    processed_key = f"{tx_id}:{cid if cid is not None else 'x'}"
-                    if processed_key in state.processed_nexus_txs:
-                        continue
-                    # Extract nested 'to' and 'from' addresses robustly
-                    def _addr(obj) -> str:
-                        if isinstance(obj, dict):
-                            a = obj.get("address")
-                            if isinstance(a, str):
-                                return a
-                            # Some outputs might just include name strings
-                            n = obj.get("name")
-                            return str(n) if n else ""
-                        if isinstance(obj, str):
-                            return obj
-                        return ""
-                    
-                    usdd_amount_dec = _parse_decimal_amount(c.get("amount"))
-                    if usdd_amount_dec <= 0:
-                        state.mark_nexus_processed(processed_key, ts=ts)
-                        continue
-                    # Tiny routing threshold compared in token units (Decimal); uses FLAT_FEE_USDD as threshold
-                    tiny_threshold_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0"))
-                    if usdd_amount_dec <= tiny_threshold_dec:
-                        route_key = f"route_tiny_usdd:{processed_key}"
-                        if state.should_attempt(route_key):
-                            state.record_attempt(route_key)
-                            amt_str = _format_token_amount(usdd_amount_dec, config.USDD_DECIMALS)
-                            if nexus_client.send_tiny_usdd_to_local(amt_str, note=f"TINY_USDD:{tx_id}:{cid}"):
-                                print(f"Routed tiny USDD {amt_str} to local; processed ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts, reason="tiny routed")
-                                continue
-                            else:
-                                print(f"Tiny USDD routing failed; will retry ({processed_key})")
-                                continue
-                        else:
-                            print(f"Skipping tiny USDD routing attempt (cooldown/max attempts) ({processed_key})")
-                            continue
+                # Fees-as-fees threshold in USDD token units
+                flat_usdd_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
+                dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
+                dyn_fee_dec = (amount_dec * Decimal(max(0, dyn_bps))) / Decimal(10000)
+                if amount_dec <= (flat_usdd_dec + dyn_fee_dec):
+                    row = {
+                        "txid": txid,
+                        "ts": ts,
+                        "from": sender,
+                        "owner": (nexus_client.get_account_info(sender) or {}).get("owner"),
+                        "amount_usdd": str(amount_dec),
+                        "comment": "processed as fees",
+                    }
+                    state.append_jsonl(processed_path, row)
+                    processed_txids.add(txid)
+                    continue
+                if txid in unprocessed_txids:
+                    continue
+                owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                row = {
+                    "txid": txid,
+                    "ts": ts,
+                    "from": sender,
+                    "owner": owner,
+                    "amount_usdd": str(amount_dec),
+                }
+                state.append_jsonl(unprocessed_path, row)
+                unprocessed.append(row)
+                unprocessed_txids.add(txid)
 
-                    ref_raw = c.get("reference", "")
-                    ref_str = str(ref_raw).strip() if ref_raw is not None else ""
-                    is_solana_ref = isinstance(ref_str, str) and ref_str.lower().startswith("solana:")
-                    sol_addr = (ref_str[ref_str.find(":") + 1:].strip() if is_solana_ref else "")
-                    sender_addr = _addr(c.get("from"))
-                    # Base refund equals full USDD unless adjusted by congestion fee at send time
-                    refund_amount_dec = usdd_amount_dec
+        # Step 3: resolve receival_account for unprocessed
+        for r in list(unprocessed):
+            if r.get("receival_account") or r.get("comment") == "ready for processing":
+                continue
+            txid = r.get("txid")
+            owner = r.get("owner")
+            asset = nexus_client.find_asset_receival_account_by_txid_and_owner(txid, owner)
+            recv = (asset or {}).get("receival_account")
+            if recv and solana_client.is_valid_usdc_token_account(recv):
+                def _pred(x):
+                    return x.get("txid") == txid
+                def _upd(x):
+                    x["receival_account"] = recv
+                    x["comment"] = "ready for processing"
+                    return x
+                state.update_jsonl_row(unprocessed_path, _pred, _upd)
+                r["receival_account"] = recv
+                r["comment"] = "ready for processing"
+            elif recv:
+                # Invalid token account -> refund immediately
+                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+                amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
+                sender = r.get("from")
+                if sender and nexus_client.refund_usdd(sender, amt_str, "invalid receival_account"):
+                    row = dict(r)
+                    row["comment"] = "refunded"
+                    state.append_jsonl(processed_path, row)
+                    # remove from unprocessed
+                    unprocessed = [x for x in unprocessed if x.get("txid") != txid]
+                    state.write_jsonl(unprocessed_path, unprocessed)
 
-                    if not is_solana_ref:
-                        if not sender_addr:
-                            print(f"Invalid/missing reference and unknown sender; skipping ({processed_key})")
-                            continue
-                        reason = "Missing or invalid reference; expected 'solana:<address>'"
-                        refund_key = f"refund_usdd:{processed_key}"
-                        if state.should_attempt(refund_key):
-                            state.record_attempt(refund_key)
-                            fee_dec = _parse_decimal_amount(getattr(config, "NEXUS_CONGESTION_FEE_USDD", "0"))
-                            net_refund_dec = refund_amount_dec - fee_dec
-                            if net_refund_dec < 0:
-                                net_refund_dec = Decimal(0)
-                            ok_fee = True
-                            if fee_dec > 0 and getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None):
-                                fee_str = _format_token_amount(fee_dec, config.USDD_DECIMALS)
-                                ok_fee = nexus_client.transfer_usdd_between_accounts(
-                                    config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                    config.NEXUS_USDD_LOCAL_ACCOUNT,
-                                    fee_str,
-                                    f"CONGESTION_FEE:{tx_id}:{cid}"
-                                )
-                            amt_str = _format_token_amount(net_refund_dec, config.USDD_DECIMALS)
-                            if ok_fee and nexus_client.refund_usdd(sender_addr, amt_str, reason):
-                                print(f"Refunded USDD due to invalid/missing reference ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts, reason="refund invalid reference")
-                            else:
-                                # If we've reached max attempts, quarantine remaining refund and log
-                                max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
-                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
-                                if attempts >= max_tries and getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None):
-                                    q_ok = nexus_client.transfer_usdd_between_accounts(
-                                        config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                        config.NEXUS_USDD_QUARANTINE_ACCOUNT,
-                                        amt_str,
-                                        f"FAILED_REFUND:{tx_id}:{cid}"
-                                    )
-                                    if q_ok:
-                                        state.log_failed_refund({
-                                            "type": "usdd_refund_failure",
-                                            "key": processed_key,
-                                            "reason": reason,
-                                            "amount_usdd": amt_str,
-                                        })
-                                        print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                        state.mark_nexus_processed(processed_key, ts=ts, reason="quarantined failed refund")
-                        else:
-                            print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
-                        continue
+        # Step 4: send USDC for ready entries
+        for r in list(unprocessed):
+            if r.get("comment") != "ready for processing" or not r.get("receival_account"):
+                continue
+            txid = r.get("txid")
+            amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+            usdc_units = int((amt_dec * (Decimal(10) ** config.USDC_DECIMALS)).quantize(Decimal(1), rounding=ROUND_DOWN))
+            flat_fee = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
+            bps = max(0, int(getattr(config, "DYNAMIC_FEE_BPS", 0)))
+            pre_dyn = max(0, usdc_units - flat_fee)
+            dyn_fee = (pre_dyn * bps) // 10000
+            net_usdc = max(0, pre_dyn - dyn_fee)
+            if net_usdc <= 0:
+                row = dict(r)
+                row["comment"] = "processed as fees"
+                state.append_jsonl(processed_path, row)
+                unprocessed = [x for x in unprocessed if x.get("txid") != txid]
+                state.write_jsonl(unprocessed_path, unprocessed)
+                continue
+            ref = state.next_reference()
+            memo = str(ref)
+            ok, sig = solana_client.send_usdc_to_token_account_with_sig(r["receival_account"], net_usdc, memo)
+            if ok and sig:
+                if (flat_fee + dyn_fee) > 0:
+                    fees.add_usdc_fee(flat_fee + dyn_fee)
+                def _pred(x):
+                    return x.get("txid") == txid
+                def _upd(x):
+                    x["sig"] = sig
+                    x["reference"] = ref
+                    x["comment"] = "sig created, awaiting confirmations"
+                    return x
+                state.update_jsonl_row(unprocessed_path, _pred, _upd)
+                for x in unprocessed:
+                    if x.get("txid") == txid:
+                        x["sig"] = sig
+                        x["reference"] = ref
+                        x["comment"] = "sig created, awaiting confirmations"
+                        break
+            else:
+                # Send failed -> refund USDD
+                sender = r.get("from")
+                amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
+                if sender and nexus_client.refund_usdd(sender, amt_str, "USDC send failed"):
+                    row = dict(r)
+                    row["comment"] = "refunded"
+                    state.append_jsonl(processed_path, row)
+                    unprocessed = [x for x in unprocessed if x.get("txid") != txid]
+                    state.write_jsonl(unprocessed_path, unprocessed)
 
-                    valid_sol = True
-                    try:
-                        _ = solana_client.PublicKey.from_string(sol_addr)
-                    except Exception:
-                        valid_sol = False
-                    if not valid_sol:
-                        if not sender_addr:
-                            print(f"Cannot determine sender Nexus address; skipping refund ({processed_key})")
-                            continue
-                        reason = f"Invalid Solana address: {sol_addr}"
-                        refund_key = f"refund_usdd:{processed_key}"
-                        if state.should_attempt(refund_key):
-                            state.record_attempt(refund_key)
-                            fee_dec = _parse_decimal_amount(getattr(config, "NEXUS_CONGESTION_FEE_USDD", "0"))
-                            net_refund_dec = refund_amount_dec - fee_dec
-                            if net_refund_dec < 0:
-                                net_refund_dec = Decimal(0)
-                            ok_fee = True
-                            if fee_dec > 0 and getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None):
-                                fee_str = _format_token_amount(fee_dec, config.USDD_DECIMALS)
-                                ok_fee = nexus_client.transfer_usdd_between_accounts(
-                                    config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                    config.NEXUS_USDD_LOCAL_ACCOUNT,
-                                    fee_str,
-                                    f"CONGESTION_FEE:{tx_id}:{cid}"
-                                )
-                            amt_str = _format_token_amount(net_refund_dec, config.USDD_DECIMALS)
-                            if ok_fee and nexus_client.refund_usdd(sender_addr, amt_str, reason):
-                                print(f"Refunded USDD due to invalid Solana address ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts, reason="refund invalid sol addr")
-                            else:
-                                max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
-                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
-                                if attempts >= max_tries and getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None):
-                                    q_ok = nexus_client.transfer_usdd_between_accounts(
-                                        config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                        config.NEXUS_USDD_QUARANTINE_ACCOUNT,
-                                        amt_str,
-                                        f"FAILED_REFUND:{tx_id}:{cid}"
-                                    )
-                                    if q_ok:
-                                        state.log_failed_refund({
-                                            "type": "usdd_refund_failure",
-                                            "key": processed_key,
-                                            "reason": reason,
-                                            "amount_usdd": amt_str,
-                                        })
-                                        print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                        state.mark_nexus_processed(processed_key, ts=ts, reason="quarantined failed refund")
-                        else:
-                            print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
-                        continue
-
-                    # Convert Decimal token amount (USDD) to USDC base units for Solana 1:1
-                    usdc_units = int((usdd_amount_dec * (Decimal(10) ** config.USDC_DECIMALS)).quantize(Decimal(1), rounding=ROUND_DOWN))
-
-                    # Apply flat + dynamic fees (both in USDC base units)
-                    flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
-                    fee_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
-                    pre_dynamic = max(0, usdc_units - flat_fee_units)
-                    dynamic_fee_usdc = (pre_dynamic * max(0, fee_bps)) // 10_000
-                    net_usdc = max(0, pre_dynamic - dynamic_fee_usdc)
-                    if net_usdc <= 0:
-                        if not sender_addr:
-                            print(f"Cannot determine sender Nexus address to refund zero-net; skipping ({processed_key})")
-                            continue
-                        reason = "Net USDC after fee is zero"
-                        refund_key = f"refund_usdd:{processed_key}"
-                        if state.should_attempt(refund_key):
-                            state.record_attempt(refund_key)
-                            final_refund_dec = _apply_congestion_fee(refund_amount_dec)
-                            amt_str = _format_token_amount(final_refund_dec, config.USDD_DECIMALS)
-                            if nexus_client.refund_usdd(sender_addr, amt_str, reason):
-                                print(f"Refunded USDD due to zero-net after fee ({processed_key})")
-                                state.mark_nexus_processed(processed_key, ts=ts, reason="refund zero-net")
-                            else:
-                                max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
-                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
-                                if attempts >= max_tries and getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None):
-                                    q_ok = nexus_client.transfer_usdd_between_accounts(
-                                        config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                        config.NEXUS_USDD_QUARANTINE_ACCOUNT,
-                                        amt_str,
-                                        f"FAILED_REFUND:{tx_id}:{cid}"
-                                    )
-                                    if q_ok:
-                                        state.log_failed_refund({
-                                            "type": "usdd_refund_failure",
-                                            "key": processed_key,
-                                            "reason": reason,
-                                            "amount_usdd": amt_str,
-                                        })
-                                        print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                        state.mark_nexus_processed(processed_key, ts=ts)
-                        else:
-                            print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
-                        continue
-
-                    send_key = f"send_usdc:{processed_key}"
-                    if state.should_attempt(send_key):
-                        state.record_attempt(send_key)
-                        memo = f"NEXUS_TX:{tx_id}:{cid}"
-                        if solana_client.was_usdc_sent_for_nexus_tx(processed_key, sol_addr):
-                            print(f"Detected prior USDC send for {processed_key}; marking processed")
-                            state.mark_nexus_processed(processed_key, ts=ts, reason="idempotent already sent")
-                            continue
-                        if solana_client.ensure_send_usdc_owner_or_ata(sol_addr, net_usdc, memo=memo):
-                            print(f"Sent {net_usdc} USDC units to {sol_addr} ({processed_key})")
-                            # Explicit success marker for USDD->USDC path
-                            try:
-                                print(f"SWAP SUCCESS USDD->USDC key={processed_key} usdd={_format_token_amount(usdd_amount_dec, config.USDD_DECIMALS)} usdc_units={net_usdc} to={sol_addr}")
-                            except Exception:
-                                pass
-                            total_fee_units = flat_fee_units + dynamic_fee_usdc
-                            if total_fee_units > 0:
-                                fees.add_usdc_fee(total_fee_units)
-                            state.mark_nexus_processed(processed_key, ts=ts, reason="send processed")
-                        else:
-                            print(f"USDC send failed ({processed_key})")
-                            attempts = int((state.attempt_state.get(send_key) or {}).get("attempts", 0))
-                            if attempts >= 2 and sender_addr:
-                                reason = f"USDC send failed after retries to {sol_addr}"
-                                refund_key = f"refund_usdd:{processed_key}"
-                                if state.should_attempt(refund_key):
-                                    state.record_attempt(refund_key)
-                                    # Always subtract congestion fee; additionally subtract dynamic fee if send was likely submitted
-                                    fee_dec = _parse_decimal_amount(getattr(config, "NEXUS_CONGESTION_FEE_USDD", "0"))
-                                    submitted_likely = False
-                                    try:
-                                        # If provided is a valid USDC token account, or it's an owner with existing ATA, we would submit
-                                        if solana_client.is_valid_usdc_token_account(sol_addr):
-                                            submitted_likely = True
-                                        else:
-                                            # Treat as owner address and check if ATA exists
-                                            if solana_client.has_usdc_ata(sol_addr):
-                                                submitted_likely = True
-                                    except Exception:
-                                        submitted_likely = False
-
-                                    net_refund_dec = refund_amount_dec
-                                    if submitted_likely:
-                                        try:
-                                            dynamic_fee_dec = (Decimal(dynamic_fee_usdc) / (Decimal(10) ** config.USDC_DECIMALS))
-                                            flat_fee_dec = (Decimal(flat_fee_units) / (Decimal(10) ** config.USDC_DECIMALS))
-                                        except Exception:
-                                            dynamic_fee_dec = Decimal(0)
-                                            flat_fee_dec = Decimal(0)
-                                        net_refund_dec = net_refund_dec - dynamic_fee_dec - flat_fee_dec
-                                    net_refund_dec = net_refund_dec - fee_dec
-                                    if net_refund_dec < 0:
-                                        net_refund_dec = Decimal(0)
-                                    ok_fee = True
-                                    if fee_dec > 0 and getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None):
-                                        fee_str = _format_token_amount(fee_dec, config.USDD_DECIMALS)
-                                        ok_fee = nexus_client.transfer_usdd_between_accounts(
-                                            config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                            config.NEXUS_USDD_LOCAL_ACCOUNT,
-                                            fee_str,
-                                            f"CONGESTION_FEE:{tx_id}:{cid}"
-                                        )
-                                    amt_str = _format_token_amount(net_refund_dec, config.USDD_DECIMALS)
-                                    if ok_fee and nexus_client.refund_usdd(sender_addr, amt_str, reason):
-                                        print(f"Refunded USDD after repeated send failures ({processed_key})")
-                                        state.mark_nexus_processed(processed_key, ts=ts, reason="refund after retries")
-                                    else:
-                                        max_tries = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
-                                        attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
-                                        if attempts >= max_tries and getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None):
-                                            q_ok = nexus_client.transfer_usdd_between_accounts(
-                                                config.NEXUS_USDD_TREASURY_ACCOUNT,
-                                                config.NEXUS_USDD_QUARANTINE_ACCOUNT,
-                                                amt_str,
-                                                f"FAILED_REFUND:{tx_id}:{cid}"
-                                            )
-                                            if q_ok:
-                                                state.log_failed_refund({
-                                                    "type": "usdd_refund_failure",
-                                                    "key": processed_key,
-                                                    "reason": reason,
-                                                    "amount_usdd": amt_str,
-                                                })
-                                                print(f"Quarantined failed USDD refund ({processed_key}) and logged for manual inspection")
-                                                state.mark_nexus_processed(processed_key, ts=ts, reason="quarantined failed refund")
-                                else:
-                                    print(f"Skipping refund attempt (cooldown/max attempts) ({processed_key})")
-                    else:
-                        print(f"Skipping send attempt (cooldown/max attempts) ({processed_key})")
-            except Exception as e:
-                print(f"Error processing Nexus tx: {e}")
-
-        # Propose conservative Nexus waterline only if page isn't full
+        # Step 5: confirmations and timeouts
         try:
-            # The API default limit is 100; if fewer than 100, we likely reached the end of the page
-            if isinstance(txs, list) and len(txs) < 100 and page_ts_candidates:
+            client = SolClient(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
+        except Exception:
+            client = None
+        now = time.time()
+        new_unprocessed: list[dict] = []
+        for r in state.read_jsonl(unprocessed_path):
+            if r.get("comment") == "sig created, awaiting confirmations" and r.get("sig") and client:
+                try:
+                    st = client.get_signature_statuses([r["sig"]])
+                    js = getattr(st, "to_json", None)
+                    if callable(js):
+                        import json as _json
+                        val = _json.loads(st.to_json()).get("result", {}).get("value", [None])[0] or {}
+                    else:
+                        val = (st.get("result", {}).get("value") or [None])[0] if isinstance(st, dict) else {}
+                    conf = int((val or {}).get("confirmations") or 0)
+                except Exception:
+                    conf = 0
+                if conf > 2:
+                    row = dict(r)
+                    row["comment"] = "processed"
+                    state.append_jsonl(processed_path, row)
+                    continue
+                # timeout refund
+                ts = int(r.get("ts") or 0)
+                if ts and (now - ts) > getattr(config, "USDC_CONFIRM_TIMEOUT_SEC", 600):
+                    sender = r.get("from")
+                    amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+                    amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
+                    if sender and nexus_client.refund_usdd(sender, amt_str, "timeout"):
+                        row = dict(r)
+                        row["comment"] = "refunded"
+                        state.append_jsonl(processed_path, row)
+                        continue
+            new_unprocessed.append(r)
+        state.write_jsonl(unprocessed_path, new_unprocessed)
+
+        # Step 6: waterline proposal
+        try:
+            rows = state.read_jsonl(unprocessed_path)
+            if rows:
+                min_ts = min(int(x.get("ts") or 0) for x in rows if int(x.get("ts") or 0) > 0)
+                if min_ts:
+                    state.propose_nexus_waterline(int(max(0, min_ts - config.HEARTBEAT_WATERLINE_SAFETY_SEC)))
+            elif page_ts_candidates:
                 state.propose_nexus_waterline(int(min(page_ts_candidates)))
         except Exception:
             pass
-
     except Exception as e:
         print(f"Error polling USDD deposits: {e}")
     finally:
