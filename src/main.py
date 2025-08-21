@@ -88,8 +88,8 @@ def run():
     print(f"   USDC Vault: {config.VAULT_USDC_ACCOUNT}")
     print(f"   USDD Treasury: {config.NEXUS_USDD_TREASURY_ACCOUNT}")
     print("   Monitoring:")
-    print("   - USDC → USDD: Solana deposits with Nexus address in memo")
-    print("   - USDD → USDC: USDD deposits with Solana address in reference")
+    print("   - USDC → USDD: Solana deposits mapped via Nexus asset (distordiaSwap)")
+    print("   - USDD → USDC: USDD deposits mapped to Solana recipients (internal state/idempotency)")
 
     # Startup balances summary (USDC vault + USDD circulating supply)
     try:
