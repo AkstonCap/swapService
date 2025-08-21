@@ -405,8 +405,8 @@ How to create your USDC ATA (user-side):
 | HEARTBEAT_WATERLINE_SAFETY_SEC | Seconds subtracted from waterline when filtering | ❌ | 120 |
 
 Idempotency:
-- USDC → USDD: Nexus mints include reference `USDC_TX:<solana_signature>`. Before minting, the service checks Nexus for a prior confirmed CREDIT with that reference.
-- USDD → USDC: Solana sends include memo `NEXUS_TX:<nexus_txid>`. Before sending, the service checks recent vault transfers for that memo to the recipient ATA.
+- USDC → USDD: The service looks up a Nexus asset mapping (distordiaSwap) by `swap_to=USDD` and `tx_sent=<solana_signature>` to determine the recipient. It then guards against duplicates by scanning recent treasury debits for an identical amount to that recipient. Nexus "reference" is numeric (uint64) and is set to 0 by default.
+- USDD → USDC: Avoid relying on memos for deduplication; instead scan recent vault transfers and internal state to prevent duplicates.
 
 ## Security Notes
 - Keep secrets out of git: ensure `.env` and `vault-keypair.json` are ignored and stored securely.
@@ -437,7 +437,7 @@ Idempotency:
   python3 -m pip install -r requirements.txt
   ```
   If you must use system Python, append `--break-system-packages` to pip (not recommended).
-- No memo found (USDC → USDD): Wallet must include a Memo in the same transaction.
+- No recipient mapping yet (USDC → USDD): Ensure the distordiaSwap asset is published with fields `swap_to`, `tx_sent`, and `swap_recipient` before or shortly after the USDC transfer. The service will retry until available.
 - Wrong token or invalid Nexus address: USDC is refunded with a reason memo.
 - Invalid Solana address (USDD → USDC): USDD is refunded to sender with a reason.
 - Heartbeat not updating: Check `HEARTBEAT_ENABLED`, asset address, and that updates are not more frequent than 10s.
