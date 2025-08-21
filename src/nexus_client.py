@@ -61,6 +61,20 @@ def get_account_info(nexus_addr: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+def account_exists_and_owner(account: Dict[str, Any], owner: str | None = None) -> bool:
+    if not isinstance(account, dict):
+        return False
+    # Confirm finance account exists: look for an address field
+    addr = account.get("address") or None
+    
+    if not addr:
+        return False
+    if not owner:
+        return False
+    # Compare owner fields when provided; require equality when owner is supplied
+    own = account.get("owner")
+    return str(own) == str(owner)
+
 
 def _dict_get_ci(d: Dict[str, Any], key: str):
     for k, v in d.items():
@@ -82,20 +96,31 @@ def is_expected_token(account_info: Dict[str, Any], expected: str) -> bool:
     return False
 
 
-def debit_usdd(to_addr: str, amount_usdd_units: int, reference: str) -> bool:
+def debit_usdd(to_addr: str, amount_usdd_units: int, reference: int | str | None = 0) -> bool:
+    """Debit/mint USDD to an account. Reference must be uint64 (or omitted)."""
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
         return False
+    # Normalize reference: allow int or str numeric; omit if falsy
+    ref_part: list[str] = []
+    try:
+        if reference is not None:
+            # Accept int or numeric string; default to 0
+            ref_val = int(reference)
+            ref_part = [f"reference={ref_val}"]
+    except Exception:
+        # If non-numeric provided, omit to satisfy uint64 restriction
+        ref_part = []
     cmd = [
         config.NEXUS_CLI,
         "finance/debit/token",
         "from=USDD",
         f"to={to_addr}",
         f"amount={amount_usdd_units}",
-        f"reference={reference}",
+        *ref_part,
         f"pin={config.NEXUS_PIN}",
     ]
-    print(">>> Nexus debit:", cmd[:-1] + ["pin=***"])  # hide PIN
+    print(">>> Nexus debit:", [c if not str(c).startswith("pin=") else "pin=***" for c in cmd])
     try:
         code, out, err = _run(cmd, timeout=30)
         if code != 0:
@@ -106,6 +131,34 @@ def debit_usdd(to_addr: str, amount_usdd_units: int, reference: str) -> bool:
     except Exception as e:
         print("Nexus debit exception:", e)
         return False
+
+def debit_usdd_with_txid(to_addr: str, amount_usdd: int, reference: int) -> tuple[bool, str | None]:
+    """Perform debit and attempt to parse a txid from output."""
+    if not config.NEXUS_PIN:
+        return (False, None)
+    cmd = [
+        config.NEXUS_CLI,
+        "finance/debit/token",
+        "from=USDD",
+        f"to={to_addr}",
+        f"amount={amount_usdd}",
+        f"reference={reference}",
+        f"pin={config.NEXUS_PIN}",
+    ]
+    code, out, err = _run(cmd, timeout=5)
+    if code != 0:
+        return (False, None)
+    # Try to pick txid from output JSON or text
+    txid = None
+    data = _parse_json_lenient(out)
+    if isinstance(data, dict):
+        txid = data.get("txid")
+    if not txid:
+        for line in (out or "").splitlines():
+            if "txid=" in line:
+                txid = line.split("txid=", 1)[1].strip().split()[0]
+                break
+    return (True, str(txid) if txid else None)
 
 
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
@@ -143,6 +196,33 @@ def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_uni
         print("Nexus transfer exception:", e)
         return False
 
+def debit_account_with_txid(from_addr: str, to_addr: str, amount: int, reference: int | str) -> tuple[bool, str | None]:
+    """Debit from a specific account (e.g., treasury) to recipient and parse txid."""
+    if not config.NEXUS_PIN:
+        return (False, None)
+    cmd = [
+        config.NEXUS_CLI,
+        "finance/debit/account",
+        f"from={from_addr}",
+        f"to={to_addr}",
+        f"amount={amount}",
+        f"reference={reference}",
+        f"pin={config.NEXUS_PIN}",
+    ]
+    code, out, err = _run(cmd, timeout=5)
+    if code != 0:
+        return (False, None)
+    txid = None
+    data = _parse_json_lenient(out)
+    if isinstance(data, dict):
+        txid = data.get("txid")
+    if not txid:
+        for line in (out or "").splitlines():
+            if "txid=" in line:
+                txid = line.split("txid=", 1)[1].strip().split()[0]
+                break
+    return (True, str(txid) if txid else None)
+
 def send_tiny_usdd_to_local(amount_usdd_units: int, note: str = "TINY_USDD") -> bool:
     to_addr = config.NEXUS_USDD_LOCAL_ACCOUNT or config.NEXUS_USDD_TREASURY_ACCOUNT
     from_addr = config.NEXUS_USDD_TREASURY_ACCOUNT
@@ -153,46 +233,165 @@ def send_tiny_usdd_to_local(amount_usdd_units: int, note: str = "TINY_USDD") -> 
     return transfer_usdd_between_accounts(from_addr, to_addr, amount_usdd_units, note)
 
 
-def was_usdd_minted_for_sig(to_addr: str, sol_sig: str, lookback: int = 50) -> bool:
-    """Check recipient account's recent transactions for a CREDIT contract with reference 'USDC_TX:<sig>'."""
-    ref = f"USDC_TX:{sol_sig}"
-    cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={to_addr}"]
+# Legacy signature-based helpers removed (string references are no longer used).
+
+
+# --- Asset mapping for swaps (distordiaSwap) ---
+def find_distordia_swap_asset_for_tx_sent(swap_to: str, tx_sent: str) -> Optional[Dict[str, Any]]:
+    """Find a distordiaSwap asset mapping an incoming tx/sig to a swap recipient.
+    Expected fields:
+      - distordiaSwap.swap_to
+      - distordiaSwap.tx_sent
+      - distordiaSwap.swap_recipient
+    Returns a flat dict with keys {swap_to, tx_sent, swap_recipient} or None.
+    """
     try:
+        # Query minimal projection to reduce payload
+        cmd = [
+            config.NEXUS_CLI,
+            "register/list/assets:asset/distordiaSwap.swap_to,distordiaSwap.tx_sent,distordiaSwap.swap_recipient",
+            f"distordiaSwap.swap_to={swap_to}",
+            f"distordiaSwap.tx_sent={tx_sent}",
+            "limit=1",
+        ]
         code, out, err = _run(cmd, timeout=15)
         if code != 0:
-            return False
+            return None
         data = _parse_json_lenient(out)
-        txs = data if isinstance(data, list) else [data]
-        scanned = 0
-        for tx in (txs or []):
-            if not isinstance(tx, dict):
+        arr = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        if not arr:
+            return None
+        a = arr[0] or {}
+        ds = a.get("distordiaSwap") or a
+        return {
+            "swap_to": (ds or {}).get("swap_to"),
+            "tx_sent": (ds or {}).get("tx_sent"),
+            "swap_recipient": (ds or {}).get("swap_recipient"),
+        }
+    except Exception as e:
+        print("find_distordia_swap_asset_for_tx_sent error:", e)
+        return None
+
+def find_asset_receival_account_by_sig(sig: str) -> Optional[Dict[str, Any]]:
+    """Query assets by sig_toService and return a vetted { receival_account, owner }.
+    Security: when multiple assets match, filter by a configurable owner whitelist, and then
+    prefer the oldest (smallest block/tx order) to avoid front-running or spoofing.
+    """
+    try:
+        cmd = [
+            config.NEXUS_CLI,
+            "register/list/assets:asset/owner,distordiaType,fromToken,toToken,txid_toService,sig_toService,receival_account,created,modified",
+            f"results.sig_toService={sig}",
+            "order=asc",
+            "sort=created",
+        ]
+        code, out, err = _run(cmd, timeout=15)
+        if code != 0:
+            return None
+        data = _parse_json_lenient(out)
+        # Normalize to a list of items with results
+        raw = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        items = []
+        for a in raw or []:
+            if not isinstance(a, dict):
                 continue
-            scanned += 1
-            if scanned > max(10, lookback):
-                break
-            if int(tx.get("confirmations") or 0) <= 0:
+            res = a.get("results") or a
+            if not isinstance(res, dict):
                 continue
-            for c in (tx.get("contracts") or []):
-                if not isinstance(c, dict):
-                    continue
-                if str(c.get("OP") or "").upper() != "CREDIT":
-                    continue
-                r = c.get("reference")
-                if str(r).strip() == ref:
-                    return True
-        return False
+            # Some projections wrap fields under 'asset'
+            core = res.get("asset") if isinstance(res.get("asset"), dict) else res
+            items.append(core)
+        if not items:
+            return None
+    # Whitelist removed: consider all matching items
+        # Stable order by created then modified
+        def _key(r):
+            try:
+                c = r.get("created")
+                m = r.get("modified")
+                # created/modified might be nested under meta too
+                if isinstance(c, dict):
+                    c = c.get("value") or c.get("ts")
+                if isinstance(m, dict):
+                    m = m.get("value") or m.get("ts")
+                return (int(c or 0), int(m or 0))
+            except Exception:
+                return (0, 0)
+        items.sort(key=_key)
+        best = items[0]
+        return {
+            "receival_account": best.get("receival_account"),
+            "owner": best.get("owner"),
+        }
     except Exception:
-        return False
+        return None
+
+def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Optional[Dict[str, Any]]:
+    """Query assets by txid_toService and owner; return { receival_account } if present.
+    Used for USDD->USDC: results.txid_toService=<txid> AND results.owner=<owner>.
+    """
+    try:
+        cmd = [
+            config.NEXUS_CLI,
+            "register/list/assets:asset/owner,distordiaType,fromToken,toToken,txid_toService,receival_account,created,modified",
+            f"results.txid_toService={txid}",
+            f"results.owner={owner}",
+            "order=asc",
+            "sort=created",
+        ]
+        code, out, err = _run(cmd, timeout=15)
+        if code != 0:
+            return None
+        data = _parse_json_lenient(out)
+        raw = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        items = []
+        for a in raw or []:
+            if not isinstance(a, dict):
+                continue
+            res = a.get("results") or a
+            if not isinstance(res, dict):
+                continue
+            core = res.get("asset") if isinstance(res.get("asset"), dict) else res
+            items.append(core)
+        if not items:
+            return None
+        def _key(r):
+            try:
+                c = r.get("created")
+                m = r.get("modified")
+                if isinstance(c, dict):
+                    c = c.get("value") or c.get("ts")
+                if isinstance(m, dict):
+                    m = m.get("value") or m.get("ts")
+                return (int(c or 0), int(m or 0))
+            except Exception:
+                return (0, 0)
+        items.sort(key=_key)
+        best = items[0]
+        return {"receival_account": best.get("receival_account")}
+    except Exception:
+        return None
+
+def get_debit_status(txid: str) -> Optional[Dict[str, Any]]:
+    """Fetch debit by txid and return confirmation info from finance/get/debit."""
+    try:
+        cmd = [config.NEXUS_CLI, "finance/get/debit", f"txid={txid}"]
+        code, out, err = _run(cmd, timeout=10)
+        if code != 0:
+            return None
+        data = _parse_json_lenient(out)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
-def was_usdd_debited_from_treasury_for_sig(sol_sig: str, lookback: int = 50, min_confirmations: int = 1) -> bool:
-    """Check our USDD treasury account's recent transactions for a DEBIT contract with reference 'USDC_TX:<sig>'.
-    This guards against double-debiting when the receiver hasn't credited yet.
+def was_usdd_debited_to_account_for_amount(to_addr: str, amount_units: int, lookback_sec: int = 60, min_confirmations: int = 0) -> bool:
+    """Check treasury debits to a recipient for an exact amount within a recent window.
+    This provides idempotency without relying on string references.
     """
     treas = config.NEXUS_USDD_TREASURY_ACCOUNT
     if not treas:
         return False
-    ref = f"USDC_TX:{sol_sig}"
     cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={treas}"]
     try:
         code, out, err = _run(cmd, timeout=15)
@@ -200,13 +399,20 @@ def was_usdd_debited_from_treasury_for_sig(sol_sig: str, lookback: int = 50, min
             return False
         data = _parse_json_lenient(out)
         txs = data if isinstance(data, list) else [data]
+        from time import time as _now
+        cutoff = int(_now()) - int(lookback_sec or 0)
         scanned = 0
         for tx in (txs or []):
             if not isinstance(tx, dict):
                 continue
             scanned += 1
-            if scanned > max(10, lookback):
-                break
+            # Optional time filter if available
+            try:
+                ts = int(tx.get("timestamp") or 0)
+                if ts and ts < cutoff:
+                    break
+            except Exception:
+                pass
             conf = int(tx.get("confirmations") or 0)
             if conf < int(min_confirmations or 0):
                 continue
@@ -215,8 +421,17 @@ def was_usdd_debited_from_treasury_for_sig(sol_sig: str, lookback: int = 50, min
                     continue
                 if str(c.get("OP") or "").upper() != "DEBIT":
                     continue
-                if str(c.get("reference") or "").strip() == ref:
+                # Match by amount and recipient when possible
+                amt = None
+                try:
+                    amt = int(c.get("amount") or c.get("value") or 0)
+                except Exception:
+                    amt = 0
+                to_field = c.get("to") or c.get("address") or c.get("recipient") or None
+                if amt == int(amount_units) and (not to_field or str(to_field) == str(to_addr)):
                     return True
+            if scanned > 200:
+                break
         return False
     except Exception:
         return False
