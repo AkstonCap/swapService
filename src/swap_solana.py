@@ -178,35 +178,106 @@ def poll_solana_deposits():
         }
 
         def _extract_nexus_receival_from_memo(txobj) -> str | None:
-            """Scan outer+inner instructions for a memo like 'nexus:<USDD account>' and validate the account."""
+            """Scan outer+inner instructions and logs for a memo like 'nexus:<USDD account>' and validate the account."""
+            def _decode_memo_data(data) -> str | None:
+                import base64 as _b64
+                # data can be str or [payload, encoding]
+                try:
+                    if isinstance(data, list) and data:
+                        payload = data[0]
+                        enc = (data[1] if len(data) > 1 else "").lower()
+                        if isinstance(payload, str):
+                            if enc == "base64":
+                                try:
+                                    return _b64.b64decode(payload).decode("utf-8", errors="ignore").strip() or None
+                                except Exception:
+                                    return None
+                            if enc == "base58":
+                                try:
+                                    from base58 import b58decode  # type: ignore
+                                    return b58decode(payload).decode("utf-8", errors="ignore").strip() or None
+                                except Exception:
+                                    return None
+                            # unknown encoding: try base64, then base58, then utf-8
+                            try:
+                                return _b64.b64decode(payload).decode("utf-8", errors="ignore").strip() or None
+                            except Exception:
+                                try:
+                                    from base58 import b58decode  # type: ignore
+                                    return b58decode(payload).decode("utf-8", errors="ignore").strip() or None
+                                except Exception:
+                                    s = payload.strip()
+                                    return s or None
+                    elif isinstance(data, str):
+                        # try base64, then base58, then utf-8 plain text
+                        try:
+                            return _b64.b64decode(data).decode("utf-8", errors="ignore").strip() or None
+                        except Exception:
+                            try:
+                                from base58 import b58decode  # type: ignore
+                                return b58decode(data).decode("utf-8", errors="ignore").strip() or None
+                            except Exception:
+                                s = data.strip()
+                                return s or None
+                except Exception:
+                    return None
+                return None
+
+            # 1) Inspect instructions (outer + inner)
             for instr in _iter_all_instructions(txobj):
-                prog = instr.get("program")
-                pid = instr.get("programId")
-                if not (prog == "spl-memo" or (isinstance(pid, str) and pid in MEMO_PROGRAM_IDS)):
+                try:
+                    prog = instr.get("program")
+                    pid = instr.get("programId")
+                    if not (prog == "spl-memo" or (isinstance(pid, str) and pid in MEMO_PROGRAM_IDS)):
+                        continue
+                    memo_text = None
+                    p = instr.get("parsed")
+                    if isinstance(p, str):
+                        memo_text = p
+                    elif isinstance(p, dict):
+                        info = p.get("info") or {}
+                        if isinstance(info, dict):
+                            memo_text = info.get("memo") or info.get("message") or info.get("text")
+                        if not memo_text:
+                            memo_text = p.get("message") or p.get("memo") or p.get("text")
+                    if not memo_text:
+                        memo_text = _decode_memo_data(instr.get("data"))
+                    if not isinstance(memo_text, str):
+                        continue
+                    m = memo_text.strip().strip('"').strip("'")
+                    if not m.lower().startswith("nexus:"):
+                        continue
+                    addr = m.split(":", 1)[1].strip().split()[0]
+                    if not addr:
+                        continue
+                    acct = nexus_client.get_account_info(addr)
+                    if acct and nexus_client.is_expected_token(acct, config.NEXUS_TOKEN_NAME):
+                        return addr
+                except Exception:
                     continue
-                memo = None
-                p = instr.get("parsed")
-                if isinstance(p, str):
-                    memo = p
-                elif isinstance(p, dict):
-                    # Some nodes may wrap memo text
-                    memo = p.get("message") or p.get("memo") or p.get("text")
-                if memo is None:
-                    # As a fallback, try a raw 'data' field if present as plain text
-                    d = instr.get("data")
-                    if isinstance(d, str):
-                        memo = d
-                if not isinstance(memo, str):
-                    continue
-                m = memo.strip()
-                if not m.lower().startswith("nexus:"):
-                    continue
-                addr = m.split(":", 1)[1].strip().split()[0]
-                if not addr:
-                    continue
-                acct = nexus_client.get_account_info(addr)
-                if acct and nexus_client.is_expected_token(acct, config.NEXUS_TOKEN_NAME):
-                    return addr
+
+            # 2) Fallback: parse runtime logs for memo lines
+            try:
+                logs = (txobj.get("meta") or {}).get("logMessages") or []
+                if isinstance(logs, list):
+                    for ln in logs:
+                        if not isinstance(ln, str):
+                            continue
+                        if "Program log: Memo" in ln or "Program data: " in ln:
+                            parts = ln.split(":", 2)
+                            if len(parts) >= 3:
+                                cand = parts[-1].strip()
+                                if isinstance(cand, str):
+                                    cand_clean = cand.strip().strip('"').strip("'")
+                                    if not cand_clean.lower().startswith("nexus:"):
+                                        continue
+                                    addr = cand_clean.split(":", 1)[1].strip().split()[0]
+                                    if addr:
+                                        acct = nexus_client.get_account_info(addr)
+                                        if acct and nexus_client.is_expected_token(acct, config.NEXUS_TOKEN_NAME):
+                                            return addr
+            except Exception:
+                pass
             return None
 
         # Load current unprocessed in-memory snapshot
@@ -257,6 +328,7 @@ def poll_solana_deposits():
                 except Exception:
                     et = "Exception"
                 print(f"Error fetching transaction {sig}: {et} {repr(e)}")
+                print()
                 continue
 
             all_instrs = list(_iter_all_instructions(tx))
@@ -288,6 +360,7 @@ def poll_solana_deposits():
                         if net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units)
                             print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action")
+                            print()
                             entry = {
                                 "sig": sig,
                                 "amount_usdc_units": amount_usdc_units,
@@ -337,6 +410,14 @@ def poll_solana_deposits():
                                 }
                                 state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
                                 state.append_jsonl(config.REFUNDED_SIGS_FILE, out)
+                                # Remove from unprocessed lists / file
+                                try:
+                                    unprocessed = [r for r in unprocessed if r.get("sig") != sig]
+                                    rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+                                    rows = [r for r in rows if r.get("sig") != sig]
+                                    state.write_jsonl(config.UNPROCESSED_SIGS_FILE, rows)
+                                except Exception:
+                                    pass
                                 mark_processed = True
                             else:
                                 page_has_unprocessed_deposit = True
@@ -405,6 +486,7 @@ def poll_solana_deposits():
                         if net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units)
                             print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action [delta]")
+                            print()
                             entry = {
                                 "sig": sig,
                                 "amount_usdc_units": amount_usdc_units,
@@ -452,6 +534,13 @@ def poll_solana_deposits():
                                     }
                                     state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
                                     state.append_jsonl(config.REFUNDED_SIGS_FILE, out)
+                                    try:
+                                        unprocessed = [r for r in unprocessed if r.get("sig") != sig]
+                                        rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+                                        rows = [r for r in rows if r.get("sig") != sig]
+                                        state.write_jsonl(config.UNPROCESSED_SIGS_FILE, rows)
+                                    except Exception:
+                                        pass
                                     mark_processed = True
                                 else:
                                     page_has_unprocessed_deposit = True
@@ -503,6 +592,7 @@ def poll_solana_deposits():
                             pass
                     delta_final = post_amt - pre_amt
                     print(f"Classifying NOT A DEPOSIT sig={sig} vault_pre={pre_amt} vault_post={post_amt} delta={delta_final}")
+                    print()
                     if delta_final > 0:
                         page_has_unprocessed_deposit = True
                         continue
@@ -524,11 +614,20 @@ def poll_solana_deposits():
             ):
                 state.propose_solana_waterline(int(min(confirmed_bt_candidates)))
             elif page_has_unprocessed_deposit:
-                print("Holding Solana waterline: unprocessed deposit(s) in current page")
+                # Double-check on-disk unprocessed list; if empty or only contains non-actionable rows, don't hold
+                try:
+                    rows_check = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+                    has_actionable = any(r.get("comment") in (None, "ready for processing", "debited, awaiting confirmations") for r in rows_check)
+                except Exception:
+                    has_actionable = True
+                if has_actionable:
+                    print("Holding Solana waterline: unprocessed deposit(s) in current page")
+                    print()
         except Exception:
             pass
     except Exception as e:
         print(f"poll_solana_deposits error: {e}")
+        print()
     finally:
         try:
             rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
@@ -597,6 +696,7 @@ def poll_solana_deposits():
                                             state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
         except Exception as e:
             print(f"processing ready entries error: {e}")
+            print()
 
         try:
             rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
@@ -667,6 +767,7 @@ def poll_solana_deposits():
             state.write_jsonl(config.UNPROCESSED_SIGS_FILE, new_unprocessed)
         except Exception as e:
             print(f"confirm/move processed error: {e}")
+            print()
 
         try:
             rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
@@ -682,6 +783,7 @@ def poll_solana_deposits():
                     state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
         except Exception as e:
             print(f"refund annotation error: {e}")
+            print()
 
         # After updates, set waterline to min ts in unprocessed minus buffer
         try:
