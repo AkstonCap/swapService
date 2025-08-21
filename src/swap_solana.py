@@ -1,6 +1,14 @@
 from decimal import Decimal
 from . import config, state, nexus_client, solana_client, fees
 
+# Lightweight structured logging for deposit lifecycle only
+def _log(event: str, **fields):
+    parts = [f"{event}"]
+    for k, v in fields.items():
+        if v is not None:
+            parts.append(f"{k}={v}")
+    print(" ".join(parts))
+
 
 # Local in-process cache so signatures marked processed (especially non-deposits)
 # are not revisited within the same runtime even if state lookups miss.
@@ -359,7 +367,7 @@ def poll_solana_deposits():
 
                         if net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units)
-                            print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action")
+                            _log("USDC_FEE_ONLY", sig=sig, amount=amount_usdc_units)
                             print()
                             entry = {
                                 "sig": sig,
@@ -381,6 +389,7 @@ def poll_solana_deposits():
                         if not any((r.get("sig") == sig) for r in unprocessed):
                             state.append_jsonl(config.UNPROCESSED_SIGS_FILE, entry)
                             unprocessed.append(entry)
+                            _log("USDC_QUEUED", sig=sig, amount=amount_usdc_units, from_acct=source_token_acc)
                         recv = _extract_nexus_receival_from_memo(tx)
                         if recv:
                             def _pred(r):
@@ -395,6 +404,7 @@ def poll_solana_deposits():
                                     r["receival_account"] = recv
                                     r["comment"] = "ready for processing"
                                     break
+                            _log("USDC_READY", sig=sig, nexus=recv, amount=amount_usdc_units)
                         else:
                             # Missing/invalid memo -> refund (after flat fee)
                             refundable = max(0, amount_usdc_units - flat_fee_units)
@@ -419,6 +429,7 @@ def poll_solana_deposits():
                                 except Exception:
                                     pass
                                 mark_processed = True
+                                _log("USDC_REFUNDED", sig=sig, amount=amount_usdc_units, reason="invalid_memo")
                             else:
                                 page_has_unprocessed_deposit = True
                         break
@@ -485,7 +496,7 @@ def poll_solana_deposits():
 
                         if net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units)
-                            print(f"USDC deposit {amount_usdc_units} <= flat fee; treated as fee, no action [delta]")
+                            _log("USDC_FEE_ONLY", sig=sig, amount=amount_usdc_units, path="delta")
                             print()
                             entry = {
                                 "sig": sig,
@@ -506,6 +517,7 @@ def poll_solana_deposits():
                             if not any((r.get("sig") == sig) for r in unprocessed):
                                 state.append_jsonl(config.UNPROCESSED_SIGS_FILE, entry)
                                 unprocessed.append(entry)
+                                _log("USDC_QUEUED", sig=sig, amount=amount_usdc_units, from_acct=source_token_acc, path="delta")
                             recv = _extract_nexus_receival_from_memo(tx)
                             if recv:
                                 def _pred(r):
@@ -520,6 +532,7 @@ def poll_solana_deposits():
                                         r["receival_account"] = recv
                                         r["comment"] = "ready for processing"
                                         break
+                                _log("USDC_READY", sig=sig, nexus=recv, amount=amount_usdc_units, path="delta")
                             else:
                                 refundable = max(0, amount_usdc_units - flat_fee_units)
                                 if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing/invalid memo"):
@@ -542,6 +555,7 @@ def poll_solana_deposits():
                                     except Exception:
                                         pass
                                     mark_processed = True
+                                    _log("USDC_REFUNDED", sig=sig, amount=amount_usdc_units, reason="invalid_memo", path="delta")
                                 else:
                                     page_has_unprocessed_deposit = True
                 except Exception:
@@ -591,8 +605,7 @@ def poll_solana_deposits():
                         except Exception:
                             pass
                     delta_final = post_amt - pre_amt
-                    print(f"Classifying NOT A DEPOSIT sig={sig} vault_pre={pre_amt} vault_post={post_amt} delta={delta_final}")
-                    print()
+                    # Suppress non-deposit noise (no print)
                     if delta_final > 0:
                         page_has_unprocessed_deposit = True
                         continue
@@ -613,16 +626,7 @@ def poll_solana_deposits():
                 and not page_has_unprocessed_deposit
             ):
                 state.propose_solana_waterline(int(min(confirmed_bt_candidates)))
-            elif page_has_unprocessed_deposit:
-                # Double-check on-disk unprocessed list; if empty or only contains non-actionable rows, don't hold
-                try:
-                    rows_check = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-                    has_actionable = any(r.get("comment") in (None, "ready for processing", "debited, awaiting confirmations") for r in rows_check)
-                except Exception:
-                    has_actionable = True
-                if has_actionable:
-                    print("Holding Solana waterline: unprocessed deposit(s) in current page")
-                    print()
+            # Silence waterline hold message; lifecycle events already show pending state
         except Exception:
             pass
     except Exception as e:
