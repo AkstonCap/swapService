@@ -1,6 +1,10 @@
 import json
-from typing import Dict
-from . import config
+import threading
+from typing import Dict, Any
+from . import config, state
+
+_fees_lock = threading.Lock()
+FEE_EVENTS_FILE = getattr(config, "FEE_EVENTS_FILE", "fee_events.jsonl")
 
 _fees_state: Dict[str, int] = {"usdc_accumulated": 0}
 
@@ -21,13 +25,28 @@ def _save():
     except Exception:
         pass
 
-def add_usdc_fee(amount_base_units: int):
+def add_usdc_fee(amount_base_units: int, *, sig: str | None = None, kind: str | None = None):
+    """Accumulate USDC fee (base units) with simple locking and event journal.
+    kind examples: flat, dynamic, fee_only, refund_flat
+    """
     if amount_base_units <= 0:
         return
     if not isinstance(amount_base_units, int):
         amount_base_units = int(amount_base_units)
-    _fees_state["usdc_accumulated"] = int(_fees_state.get("usdc_accumulated", 0)) + amount_base_units
-    _save()
+    with _fees_lock:
+        _fees_state["usdc_accumulated"] = int(_fees_state.get("usdc_accumulated", 0)) + amount_base_units
+        _save()
+        try:
+            evt: Dict[str, Any] = {
+                "ts": int(state._now()),  # type: ignore
+                "sig": sig,
+                "amount": amount_base_units,
+                "kind": kind or "generic"
+            }
+            with open(FEE_EVENTS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(evt, ensure_ascii=False)+"\n")
+        except Exception:
+            pass
 
 def get_usdc_fees() -> int:
     return int(_fees_state.get("usdc_accumulated", 0))
@@ -35,6 +54,37 @@ def get_usdc_fees() -> int:
 def reset_usdc_fees():
     _fees_state["usdc_accumulated"] = 0
     _save()
+
+def reconcile_accounting(expected_total: int | None = None) -> dict:
+    """Recalculate fee sum from journal; optionally compare with expected_total.
+    Returns dict with {journal_sum, stored, delta}.
+    """
+    journal_sum = 0
+    try:
+        if FEE_EVENTS_FILE and open:
+            with open(FEE_EVENTS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line=line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row=json.loads(line)
+                        journal_sum += int(row.get("amount") or 0)
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    stored = int(_fees_state.get("usdc_accumulated", 0))
+    if expected_total is not None and journal_sum != expected_total:
+        # Could update or log discrepancy; for now just compute.
+        pass
+    delta = journal_sum - stored
+    # If journal ahead of stored (delta>0), bring stored up (self-heal).
+    if delta > 0:
+        with _fees_lock:
+            _fees_state["usdc_accumulated"] = journal_sum
+            _save()
+    return {"journal_sum": journal_sum, "stored": stored, "delta": delta}
 
 def process_fee_conversions():
     """Policy-driven rebalance when backing ratio > 1.

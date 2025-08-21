@@ -163,6 +163,13 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd: int, reference: int) -> tupl
 
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     """Refund USDD by transferring from treasury to the recipient (no mint)."""
+    # Check if this refund was already processed by checking for txid in reason
+    from . import state
+    if "txid:" in reason:
+        potential_txid = reason.split("txid:")[-1].strip().split()[0]
+        if potential_txid in state.processed_nexus_txs:
+            return True  # Already refunded this transaction
+    
     ref = reason if len(reason) <= 120 else reason[:117] + "..."
     treas = config.NEXUS_USDD_TREASURY_ACCOUNT
     if not treas:
@@ -368,7 +375,7 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
                 return (0, 0)
         items.sort(key=_key)
         best = items[0]
-        return {"receival_account": best.get("receival_account")}
+        return {"receival_account": best.get("receival_account"), "owner": best.get("owner")}
     except Exception:
         return None
 

@@ -139,7 +139,7 @@ def run():
         while not _stop_event.is_set():
             # Safety and maintenance first
             try:
-                from . import fees, nexus_client
+                from . import fees, nexus_client, solana_client
                 should_pause = fees.maintain_backing_and_bounds()
                 # Periodic backing reconcile: mint USDD to fees account to bring vault USDC back to 1:1 with circulating
                 now = int(time.time())
@@ -160,6 +160,25 @@ def run():
                 # Optional: DEX conversions (SOL top-ups)
                 if config.FEE_CONVERSION_ENABLED:
                     fees.process_fee_conversions()
+
+                # Periodic operational metrics (lightweight) every METRICS_INTERVAL_SEC
+                METRICS_INTERVAL = getattr(config, 'METRICS_INTERVAL_SEC', 30)
+                if now % max(5, METRICS_INTERVAL) == 0:  # coarse modulus trigger
+                    try:
+                        vault_usdc = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
+                        circ_usdd = nexus_client.get_circulating_usdd_units()
+                        ratio = (vault_usdc / circ_usdd) if circ_usdd else 0
+                        fees_state = fees.reconcile_accounting()
+                        # Unprocessed stats
+                        unproc = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+                        ready = sum(1 for r in unproc if r.get('comment') == 'ready for processing')
+                        debiting = sum(1 for r in unproc if r.get('comment') == 'debited, awaiting confirmations')
+                        unresolved = sum(1 for r in unproc if r.get('comment') == 'memo unresolved')
+                        refund_pending = sum(1 for r in unproc if r.get('comment') == 'refund pending')
+                        quarantined = sum(1 for r in unproc if r.get('comment') == 'quarantined')
+                        print(f"[metrics] vault_usdc={vault_usdc} circ_usdd={circ_usdd} ratio={ratio:.4f} fees_stored={fees_state['stored']} fees_journal={fees_state['journal_sum']} delta={fees_state['delta']} unprocessed={len(unproc)} ready={ready} debiting={debiting} unresolved={unresolved} refund_pending={refund_pending} quarantined={quarantined}")
+                    except Exception as e:
+                        print(f"[metrics] error: {e}")
                 if should_pause:
                     if _stop_event.wait(config.POLL_INTERVAL):
                         break

@@ -1,8 +1,23 @@
 import json
 import os
+import fcntl
 from typing import Dict, Any
 from . import config
 import datetime
+from typing import Tuple
+
+# Reservation file path (lazy)
+_RESERVATIONS_FILE: str | None = None
+
+def _reservations_path() -> str:
+    global _RESERVATIONS_FILE
+    if _RESERVATIONS_FILE:
+        return _RESERVATIONS_FILE
+    base_dir = os.path.dirname(config.PROCESSED_SIG_FILE)
+    if not base_dir:
+        base_dir = "."
+    _RESERVATIONS_FILE = os.path.join(base_dir, "reservations.jsonl")
+    return _RESERVATIONS_FILE
 
 # Load processed state
 processed_sigs: Dict[str, int] = {}
@@ -72,6 +87,25 @@ if os.path.exists(config.ATTEMPT_STATE_FILE):
 else:
     attempt_state = {}
 
+# Refunded signature index (prevent double refunds)
+refunded_sigs: set[str] = set()
+try:
+    if os.path.exists(config.REFUNDED_SIGS_FILE):
+        with open(config.REFUNDED_SIGS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    sg = str(row.get("sig") or "").strip()
+                    if sg:
+                        refunded_sigs.add(sg)
+                except Exception:
+                    continue
+except Exception:
+    refunded_sigs = set()
+
 
 def save_state():
     # Do not rewrite processed files; they are append-only JSONL now.
@@ -117,50 +151,15 @@ def _append_jsonl(path: str, row: Dict[str, Any]):
 
 
 def mark_solana_processed(signature: str, ts: int | None = None, reason: str | None = None):
-    try:
-        ts_int = int(ts or 0)
-    except Exception:
-        ts_int = 0
-    processed_sigs[str(signature)] = ts_int
-    row = {
-        "type": "solana",
-        "sig": str(signature),
-        "ts": ts_int,
-        "ts_iso": datetime.datetime.utcfromtimestamp(ts_int).isoformat() + "Z" if ts_int else None,
-        "reason": reason or "processed",
-    }
-    _append_jsonl(config.PROCESSED_SIG_FILE, row)
-    try:
-        print(f"PROCESSED SOLANA sig={row['sig']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
-    except Exception:
-        pass
+    atomic_mark_processed(signature, False, ts, reason)
 
 def mark_nexus_processed(key: str, ts: int | None = None, reason: str | None = None):
-    try:
-        ts_int = int(ts or 0)
-    except Exception:
-        ts_int = 0
-    processed_nexus_txs[str(key)] = ts_int
-    # Attempt to split txid and contract id if key is formatted as "<txid>:<cid>"
-    txid = str(key)
-    cid = None
-    if ":" in txid:
-        parts = txid.split(":", 1)
-        txid, cid = parts[0], parts[1]
-    row = {
-        "type": "nexus",
-        "tx": str(key),
-        "txid": txid,
-        "cid": cid,
-        "ts": ts_int,
-        "ts_iso": datetime.datetime.utcfromtimestamp(ts_int).isoformat() + "Z" if ts_int else None,
-        "reason": reason or "processed",
-    }
-    _append_jsonl(config.PROCESSED_NEXUS_FILE, row)
-    try:
-        print(f"PROCESSED NEXUS tx={row['tx']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
-    except Exception:
-        pass
+    atomic_mark_processed(key, True, ts, reason)
+
+
+def add_refunded_sig(sig: str):
+    """Public wrapper for atomic refunded sig addition (defined once)."""
+    atomic_add_refunded_sig(sig)
 
 def prune_processed(solana_waterline: int | None = None, nexus_waterline: int | None = None):
     """Prune processed markers strictly older than the given waterlines minus safety.
@@ -245,13 +244,407 @@ def log_failed_refund(payload: Dict[str, Any]):
         except Exception:
             pass
 
-# --- JSONL helpers for swap pipeline ---
-def append_jsonl(path: str, row: Dict[str, Any]):
+def is_refunded(sig: str) -> bool:
+    return sig in refunded_sigs
+
+# (duplicate add_refunded_sig removed)
+
+
+# File locking context manager for atomic operations
+class FileLock:
+    def __init__(self, path: str):
+        self.path = path
+        self.lock_path = path + ".lock"
+        self.file = None
+    
+    def __enter__(self):
+        try:
+            self.file = open(self.lock_path, 'w')
+            try:
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX)
+            except (ImportError, AttributeError):
+                # Windows fallback - use file existence as lock
+                import time
+                for _ in range(50):  # 5 second timeout
+                    if not os.path.exists(self.lock_path + ".win"):
+                        try:
+                            with open(self.lock_path + ".win", 'x') as f:
+                                f.write("lock")
+                            break
+                        except FileExistsError:
+                            time.sleep(0.1)
+                    else:
+                        time.sleep(0.1)
+        except Exception:
+            if self.file:
+                self.file.close()
+            raise
+        return self
+    
+    def __exit__(self, *args):
+        if self.file:
+            self.file.close()
+        # Clean up Windows fallback lock
+        try:
+            os.remove(self.lock_path + ".win")
+        except (FileNotFoundError, OSError):
+            pass
+
+
+def atomic_add_refunded_sig(sig: str):
+    """Atomically add refunded signature with file lock."""
+    if not sig:
+        return
+    
+    with FileLock(config.REFUNDED_SIGS_FILE):
+        # Re-read current state
+        current_refunded = set()
+        try:
+            if os.path.exists(config.REFUNDED_SIGS_FILE):
+                with open(config.REFUNDED_SIGS_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                row = json.loads(line)
+                                sg = str(row.get("sig") or "").strip()
+                                if sg:
+                                    current_refunded.add(sg)
+                            except Exception:
+                                continue
+        except Exception:
+            pass
+        
+        # Check if already refunded
+        if sig in current_refunded:
+            return  # Already refunded, skip
+        
+        # Add to both memory and disk atomically
+        refunded_sigs.add(sig)
+        row = {
+            "sig": sig,
+            "ts": _now(),
+            "ts_iso": datetime.datetime.utcfromtimestamp(_now()).isoformat() + "Z"
+        }
+        try:
+            with open(config.REFUNDED_SIGS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.flush()  # Force write to disk
+                try:
+                    os.fsync(f.fileno())  # Force OS flush
+                except (AttributeError, OSError):
+                    pass  # Not available on all platforms
+        except Exception:
+            refunded_sigs.discard(sig)  # Rollback memory on disk failure
+            raise
+
+
+def finalize_refund(row: Dict[str, Any], reason: str | None = None):
+    """Atomically finalize a refund across all tracking files.
+    row should include at least: sig, amount_usdc_units, ts, from
+    Steps:
+      1. Append to REFUNDED_SIGS_FILE (detailed row) if not already refunded.
+      2. Append to PROCESSED_SWAPS_FILE (if not already present).
+      3. Remove any UNPROCESSED entry.
+      4. Mark processed (processed_sigs) for idempotency.
+    """
+    sig = (row or {}).get("sig")
+    if not sig:
+        return
+    ts = 0
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        ts = int(row.get("ts") or 0)
+    except Exception:
+        ts = 0
+    detailed = dict(row)
+    detailed.setdefault("comment", "refunded")
+    if reason:
+        detailed["refund_reason"] = reason
+    # 1 & 2 under lock to avoid races.
+    with FileLock(config.REFUNDED_SIGS_FILE):
+        # Build in-memory refunded set from file (lightweight; file usually small)
+        existing_refunded = set()
+        try:
+            if os.path.exists(config.REFUNDED_SIGS_FILE):
+                with open(config.REFUNDED_SIGS_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line=line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rj=json.loads(line)
+                            sg=str(rj.get("sig") or "").strip()
+                            if sg:
+                                existing_refunded.add(sg)
+                        except Exception:
+                            continue
+        except Exception:
+            existing_refunded = set()
+        new_refund = sig not in existing_refunded
+        if new_refund:
+            try:
+                with open(config.REFUNDED_SIGS_FILE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(detailed, ensure_ascii=False)+"\n")
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        refunded_sigs.add(sig)
+        # Append to processed swaps (outside REFUNDED file but still under same lock for simplicity)
+        already_processed = False
+        try:
+            if os.path.exists(config.PROCESSED_SWAPS_FILE):
+                with open(config.PROCESSED_SWAPS_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if f'"sig": "{sig}"' in line:
+                            already_processed = True
+                            break
+        except Exception:
+            pass
+        if not already_processed:
+            try:
+                with open(config.PROCESSED_SWAPS_FILE, "a", encoding="utf-8") as f2:
+                    f2.write(json.dumps(detailed, ensure_ascii=False)+"\n")
+                    f2.flush()
+                    try:
+                        os.fsync(f2.fileno())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    # 3. Remove from unprocessed file
+    try:
+        with FileLock(config.UNPROCESSED_SIGS_FILE):
+            if os.path.exists(config.UNPROCESSED_SIGS_FILE):
+                rows = []
+                changed=False
+                with open(config.UNPROCESSED_SIGS_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line=line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rj=json.loads(line)
+                        except Exception:
+                            rows.append(line)
+                            continue
+                        if isinstance(rj, dict) and rj.get("sig") == sig:
+                            changed=True
+                            continue
+                        rows.append(rj)
+                if changed:
+                    with open(config.UNPROCESSED_SIGS_FILE, "w", encoding="utf-8") as f:
+                        for r in rows:
+                            if isinstance(r, dict):
+                                f.write(json.dumps(r, ensure_ascii=False)+"\n")
+                            else:
+                                f.write(str(r)+"\n")
     except Exception:
         pass
+    # 4. Mark processed (atomic appends handled there)
+    try:
+        mark_solana_processed(sig, ts=ts, reason=f"refunded:{reason}" if reason else "refunded")
+    except Exception:
+        pass
+
+# --- Reservation System ----------------------------------------------------
+def reserve_action(kind: str, key: str, ttl_sec: int | None = None) -> bool:
+    """Attempt to reserve (kind,key). Returns True if fresh reservation established.
+    If an unexpired reservation exists returns False. Expired reservations are replaced.
+    """
+    if not kind or not key:
+        return False
+    if ttl_sec is None:
+        ttl_sec = int(getattr(config, "RESERVATION_TTL_SEC", 300))
+    path = _reservations_path()
+    now = _now()
+    new_rows: list[dict] = []
+    claimed = True
+    with FileLock(path):
+        # Load existing
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line=line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rj=json.loads(line)
+                        except Exception:
+                            continue
+                        if not isinstance(rj, dict):
+                            continue
+                        k = (rj.get("kind"), rj.get("key"))
+                        ts = int(rj.get("ts") or 0)
+                        if k == (kind, key):
+                            # active?
+                            if ts and now - ts < ttl_sec:
+                                # still active -> cannot claim
+                                claimed = False
+                                new_rows.append(rj)  # preserve
+                                continue
+                            # expired -> drop old one, we'll add fresh below
+                            continue
+                        new_rows.append(rj)
+        except Exception:
+            new_rows = []
+        if not claimed:
+            # Write back untouched
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    for r in new_rows:
+                        f.write(json.dumps(r, ensure_ascii=False)+"\n")
+            except Exception:
+                pass
+            return False
+        # Append reservation
+        new_rows.append({"kind": kind, "key": key, "ts": now})
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in new_rows:
+                    f.write(json.dumps(r, ensure_ascii=False)+"\n")
+        except Exception:
+            return False
+    return True
+
+def release_reservation(kind: str, key: str):
+    if not kind or not key:
+        return
+    path = _reservations_path()
+    with FileLock(path):
+        if not os.path.exists(path):
+            return
+        try:
+            rows=[]
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line=line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rj=json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(rj, dict):
+                        continue
+                    if rj.get("kind") == kind and rj.get("key") == key:
+                        continue
+                    rows.append(rj)
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False)+"\n")
+        except Exception:
+            pass
+
+def has_active_reservation(kind: str, key: str, ttl_sec: int | None = None) -> bool:
+    if not kind or not key:
+        return False
+    if ttl_sec is None:
+        ttl_sec = int(getattr(config, "RESERVATION_TTL_SEC", 300))
+    path = _reservations_path()
+    now = _now()
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line=line.strip()
+                if not line:
+                    continue
+                try:
+                    rj=json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(rj, dict):
+                    continue
+                if rj.get("kind") == kind and rj.get("key") == key:
+                    ts = int(rj.get("ts") or 0)
+                    if ts and now - ts < ttl_sec:
+                        return True
+    except Exception:
+        return False
+    return False
+
+
+def atomic_mark_processed(sig_or_tx: str, is_nexus: bool = False, ts: int | None = None, reason: str | None = None):
+    """Atomically mark signature/tx as processed with file lock."""
+    file_path = config.PROCESSED_NEXUS_FILE if is_nexus else config.PROCESSED_SIG_FILE
+    memory_dict = processed_nexus_txs if is_nexus else processed_sigs
+    
+    with FileLock(file_path):
+        # Double-check not already processed
+        if sig_or_tx in memory_dict:
+            return  # Already processed
+        
+        try:
+            ts_int = int(ts or 0)
+        except Exception:
+            ts_int = 0
+        
+        # Add to memory
+        memory_dict[sig_or_tx] = ts_int
+        
+        # Prepare row
+        if is_nexus:
+            txid, cid = (sig_or_tx.split(":", 1) if ":" in sig_or_tx else (sig_or_tx, None))
+            row = {
+                "type": "nexus",
+                "tx": sig_or_tx,
+                "txid": txid,
+                "cid": cid,
+                "ts": ts_int,
+                "ts_iso": datetime.datetime.utcfromtimestamp(ts_int).isoformat() + "Z" if ts_int else None,
+                "reason": reason or "processed",
+            }
+        else:
+            row = {
+                "type": "solana",
+                "sig": sig_or_tx,
+                "ts": ts_int,
+                "ts_iso": datetime.datetime.utcfromtimestamp(ts_int).isoformat() + "Z" if ts_int else None,
+                "reason": reason or "processed",
+            }
+        
+        # Write atomically
+        try:
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except (AttributeError, OSError):
+                    pass
+        except Exception:
+            memory_dict.pop(sig_or_tx, None)  # Rollback memory on disk failure
+            raise
+        
+        # Log success
+        try:
+            if is_nexus:
+                print(f"PROCESSED NEXUS tx={row['tx']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
+            else:
+                print(f"PROCESSED SOLANA sig={row['sig']} ts={row['ts']} iso={row['ts_iso']} reason={row['reason']}")
+        except Exception:
+            pass
+
+# --- JSONL helpers for swap pipeline ---
+def append_jsonl(path: str, row: Dict[str, Any]):
+    """Atomically append a JSONL row with file lock."""
+    with FileLock(path):
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except (AttributeError, OSError):
+                    pass
+        except Exception:
+            pass
 
 def read_jsonl(path: str) -> list[Dict[str, Any]]:
     out: list[Dict[str, Any]] = []
@@ -274,44 +667,62 @@ def read_jsonl(path: str) -> list[Dict[str, Any]]:
     return out
 
 def write_jsonl(path: str, rows: list[Dict[str, Any]]):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    """Atomically write entire JSONL file with file lock."""
+    with FileLock(path):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except (AttributeError, OSError):
+                    pass
+        except Exception:
+            pass
 
 def update_jsonl_row(path: str, predicate, update_fn) -> bool:
-    rows = read_jsonl(path)
-    changed = False
-    for i, r in enumerate(rows):
-        try:
-            if predicate(r):
-                nr = update_fn(dict(r))
-                rows[i] = nr
-                changed = True
-        except Exception:
-            continue
-    if changed:
-        write_jsonl(path, rows)
-    return changed
+    """Atomically update a JSONL row matching predicate."""
+    with FileLock(path):
+        rows = read_jsonl(path)
+        changed = False
+        for i, r in enumerate(rows):
+            try:
+                if predicate(r):
+                    nr = update_fn(dict(r))
+                    rows[i] = nr
+                    changed = True
+            except Exception:
+                continue
+        if changed:
+            write_jsonl(path, rows)
+        return changed
 
 # --- Unique integer reference counter ---
 def next_reference() -> int:
+    """Return next monotonically increasing integer reference.
+    Used ONLY for: (1) Nexus USDD debit reference (USDC->USDD), (2) Solana USDC send memo (USDD->USDC).
+    Implementation: atomic read-modify-write with file lock to avoid races across processes.
+    If file missing or corrupt, starts at 1.
+    """
     path = config.REFERENCE_COUNTER_FILE
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                val = int(data.get("next", 1))
-        else:
-            val = 1
-    except Exception:
+    with FileLock(path):  # lock on counter file to serialize increments
         val = 1
-    # persist next+1
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"next": val + 1}, f)
-    except Exception:
-        pass
-    return val
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    cand = int(data.get("next", 1))
+                    # Guard against zero/negative or absurd jumps (corruption)
+                    if cand <= 0 or cand > 10**12:
+                        cand = 1
+                    val = cand
+        except Exception:
+            val = 1
+        # persist next = val + 1
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"next": val + 1}, f)
+        except Exception:
+            pass
+        return int(val)

@@ -54,6 +54,7 @@ PROCESSED_SWAPS_FILE = os.getenv("PROCESSED_SWAPS_FILE", "processed_sigs.json")
 NON_DEPOSITS_FILE = os.getenv("NON_DEPOSITS_FILE", "non_deposits.json")
 REFERENCE_COUNTER_FILE = os.getenv("REFERENCE_COUNTER_FILE", "reference_counter.json")
 REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
+STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
 REFUNDED_SIGS_FILE = os.getenv("REFUNDED_SIGS_FILE", "refunded_sigs.json")
 USDC_CONFIRM_TIMEOUT_SEC = int(os.getenv("USDC_CONFIRM_TIMEOUT_SEC", "600"))  # 10 minutes default for USDD->USDC confirmations
 

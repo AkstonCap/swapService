@@ -13,6 +13,9 @@ from struct import pack
 
 from . import config
 
+# Expose last sent signature for higher-level idempotency logging (refund / quarantine / debit flows)
+last_sent_sig: str | None = None
+
 # SPL Token and ATA Program IDs (constants)
 TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
@@ -118,6 +121,9 @@ def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Ke
         client.confirm_transaction(sig, commitment="confirmed")
     except Exception:
         pass
+    # store global last signature
+    global last_sent_sig
+    last_sent_sig = sig
     return sig
 
 
@@ -321,6 +327,13 @@ def _is_token_account_for_mint(token_account_addr: str, mint: PublicKey) -> bool
 
 def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
     """Send USDC base units directly to an existing USDC token account address."""
+    # Check if this reference was already processed
+    from . import state
+    if memo and memo.isdigit():
+        ref_key = f"nexus_ref_{memo}"
+        if ref_key in state.processed_nexus_txs:
+            return True, None  # Already processed this reference
+    
     try:
         if amount_base_units <= 0:
             return True, None
@@ -346,6 +359,14 @@ def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_bas
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
         print(f"Sent USDC to token account tx sig: {sig}")
+        
+        # Mark reference as processed if provided
+        if memo and memo.isdigit():
+            try:
+                state.mark_nexus_processed(f"nexus_ref_{memo}", reason="usdc_sent")
+            except Exception:
+                pass
+        
         return True, sig
     except Exception as e:
         print(f"Error sending USDC to token account: {e}")
@@ -368,14 +389,106 @@ def ensure_send_usdc_owner_or_ata(addr_maybe_owner_or_token: str, amount_base_un
         return False
 
 
-def was_usdc_sent_for_nexus_tx(nexus_txid: str, addr_maybe_owner_or_token: str, lookback: int = 40) -> bool:
-    """Deprecated: memo-based check removed. Always return False to avoid memo reliance."""
-    return False
+# was_usdc_sent_for_nexus_tx removed (obsolete; superseded by reference + memo recovery)
 
 
 def is_valid_usdc_token_account(addr: str) -> bool:
     """Public helper: True if addr is a valid SPL token account for the USDC mint."""
     return _is_token_account_for_mint(addr, config.USDC_MINT)
+
+
+def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]:
+    """Best-effort lookup of a recently sent signature containing the given memo string.
+    Searches recent signatures for the vault USDC token account (and optionally the vault owner)
+    and inspects transaction instructions for the Memo program.
+    Returns first matching signature or None.
+    """
+    if not memo:
+        return None
+    try:
+        client = Client(config.RPC_URL)
+    except Exception:
+        return None
+    addresses: list[str] = []
+    try:
+        if config.VAULT_USDC_ACCOUNT:
+            addresses.append(str(config.VAULT_USDC_ACCOUNT))
+    except Exception:
+        pass
+    # Optionally include vault wallet (owner) if present
+    try:
+        if getattr(config, "VAULT_OWNER", None):
+            addresses.append(str(config.VAULT_OWNER))
+    except Exception:
+        pass
+    seen = set()
+    for addr in addresses:
+        try:
+            resp = client.get_signatures_for_address(PublicKey.from_string(addr), limit=search_limit)
+            js = _rpc_get_value(resp)
+            if isinstance(js, list):
+                sig_list = js
+            else:
+                sig_list = []
+        except Exception:
+            continue
+        for entry in sig_list:
+            try:
+                sig = entry.get("signature") if isinstance(entry, dict) else None
+            except Exception:
+                sig = None
+            if not sig or sig in seen:
+                continue
+            seen.add(sig)
+            # Fetch transaction to inspect memo instruction
+            try:
+                tx_resp = client.get_transaction(sig, encoding="jsonParsed")
+                tx_val = _rpc_get_result(tx_resp)
+            except Exception:
+                continue
+            # Various shapes; try to drill into transaction.message.instructions
+            try:
+                tx_obj = tx_val.get("transaction") if isinstance(tx_val, dict) else None
+                msg = (tx_obj or {}).get("message") if isinstance(tx_obj, dict) else None
+                insts = (msg or {}).get("instructions") if isinstance(msg, dict) else None
+                if isinstance(insts, list):
+                    for ix in insts:
+                        try:
+                            # jsonParsed may embed program info differently
+                            prog = ix.get("programId") or ix.get("program")
+                            if prog and (str(prog).startswith("Memo111") or "memo" in str(prog).lower()):
+                                # Data may be base64 or raw string
+                                data = ix.get("data")
+                                if isinstance(data, list):
+                                    # Sometimes list like [b64, encoding]
+                                    if data:
+                                        data = data[0]
+                                if isinstance(data, str):
+                                    # Try direct compare
+                                    if data == memo:
+                                        return sig
+                                    # Try base64 decode
+                                    try:
+                                        decoded = base64.b64decode(data + "==").decode("utf-8", errors="ignore")
+                                        if decoded == memo:
+                                            return sig
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+            # Fallback: inspect log messages
+            try:
+                meta = tx_val.get("meta") if isinstance(tx_val, dict) else None
+                logs = (meta or {}).get("logMessages") if isinstance(meta, dict) else None
+                if isinstance(logs, list):
+                    for lg in logs:
+                        if isinstance(lg, str) and memo in lg:
+                            return sig
+            except Exception:
+                continue
+    return None
 
 
 ## Memo extraction removed.
@@ -393,8 +506,25 @@ def has_usdc_ata(owner_addr: str) -> bool:
         return False
 
 
+def derive_usdc_ata(owner_addr: str) -> str | None:
+    """Derive the expected USDC ATA address for a given owner (string form). Returns None on failure."""
+    try:
+        owner = PublicKey.from_string(owner_addr)
+        ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
+        return str(ata)
+    except Exception:
+        return None
+
+
 def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str) -> bool:
     """Refund USDC back to the sender's token account (no memo required)."""
+    # Check if this refund was already processed by checking the reason for signature context
+    from . import state
+    if ":" in reason and len(reason.split(":")) >= 2:
+        potential_sig = reason.split(":")[-1]
+        if len(potential_sig) > 40 and state.is_refunded(potential_sig):
+            return True  # Already refunded this signature
+    
     try:
         kp = load_vault_keypair()
         dest_token_acc = PublicKey.from_string(source_token_account)
@@ -411,7 +541,7 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
             ),
         ]
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Refunded USDC tx sig: {sig}")
+        print(f"Refunded USDC tx sig: {sig}")  # retain basic trace
         return True
     except Exception as e:
         print(f"Error refunding USDC: {e}")
@@ -439,7 +569,7 @@ def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None) -> 
             )
         ]
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Moved USDC to quarantine, sig: {sig}")
+        print(f"Moved USDC to quarantine, sig: {sig}")  # retain basic trace
         return True
     except Exception as e:
         print(f"Error moving USDC to quarantine: {e}")
