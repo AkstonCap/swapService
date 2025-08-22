@@ -57,6 +57,9 @@ REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour defa
 STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
 REFUNDED_SIGS_FILE = os.getenv("REFUNDED_SIGS_FILE", "refunded_sigs.json")
 USDC_CONFIRM_TIMEOUT_SEC = int(os.getenv("USDC_CONFIRM_TIMEOUT_SEC", "600"))  # 10 minutes default for USDD->USDC confirmations
+STALE_ROW_SEC = int(os.getenv("STALE_ROW_SEC", str(24*3600)))  # 24h default; stale rows moved to manual review
+SOLANA_RPC_TIMEOUT_SEC = int(os.getenv("SOLANA_RPC_TIMEOUT_SEC", "8"))  # per-call soft timeout safeguard
+NEXUS_CLI_TIMEOUT_SEC = int(os.getenv("NEXUS_CLI_TIMEOUT_SEC", "12"))  # generic CLI timeout (overridable)
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")
