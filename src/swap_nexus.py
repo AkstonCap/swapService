@@ -112,7 +112,12 @@ def poll_nexus_usdd_deposits():
         for page in range(max_pages):
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12),
+                )
             except Exception as e:
                 print(f"Error fetching USDD transactions page {page}: {e}")
                 break
@@ -277,6 +282,40 @@ def poll_nexus_usdd_deposits():
                                         x["comment"] = USDD_STATUS_REFUND_PENDING
                                     return x
                                 state.update_jsonl_row(unprocessed_path, _pred_rp, _upd_rp)
+            else:
+                # No receival asset yet; if age exceeds REFUND_TIMEOUT_SEC attempt refund; else leave pending
+                ts_row = int(r.get("ts") or 0)
+                if ts_row and (time.time() - ts_row) > getattr(config, "REFUND_TIMEOUT_SEC", 3600):
+                    sender = r.get("from")
+                    if sender:
+                        amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+                        amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
+                        refund_key = f"usdd_refund_unresolved:{txid}"
+                        if state.should_attempt(refund_key):
+                            state.record_attempt(refund_key)
+                            if nexus_client.refund_usdd(sender, amt_str, "unresolved receival_account"):
+                                row = dict(r)
+                                row["comment"] = USDD_STATUS_REFUNDED
+                                state.append_jsonl(processed_path, row)
+                                unprocessed = [x for x in unprocessed if x.get("txid") != txid]
+                                state.write_jsonl(unprocessed_path, unprocessed)
+                            else:
+                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                                if attempts >= config.MAX_ACTION_ATTEMPTS:
+                                    row = dict(r)
+                                    row["comment"] = USDD_STATUS_QUARANTINED
+                                    state.append_jsonl(processed_path, row)
+                                    _log("USDD_REFUND_QUARANTINED", txid=txid, reason="unresolved_timeout")
+                                    unprocessed = [x for x in unprocessed if x.get("txid") != txid]
+                                    state.write_jsonl(unprocessed_path, unprocessed)
+                                else:
+                                    def _pred_rp3(x):
+                                        return x.get("txid") == txid
+                                    def _upd_rp3(x):
+                                        if x.get("comment") not in (USDD_STATUS_REFUNDED, USDD_STATUS_QUARANTINED):
+                                            x["comment"] = USDD_STATUS_REFUND_PENDING
+                                        return x
+                                    state.update_jsonl_row(unprocessed_path, _pred_rp3, _upd_rp3)
 
         # Step 4: send USDC for ready entries
         for r in list(unprocessed):
@@ -530,6 +569,28 @@ def poll_nexus_usdd_deposits():
                                 continue
             new_unprocessed.append(r)
         state.write_jsonl(unprocessed_path, new_unprocessed)
+
+        # Prune stale (> STALE_ROW_SEC) rows to processed for manual review so they do not block waterline
+        try:
+            rows_all = state.read_jsonl(unprocessed_path)
+            now_cut = time.time()
+            active_rows: list[dict] = []
+            for r in rows_all:
+                tsr = int(r.get("ts") or 0)
+                if tsr and (now_cut - tsr) > getattr(config, "STALE_ROW_SEC", 86400):
+                    out = dict(r)
+                    out["comment"] = "stale_manual_review"
+                    state.append_jsonl(processed_path, out)
+                    try:
+                        state.mark_nexus_processed(r.get("txid"), ts=tsr, reason="stale_manual_review")
+                    except Exception:
+                        pass
+                else:
+                    active_rows.append(r)
+            if len(active_rows) != len(rows_all):
+                state.write_jsonl(unprocessed_path, active_rows)
+        except Exception:
+            pass
 
         # Step 6: waterline proposal (only advance when safe)
         try:
