@@ -152,6 +152,7 @@ def poll_solana_deposits():
         def _get_tx_result(sig_str: str):
             from typing import Any
             import json as _json
+            import threading, queue, time as _time
 
             def _normalize_response(resp: Any):
                 if isinstance(resp, dict):
@@ -184,17 +185,28 @@ def poll_solana_deposits():
             attempts.append({"arg": sig_str, "msv": None})
 
             for att in attempts:
+                result_q: "queue.Queue[Any]" = queue.Queue(maxsize=1)
+                def _call():
+                    nonlocal last_exc
+                    try:
+                        kwargs = {"encoding": "jsonParsed"}
+                        if att["msv"] is not None:
+                            kwargs["max_supported_transaction_version"] = att["msv"]
+                        tx_resp = client.get_transaction(att["arg"], **kwargs)
+                        tx_obj = _normalize_response(tx_resp)
+                        result_q.put((True, tx_obj))
+                    except Exception as e3:
+                        last_exc = e3
+                        result_q.put((False, None))
+                th = threading.Thread(target=_call, daemon=True)
+                th.start()
                 try:
-                    kwargs = {"encoding": "jsonParsed"}
-                    if att["msv"] is not None:
-                        kwargs["max_supported_transaction_version"] = att["msv"]
-                    tx_resp = client.get_transaction(att["arg"], **kwargs)
-                    tx_obj = _normalize_response(tx_resp)
-                    if tx_obj is not None:
-                        return tx_obj
-                except Exception as e3:
-                    last_exc = e3
+                    ok, val = result_q.get(timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
+                except Exception:
+                    # Timed out: leave thread to die, continue attempts
                     continue
+                if ok and val is not None:
+                    return val
             if last_exc:
                 raise last_exc
             return None
@@ -949,10 +961,34 @@ def poll_solana_deposits():
         # After updates, set waterline to min ts in unprocessed minus buffer
         try:
             rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-            if rows:
-                min_ts = min(int(r.get("ts") or 0) for r in rows if int(r.get("ts") or 0) > 0)
-                if min_ts:
-                    state.propose_solana_waterline(int(max(0, min_ts - config.HEARTBEAT_WATERLINE_SAFETY_SEC)))
+            now_ts = __import__("time").time()
+            active_ts = []
+            for r in rows:
+                rts = int(r.get("ts") or 0)
+                if not rts:
+                    continue
+                age = now_ts - rts
+                if age > getattr(config, "STALE_ROW_SEC", 86400):
+                    # Stale row -> mark for manual review and move to processed to unblock waterline
+                    out = dict(r)
+                    out["comment"] = "stale_manual_review"
+                    state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
+                    try:
+                        state.mark_solana_processed(r.get("sig"), ts=rts, reason="stale_manual_review")
+                    except Exception:
+                        pass
+                else:
+                    active_ts.append(rts)
+            # Rewrite unprocessed dropping stale rows
+            new_rows = [r for r in rows if r.get("comment") != "stale_manual_review"]
+            state.write_jsonl(config.UNPROCESSED_SIGS_FILE, new_rows)
+            if active_ts:
+                min_ts = min(active_ts)
+                state.propose_solana_waterline(int(max(0, min_ts - config.HEARTBEAT_WATERLINE_SAFETY_SEC)))
+            else:
+                # No active rows -> allow advancing to earliest processed candidate if we had any confirmed_bt_candidates
+                if 'confirmed_bt_candidates' in locals() and confirmed_bt_candidates:
+                    state.propose_solana_waterline(int(min(confirmed_bt_candidates)))
         except Exception:
             pass
 
