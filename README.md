@@ -375,29 +375,61 @@ How to create your USDC ATA (user-side):
 | VAULT_KEYPAIR | Path to vault keypair JSON (array of ints) | ✅ | - |
 | VAULT_USDC_ACCOUNT | Vault’s USDC token account (ATA) | ✅ | - |
 | USDC_MINT | USDC mint address | ✅ | - |
+| SOL_MINT | Native SOL mint (keep default) | ✅ | So1111...112 |
+| SOL_MAIN_ACCOUNT | Main SOL account (owner of vault keypair) | ✅ | - |
 | USDC_DECIMALS | USDC token decimals (base units) | ❌ | 6 |
 | USDD_DECIMALS | USDD token decimals (base units) | ❌ | 6 |
 | NEXUS_PIN | Nexus account PIN | ✅ | - |
-| NEXUS_USDD_TREASURY_ACCOUNT | Your USDD treasury account address | ✅ | - |
-| NEXUS_USDD_LOCAL_ACCOUNT | Your local USDD account address (optional) | ❌ | - |
-| NEXUS_USDD_QUARANTINE_ACCOUNT | USDD quarantine account for failed refunds | ❌ | - |
-| NEXUS_USDD_FEES_ACCOUNT | USDD account to receive minted fees | ✅ | - |
-| FLAT_FEE_USDC | Flat fee (USDC) for Solana→Nexus | ❌ | 0.1 |
-| FLAT_FEE_USDD | Tiny threshold (USDD) for Nexus→Solana | ❌ | 0.1 |
-| DYNAMIC_FEE_BPS | Dynamic fee bps on successful swaps (both directions) | ❌ | 10 |
-| SOL_MINT | Native SOL mint (for conversions/Jupiter) | ❌ | So11111111111111111111111111111111111111112 |
+| NEXUS_USDD_TREASURY_ACCOUNT | USDD treasury (receives deposits) | ✅ | - |
+| NEXUS_USDD_LOCAL_ACCOUNT | Local USDD account (tiny deposits & congestion fees) | ❌ | - |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | USDD quarantine (failed refunds) | ❌ | - |
+| NEXUS_USDD_FEES_ACCOUNT | USDD fees account (optional) | ❌ | - |
+| NEXUS_TOKEN_NAME | Token ticker expected (validation) | ❌ | USDD |
 | NEXUS_CLI_PATH | Path to Nexus CLI | ❌ | ./nexus |
-| NEXUS_TOKEN_NAME | Token ticker used for validation | ❌ | USDD |
 | NEXUS_RPC_HOST | Nexus RPC host (if applicable) | ❌ | http://127.0.0.1:8399 |
 | POLL_INTERVAL | Poll interval (seconds) | ❌ | 10 |
-| PROCESSED_SIG_FILE | File for processed Solana signatures (now key->timestamp JSON) | ❌ | processed_sigs.json |
-| PROCESSED_NEXUS_FILE | File for processed Nexus txids (now key->timestamp JSON) | ❌ | processed_nexus_txs.json |
-| ATTEMPT_STATE_FILE | File for attempt/cooldown state | ❌ | attempt_state.json |
-| FAILED_REFUNDS_FILE | JSONL file logging failed refund cases | ❌ | failed_refunds.jsonl |
-| MAX_ACTION_ATTEMPTS | Max attempts per action (mint/send/refund) | ❌ | 3 |
+| PROCESSED_SIG_FILE | Processed Solana signatures file | ❌ | processed_sigs.json |
+| PROCESSED_NEXUS_FILE | Processed Nexus txs file | ❌ | processed_nexus_txs.json |
+| ATTEMPT_STATE_FILE | Attempts / cooldown tracking | ❌ | attempt_state.json |
+| FAILED_REFUNDS_FILE | JSONL failed refund events | ❌ | failed_refunds.jsonl |
+| REFUNDED_SIGS_FILE | JSONL refunded signature log | ❌ | refunded_sigs.jsonl |
+| UNPROCESSED_SIGS_FILE | Pending Solana deposits file | ❌ | unprocessed_sigs.json |
+| MAX_ACTION_ATTEMPTS | Max attempts per action | ❌ | 3 |
 | ACTION_RETRY_COOLDOWN_SEC | Cooldown between attempts | ❌ | 300 |
+| REFUND_TIMEOUT_SEC | Age before attempting forced refund | ❌ | 3600 |
+| STALE_DEPOSIT_QUARANTINE_SEC | Age to quarantine unresolved deposits | ❌ | 86400 |
+| USDC_CONFIRM_TIMEOUT_SEC | Max seconds to await USDC send confirmation | ❌ | 600 |
+| FLAT_FEE_USDC | Flat fee (USDC) Solana→Nexus | ❌ | 0.1 |
+| FLAT_FEE_USDD | Tiny threshold (USDD) Nexus→Solana | ❌ | 0.1 |
+| DYNAMIC_FEE_BPS | Dynamic fee bps (both directions) | ❌ | 10 |
+| NEXUS_CONGESTION_FEE_USDD | Fee deducted on invalid USDD→USDC refunds | ❌ | 0.01 |
+| FEE_CONVERSION_ENABLED | Enable optional DEX fee conversions | ❌ | false |
+| FEE_CONVERSION_MIN_USDC | Min USDC base units before converting | ❌ | 0 |
+| SOL_TOPUP_MIN_LAMPORTS | Min SOL lamports before top-up | ❌ | 0 |
+| SOL_TOPUP_TARGET_LAMPORTS | Target SOL lamports | ❌ | 0 |
+| NEXUS_NXS_TOPUP_MIN | Min NXS units before top-up (placeholder) | ❌ | 0 |
+| BACKING_DEFICIT_BPS_ALERT | Bps deficit triggers alert/mint fees | ❌ | 10 |
+| BACKING_DEFICIT_PAUSE_PCT | Pause if vault < pct of circulating | ❌ | 90 |
+| BACKING_RECONCILE_INTERVAL_SEC | Interval to reconcile backing | ❌ | 3600 |
+| BACKING_SURPLUS_MINT_THRESHOLD_USDC | Vault surplus threshold to mint fees | ❌ | 20 |
 | HEARTBEAT_ENABLED | Enable on-chain heartbeat | ❌ | true |
-| NEXUS_HEARTBEAT_ASSET_ADDRESS | Asset to update with last_poll_timestamp | ❌ | - |
+| NEXUS_HEARTBEAT_ASSET_ADDRESS | Asset for last_poll_timestamp | ❌ | - |
+| NEXUS_HEARTBEAT_ASSET_NAME | Heartbeat asset name (display) | ❌ | - |
+| HEARTBEAT_MIN_INTERVAL_SEC | Min seconds between updates | ❌ | max(10,POLL_INTERVAL) |
+| HEARTBEAT_WATERLINE_ENABLED | Enable waterline scanning bounds | ❌ | true |
+| HEARTBEAT_WATERLINE_SOLANA_FIELD | Field name for Solana waterline | ❌ | last_safe_timestamp_solana |
+| HEARTBEAT_WATERLINE_NEXUS_FIELD | Field name for Nexus waterline | ❌ | last_safe_timestamp_usdd |
+| HEARTBEAT_WATERLINE_SAFETY_SEC | Safety subtraction from waterline | ❌ | 120 |
+| SOLANA_RPC_TIMEOUT_SEC | Per Solana RPC call timeout | ❌ | 8 |
+| SOLANA_TX_FETCH_TIMEOUT_SEC | Per get_transaction timeout | ❌ | 12 |
+| SOLANA_POLL_TIME_BUDGET_SEC | Time slice per Solana poll loop | ❌ | 15 |
+| SOLANA_MAX_TX_FETCH_PER_POLL | Cap tx fetch count per poll | ❌ | 120 |
+| NEXUS_CLI_TIMEOUT_SEC | Nexus CLI call timeout | ❌ | 20 |
+| NEXUS_POLL_TIME_BUDGET_SEC | Time slice per Nexus poll loop | ❌ | 15 |
+| METRICS_BUDGET_SEC | Max seconds collecting metrics | ❌ | 5 |
+| METRICS_INTERVAL_SEC | Interval for metrics print | ❌ | 30 |
+| STALE_ROW_SEC | Age to treat state rows stale | ❌ | 86400 |
+| USDC_QUARANTINE_ACCOUNT | Self-owned USDC quarantine ATA | ❌ | - |
 | HEARTBEAT_MIN_INTERVAL_SEC | Min seconds between heartbeat updates | ❌ | max(10, POLL_INTERVAL) |
 | HEARTBEAT_WATERLINE_ENABLED | Enable waterline-based scan limits | ❌ | true |
 | HEARTBEAT_WATERLINE_SOLANA_FIELD | Asset field name for Solana waterline | ❌ | last_safe_timestamp_solana |
