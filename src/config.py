@@ -36,6 +36,8 @@ NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
 NEXUS_USDD_LOCAL_ACCOUNT = os.getenv("NEXUS_USDD_LOCAL_ACCOUNT")
 NEXUS_USDD_QUARANTINE_ACCOUNT = os.getenv("NEXUS_USDD_QUARANTINE_ACCOUNT")
+# Optional USDD fees account (if you separately account for accrued fees on Nexus)
+NEXUS_USDD_FEES_ACCOUNT = os.getenv("NEXUS_USDD_FEES_ACCOUNT")
 NEXUS_PIN = os.getenv("NEXUS_PIN", "")
 USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # deprecated: USDC fees remain in vault
 
@@ -48,6 +50,18 @@ FAILED_REFUNDS_FILE = os.getenv("FAILED_REFUNDS_FILE", "failed_refunds.jsonl")
 MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
 ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
 
+# Timeout and hang prevention
+SOLANA_RPC_TIMEOUT_SEC = int(os.getenv("SOLANA_RPC_TIMEOUT_SEC", "8"))
+SOLANA_TX_FETCH_TIMEOUT_SEC = int(os.getenv("SOLANA_TX_FETCH_TIMEOUT_SEC", "12"))
+SOLANA_POLL_TIME_BUDGET_SEC = int(os.getenv("SOLANA_POLL_TIME_BUDGET_SEC", "15"))
+SOLANA_MAX_TX_FETCH_PER_POLL = int(os.getenv("SOLANA_MAX_TX_FETCH_PER_POLL", "120"))
+NEXUS_CLI_TIMEOUT_SEC = int(os.getenv("NEXUS_CLI_TIMEOUT_SEC", "20"))
+NEXUS_POLL_TIME_BUDGET_SEC = int(os.getenv("NEXUS_POLL_TIME_BUDGET_SEC", "15"))
+METRICS_BUDGET_SEC = int(os.getenv("METRICS_BUDGET_SEC", "5"))
+STALE_ROW_SEC = int(os.getenv("STALE_ROW_SEC", "86400"))  # 24 hours
+REFUNDED_SIGS_FILE = os.getenv("REFUNDED_SIGS_FILE", "refunded_sigs.jsonl")
+METRICS_INTERVAL_SEC = int(os.getenv("METRICS_INTERVAL_SEC", "30"))
+
 # USDC->USDD pipeline files (JSONL lines)
 UNPROCESSED_SIGS_FILE = os.getenv("UNPROCESSED_SIGS_FILE", "unprocessed_sigs.json")
 PROCESSED_SWAPS_FILE = os.getenv("PROCESSED_SWAPS_FILE", "processed_sigs.json")
@@ -55,14 +69,7 @@ NON_DEPOSITS_FILE = os.getenv("NON_DEPOSITS_FILE", "non_deposits.json")
 REFERENCE_COUNTER_FILE = os.getenv("REFERENCE_COUNTER_FILE", "reference_counter.json")
 REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
 STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
-REFUNDED_SIGS_FILE = os.getenv("REFUNDED_SIGS_FILE", "refunded_sigs.json")
 USDC_CONFIRM_TIMEOUT_SEC = int(os.getenv("USDC_CONFIRM_TIMEOUT_SEC", "600"))  # 10 minutes default for USDD->USDC confirmations
-STALE_ROW_SEC = int(os.getenv("STALE_ROW_SEC", str(24*3600)))  # 24h default; stale rows moved to manual review
-SOLANA_RPC_TIMEOUT_SEC = int(os.getenv("SOLANA_RPC_TIMEOUT_SEC", "8"))  # per-call soft timeout safeguard
-NEXUS_CLI_TIMEOUT_SEC = int(os.getenv("NEXUS_CLI_TIMEOUT_SEC", "12"))  # generic CLI timeout (overridable)
-SOLANA_TX_FETCH_TIMEOUT_SEC = int(os.getenv("SOLANA_TX_FETCH_TIMEOUT_SEC", "3"))  # per get_transaction budget
-SOLANA_POLL_TIME_BUDGET_SEC = int(os.getenv("SOLANA_POLL_TIME_BUDGET_SEC", "10"))  # overall per-iteration time slice
-SOLANA_MAX_TX_FETCH_PER_POLL = int(os.getenv("SOLANA_MAX_TX_FETCH_PER_POLL", "120"))  # cap transactions decoded each poll
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")
