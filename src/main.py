@@ -83,6 +83,7 @@ def read_heartbeat_waterlines() -> tuple[int, int]:
 
 
 def run():
+    print()
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
     print(f"   USDC Vault: {config.VAULT_USDC_ACCOUNT}")
@@ -90,6 +91,7 @@ def run():
     print("   Monitoring:")
     print("   - USDC → USDD: Solana deposits mapped via Nexus asset (distordiaSwap)")
     print("   - USDD → USDC: USDD deposits mapped to Solana recipients (internal state/idempotency)")
+    print()
 
     # Startup balances summary (USDC vault + USDD circulating supply)
     try:
@@ -154,6 +156,7 @@ def run():
                         if surplus > 0 and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
                             if nexus_client.debit_usdd(config.NEXUS_USDD_FEES_ACCOUNT, surplus, "FEE_RECONCILE"):
                                 print(f"[reconcile] Minted {surplus} USDD to fees account to restore 1:1 backing")
+                                print()
                                 _last_reconcile = now
                     except Exception as e:
                         print(f"[reconcile] error: {e}")
@@ -186,8 +189,22 @@ def run():
             except Exception as e:
                 print(f"Maintenance error: {e}")
 
-            poll_solana_deposits()
-            poll_nexus_usdd_deposits()
+            # Guard long-running pollers with soft timeouts so Ctrl+C remains responsive
+            loop_slice_start = time.time()
+            try:
+                poll_solana_deposits()
+            except Exception as e:
+                print(f"[loop] solana poll error: {e}")
+            if _stop_event.is_set():
+                break
+            try:
+                poll_nexus_usdd_deposits()
+            except Exception as e:
+                print(f"[loop] nexus poll error: {e}")
+            if _stop_event.is_set():
+                break
+            # If this iteration exceeded 80% of poll interval, skip extra waiting granularity
+            elapsed = time.time() - loop_slice_start
             state.save_state()
             # Apply any conservative waterline proposals, if present
             try:
@@ -201,9 +218,22 @@ def run():
                 state.save_state()
             except Exception as e:
                 print(f"Prune error: {e}")
-            if _stop_event.wait(config.POLL_INTERVAL):
+            remaining = max(0, config.POLL_INTERVAL - elapsed)
+            # Sleep in short chunks to react quickly to Ctrl+C
+            sleep_chunk = min(1.0, remaining)
+            slept = 0.0
+            while slept < remaining and not _stop_event.is_set():
+                _stop_event.wait(sleep_chunk)
+                slept += sleep_chunk
+                if remaining - slept < sleep_chunk:
+                    sleep_chunk = remaining - slept
+                # break early if stop requested
+                if _stop_event.is_set():
+                    break
+            if _stop_event.is_set():
                 break
     except KeyboardInterrupt:
+        print()
         print("Shutting down…")
     finally:
         state.save_state()
