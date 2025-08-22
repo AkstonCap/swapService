@@ -6,10 +6,17 @@ A Python service that enables automatic swapping between USDC (Solana) and USDD 
 
 ### USDC->USDD
 
-Send USDC from a solana wallet which allow memos (Glow, etc.) in the following format:
-Send to: `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ`
-Memo/note: `nexus:<your Nexus USDD account>`
-Amount: minimum 0.2 USDC
+Send USDC from a solana wallet which allow memos in the following format:
+
+- Send to: `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ`
+- Memo/note: `nexus:<your Nexus USDD account>`
+- Amount: minimum `0.100101 USDC`
+
+Fees: 0.1 USDC + 0.1% of amount.
+
+Optionally use the local solana CLI:
+
+`spl-token transfer \EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \<amount> \Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ \--with-memo "nexus:<USDD receival account>" \--url https://api.mainnet-beta.solana.com`
 
 ### USDD->USDC
 
