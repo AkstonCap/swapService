@@ -10,6 +10,8 @@ from solders.hash import Hash
 from solders.transaction import Transaction, VersionedTransaction
 from solders.message import Message
 from struct import pack
+import threading, queue
+
 
 from . import config
 
@@ -81,9 +83,31 @@ def get_associated_token_address(*, owner: PublicKey, mint: PublicKey) -> Public
     return ata
 
 
+def _rpc_call(method, *args, timeout: Optional[float] = None, **kwargs):
+    """Run an RPC client method in a thread with timeout to avoid hangs."""
+    if timeout is None:
+        timeout = getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8)
+    q: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
+    def _runner():
+        try:
+            res = method(*args, **kwargs)
+            q.put((True, res))
+        except Exception as e:  # pragma: no cover
+            q.put((False, e))
+    th = threading.Thread(target=_runner, daemon=True)
+    th.start()
+    try:
+        ok, val = q.get(timeout=timeout)
+    except Exception:  # timeout
+        raise TimeoutError(f"RPC call timeout after {timeout}s: {getattr(method, '__name__', method)}")
+    if ok:
+        return val
+    raise val  # re-raise exception from thread
+
+
 def _get_latest_blockhash_str(client: Client) -> Optional[str]:
     try:
-        resp = client.get_latest_blockhash()
+        resp = _rpc_call(client.get_latest_blockhash, timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
     except Exception:
         return None
     # Prefer to_json for stability
@@ -106,22 +130,24 @@ def _get_latest_blockhash_str(client: Client) -> Optional[str]:
 
 
 def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Keypair) -> str:
-    """Build, sign (legacy) and send a transaction using solders; return signature string."""
+    """Build, sign (legacy) and send a transaction using solders; return signature string.
+    Wrapped with per-step RPC timeouts.
+    """
     client = Client(config.RPC_URL)
     bh = _get_latest_blockhash_str(client)
     if not bh:
         raise RuntimeError("Failed to fetch recent blockhash")
     recent = Hash.from_string(bh)
     tx = Transaction.new_signed_with_payer(instructions, kp.pubkey(), [kp], recent)
-    send_resp = client.send_raw_transaction(bytes(tx))
+    send_resp = _rpc_call(client.send_raw_transaction, bytes(tx), timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
     sig = _rpc_get_result(send_resp)
     if not isinstance(sig, str):
         raise RuntimeError(f"Failed to send tx, unexpected response: {send_resp}")
+    # Fire-and-forget confirmation with timeout; ignore errors
     try:
-        client.confirm_transaction(sig, commitment="confirmed")
+        _rpc_call(client.confirm_transaction, sig, commitment="confirmed", timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
     except Exception:
         pass
-    # store global last signature
     global last_sent_sig
     last_sent_sig = sig
     return sig
@@ -148,7 +174,7 @@ def get_vault_sol_balance() -> int:
     try:
         client = Client(config.RPC_URL)
         kp = load_vault_keypair()
-        resp = client.get_balance(kp.pubkey())
+        resp = _rpc_call(client.get_balance, kp.pubkey())
         val = _rpc_get_value(resp)
         if isinstance(val, dict):
             return int(val.get("value") or 0)
@@ -162,7 +188,7 @@ def get_vault_sol_balance() -> int:
 def get_token_account_balance(token_account_addr: str) -> int:
     try:
         client = Client(config.RPC_URL)
-        resp = client.get_token_account_balance(PublicKey.from_string(token_account_addr))
+        resp = _rpc_call(client.get_token_account_balance, PublicKey.from_string(token_account_addr))
         val = _rpc_get_value(resp)
         amt = None
         if isinstance(val, dict):
@@ -274,23 +300,22 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
         owner = PublicKey.from_string(to_owner_addr)
         dest_ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
         client = Client(config.RPC_URL)
-        ata_info = _rpc_get_value(client.get_account_info(dest_ata))
+        ata_info = _rpc_get_value(_rpc_call(client.get_account_info, dest_ata))
         if ata_info is None:
             print("Recipient USDC ATA is missing; not creating it. Ask recipient to initialize their USDC ATA.")
             return False
-
-        ixs = [
-            transfer_checked(
-                program_id=TOKEN_PROGRAM_ID,
-                source=config.VAULT_USDC_ACCOUNT,
-                mint=config.USDC_MINT,
-                dest=dest_ata,
-                owner=kp.pubkey(),
-                amount=amount_base_units,
-                decimals=config.USDC_DECIMALS,
-                signers=[],
-            )
-        ]
+        if amount_base_units <= 0:
+            return True
+        ixs = [transfer_checked(
+            program_id=TOKEN_PROGRAM_ID,
+            source=config.VAULT_USDC_ACCOUNT,
+            mint=config.USDC_MINT,
+            dest=dest_ata,
+            owner=kp.pubkey(),
+            amount=amount_base_units,
+            decimals=config.USDC_DECIMALS,
+            signers=[],
+        )]
         mix = _memo_ix(memo)
         if mix:
             ixs.append(mix)
@@ -306,7 +331,7 @@ def _is_token_account_for_mint(token_account_addr: str, mint: PublicKey) -> bool
     """Return True if the address is an SPL token account for the given mint."""
     try:
         client = Client(config.RPC_URL)
-        resp = client.get_account_info(PublicKey.from_string(token_account_addr), encoding="jsonParsed")
+        resp = _rpc_call(client.get_account_info, PublicKey.from_string(token_account_addr), encoding="jsonParsed")
         val = _rpc_get_value(resp)
         if not val or not isinstance(val, dict):
             return False
@@ -424,7 +449,10 @@ def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]
     seen = set()
     for addr in addresses:
         try:
-            resp = client.get_signatures_for_address(PublicKey.from_string(addr), limit=search_limit)
+            try:
+                resp = _rpc_call(client.get_signatures_for_address, PublicKey.from_string(addr), limit=search_limit)
+            except TimeoutError:
+                continue
             js = _rpc_get_value(resp)
             if isinstance(js, list):
                 sig_list = js
@@ -442,7 +470,15 @@ def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]
             seen.add(sig)
             # Fetch transaction to inspect memo instruction
             try:
-                tx_resp = client.get_transaction(sig, encoding="jsonParsed")
+                try:
+                    tx_resp = _rpc_call(
+                        client.get_transaction,
+                        sig,
+                        encoding="jsonParsed",
+                        timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8)),
+                    )
+                except TimeoutError:
+                    continue
                 tx_val = _rpc_get_result(tx_resp)
             except Exception:
                 continue
@@ -500,7 +536,7 @@ def has_usdc_ata(owner_addr: str) -> bool:
         client = Client(config.RPC_URL)
         owner = PublicKey.from_string(owner_addr)
         ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
-        info = _rpc_get_value(client.get_account_info(ata))
+        info = _rpc_get_value(_rpc_call(client.get_account_info, ata))
         return info is not None
     except Exception:
         return False
