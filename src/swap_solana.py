@@ -91,6 +91,9 @@ def poll_solana_deposits():
     from solana.rpc.api import Client
     from solders.signature import Signature
     try:
+        import time as _time
+        poll_start = _time.time()
+        fetch_count = 0
         client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
         limit = 100
         # --- Pagination over signatures to avoid missing older deposits ---
@@ -102,9 +105,23 @@ def poll_solana_deposits():
             kwargs = {"limit": limit}
             if before_sig:
                 kwargs["before"] = before_sig
+            # Fetch each page with timeout to avoid hangs
+            import queue as _q, threading as _th
+            _result_q: "_q.Queue[tuple[bool, object]]" = _q.Queue(maxsize=1)
+            def _fetch_page():
+                try:
+                    resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, **kwargs)
+                    _result_q.put((True, resp))
+                except Exception as e:  # pragma: no cover
+                    _result_q.put((False, e))
+            _t = _th.Thread(target=_fetch_page, daemon=True)
+            _t.start()
             try:
-                page_resp = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, **kwargs)
+                ok, page_resp = _result_q.get(timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
             except Exception:
+                _log("USDC_SIG_PAGE_TIMEOUT", page=pages)
+                break
+            if not ok:
                 break
             page_list = _normalize_get_sigs_response(page_resp)
             if not page_list:
@@ -153,6 +170,7 @@ def poll_solana_deposits():
             from typing import Any
             import json as _json
             import threading, queue, time as _time
+            fetch_timeout = getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
 
             def _normalize_response(resp: Any):
                 if isinstance(resp, dict):
@@ -201,7 +219,7 @@ def poll_solana_deposits():
                 th = threading.Thread(target=_call, daemon=True)
                 th.start()
                 try:
-                    ok, val = result_q.get(timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8))
+                    ok, val = result_q.get(timeout=fetch_timeout)
                 except Exception:
                     # Timed out: leave thread to die, continue attempts
                     continue
@@ -384,6 +402,17 @@ def poll_solana_deposits():
             pass
 
         for sig in sig_list:
+            # Cooperative stop: respect global stop event if present
+            try:
+                from .main import _stop_event as _global_stop
+                if _global_stop and _global_stop.is_set():
+                    break
+            except Exception:
+                pass
+            # Time budget / fetch limit guard
+            if (fetch_count >= getattr(config, "SOLANA_MAX_TX_FETCH_PER_POLL", 120)) or ((_time.time() - poll_start) > getattr(config, "SOLANA_POLL_TIME_BUDGET_SEC", 10)):
+                _log("USDC_POLL_BUDGET_EXHAUSTED", fetched=fetch_count, elapsed=round(_time.time()-poll_start,2))
+                break
             if _is_sig_processed(sig):
                 continue
             try:
@@ -412,6 +441,7 @@ def poll_solana_deposits():
                 continue
 
             all_instrs = list(_iter_all_instructions(tx))
+            fetch_count += 1
 
             # Collect all token transfers to the vault in this tx (instruction path)
             transfer_events = []
@@ -497,6 +527,11 @@ def poll_solana_deposits():
                                 r["comment"] = "ready for processing"
                                 break
                         _log("USDC_READY", sig=sig, nexus=recv, amount=amount_usdc_units, multi=len(transfer_events))
+                        try:
+                            print(f"[USDC_READY] sig={sig} receival_account={recv} amount_usdc_units={amount_usdc_units}")
+                            print()
+                        except Exception:
+                            pass
                     elif raw_cands:
                         def _pred2(r):
                             return r.get("sig") == sig
@@ -539,6 +574,12 @@ def poll_solana_deposits():
                                 pass
                             mark_processed = True
                             _log("USDC_REFUNDED", sig=sig, amount=amount_usdc_units, reason="missing_memo")
+                            try:
+                                refundable = max(0, amount_usdc_units - flat_fee_units)
+                                print(f"[USDC_REFUNDED] sig={sig} refundable_units={refundable} reason=missing_memo")
+                                print()
+                            except Exception:
+                                pass
                         else:
                             page_has_unprocessed_deposit = True
 
@@ -642,6 +683,11 @@ def poll_solana_deposits():
                                         r["comment"] = "ready for processing"
                                         break
                                 _log("USDC_READY", sig=sig, nexus=recv, amount=amount_usdc_units, path="delta")
+                                try:
+                                    print(f"[USDC_READY] sig={sig} receival_account={recv} amount_usdc_units={amount_usdc_units}")
+                                    print()
+                                except Exception:
+                                    pass
                             else:
                                 refundable = max(0, amount_usdc_units - flat_fee_units)
                                 if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing/invalid memo"):
@@ -669,6 +715,12 @@ def poll_solana_deposits():
                                         pass
                                     mark_processed = True
                                     _log("USDC_REFUNDED", sig=sig, amount=amount_usdc_units, reason="invalid_memo", path="delta")
+                                    try:
+                                        refundable = max(0, amount_usdc_units - flat_fee_units)
+                                        print(f"[USDC_REFUNDED] sig={sig} refundable_units={refundable} reason=invalid_memo")
+                                        print()
+                                    except Exception:
+                                        pass
                                 else:
                                     page_has_unprocessed_deposit = True
                 except Exception:
@@ -786,9 +838,19 @@ def poll_solana_deposits():
                             x["comment"] = "debited, awaiting confirmations"
                             return x
                         state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
+                        try:
+                            print(f"[USDC_DEBITED] sig={sig} txid={txid} ref={ref} net_usdc={net_usdc} usdd_units={usdd_units}")
+                            print()
+                        except Exception:
+                            pass
                     else:
                         # Release reservation on failure
                         state.release_reservation("debit", sig)
+                        try:
+                            print(f"[USDC_DEBIT_FAIL] sig={sig} net_usdc={net_usdc} reason=debit_failed")
+                            print()
+                        except Exception:
+                            pass
                         # Debit failed: attempt USDC refund (retain flat fee only)
                         src = r.get("from")
                         if src:
@@ -872,6 +934,11 @@ def poll_solana_deposits():
                                 pass
                             _log("USDC_QUARANTINED", sig=r.get("sig"), reason="stale_unprocessed", age=int(now_time - ts))
                             try:
+                                print(f"[USDC_QUARANTINED] sig={r.get('sig')} amount_units={refundable} reason=stale_unprocessed age={int(now_time - ts)}")
+                                print()
+                            except Exception:
+                                pass
+                            try:
                                 state.release_reservation("debit", r.get("sig"))
                             except Exception:
                                 pass
@@ -896,6 +963,11 @@ def poll_solana_deposits():
                             "amount_units": amt,
                         })
                         _log("USDC_STALE_DEBIT", sig=r.get("sig"), age=int(now_time - ts), txid=r.get("txid"))
+                        try:
+                            print(f"[USDC_QUARANTINED] sig={r.get('sig')} amount_units={amt} reason=stale_debit_no_confirm age={int(now_time - ts)}")
+                            print()
+                        except Exception:
+                            pass
                         # Keep it in list for potential later confirmation, do not refund/quarantine.
                         new_unprocessed.append(r)
                         continue
