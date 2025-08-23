@@ -20,7 +20,7 @@ Optionally use the local solana CLI:
 
 ### USDD->USDC (Asset‑Mapped Receival Account)
 
-The USDD → USDC direction no longer uses a `reference` like `solana:<address>`. Instead, you publish (or update) a Nexus Asset **you own** that maps the USDD transfer txid to your Solana receival address. The service matches on two fields: `txid_toService` (the USDD credit transaction hash) AND `owner` (the signature chain that sent the USDD). When it finds an asset row containing a `receival_account`, it sends USDC there.
+Publish (or update) a Nexus Asset **you own** that maps the USDD transfer txid to your Solana receival address. The service matches on two fields: `txid_toService` (the USDD credit transaction hash) AND `owner` (the signature chain that sent the USDD). When it finds an asset row containing a `receival_account`, it sends USDC there.
 
 High‑level flow:
 1. You send USDD to the service treasury.
