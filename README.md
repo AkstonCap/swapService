@@ -18,28 +18,68 @@ Optionally use the local solana CLI:
 
 `spl-token transfer \EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \<amount> \Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ \--with-memo "nexus:<USDD receival account>" \--url https://api.mainnet-beta.solana.com`
 
-### USDD->USDC
+### USDD->USDC (Asset‑Mapped Receival Account)
 
-Simple steps to swap USDD for USDC:
+The USDD → USDC direction no longer uses a `reference` like `solana:<address>`. Instead, you publish (or update) a Nexus Asset **you own** that maps the USDD transfer txid to your Solana receival address. The service matches on two fields: `txid_toService` (the USDD credit transaction hash) AND `owner` (the signature chain that sent the USDD). When it finds an asset row containing a `receival_account`, it sends USDC there.
 
-1) Ensure your Solana wallet has a USDC ATA
-  - Most wallets (Phantom, Solflare, Glow) auto-create it on first receive.
-  - If you’re a power user, you can pre-create it with spl-token CLI.
+High‑level flow:
+1. You send USDD to the service treasury.
+2. You obtain the resulting transaction `txid` (returned by the CLI / wallet).
+3. You create (or update) an asset you own adding fields:
+  - `txid_toService` : the txid from step 2
+  - `receival_account` : either your Solana USDC token account (ATA) OR your Solana wallet address (the service will derive the ATA if it already exists). 
+4. Service detects the credit, queries assets filtering by `txid_toService=<txid>` AND `owner=<sender_owner_hash>`, validates the receival account, then sends net USDC.
+5. If no matching asset appears before the refund timeout, the credit is moved into a refund / trade-balance check flow and ultimately refunded.
 
-2) Send USDD on Nexus to the service’s USDD treasury
-  - Send to: the service’s `NEXUS_USDD_TREASURY_ACCOUNT` (ask the operator or see the service startup banner).
-  - Reference: `solana:<YOUR_SOLANA_ADDRESS>`
-    - Use your wallet owner address; advanced users may supply an existing USDC token account address instead.
-  - Amount: send more than the tiny threshold (default `FLAT_FEE_USDD = 0.1`) so it’s not treated as dust.
+Detailed steps:
 
-3) Receive USDC on Solana
-  - The service sends USDC from its vault to your USDC ATA. It will not create your ATA.
-  - If your ATA doesn’t exist or the reference address is invalid, your USDD is refunded with a reason (a small congestion fee may be deducted if configured).
+1) Ensure your Solana wallet already has (or will auto-create) a USDC ATA.
+  - Most consumer wallets (Phantom, Solflare, Glow) auto-create it on first receive.
+  - Power users can pre-create it: `spl-token create-account <USDC_MINT>`.
+
+2) Send USDD to the treasury
+  - To: `NEXUS_USDD_TREASURY_ACCOUNT`
+  - Amount: ≥ `MIN_CREDIT_USDD` (default 0.100101). Amounts < threshold are treated as micro credits (100% fee) and no USDC will be sent.
+  - Command example (token debit):
+    ```bash
+    nexus finance/debit/token from=USDD to=<TREASURY_ACCOUNT> amount=<AMOUNT_IN_BASE_UNITS> pin=<PIN>
+    ```
+    or (account debit if you hold a USDD account object):
+    ```bash
+    nexus finance/debit/account from=<YOUR_USDD_ACCOUNT> to=<TREASURY_ACCOUNT> amount=<AMOUNT_UNITS> pin=<PIN>
+    ```
+  - Capture the `txid` from the CLI output.
+
+3) Create or update the mapping asset (owned by the same signature chain that performed the debit):
+  - If you do not already have an asset container for swaps, you can create one with mutable fields:
+    ```bash
+    nexus register/create/asset name=swapRecv mutable=txid_toService,receival_account
+    ```
+  - Then set (or update) the fields for this specific txid:
+    ```bash
+    nexus register/write/asset name=swapRecv data='{"txid_toService":"<TXID>","receival_account":"<SOLANA_OR_USDC_TOKEN_ACCOUNT>"}'
+    ```
+    (If your CLI supports partial field updates you can just write those two fields.)
+  - Alternative: create one asset per swap (simpler, higher on‑chain object count):
+    ```bash
+    nexus register/create/asset name=swapRecv_<SHORT_TXID> data='{"txid_toService":"<TXID>","receival_account":"<SOLANA_OR_TOKEN_ACCOUNT>"}'
+    ```
+
+4) Wait for service processing
+  - Service polls, resolves your Solana address via `find_asset_receival_account_by_txid_and_owner`. If the supplied value is a wallet address (not a USDC token account), it attempts to locate an existing USDC ATA; it will NOT create a missing one.
+  - On success it sends net USDC (after flat + dynamic fees, if configured) with a memo referencing the originating Nexus txid.
+
+5) Refund / fallback cases
+  - No asset found within `REFUND_TIMEOUT_SEC`: credit moves to refund logic (may quarantine after repeated failures).
+  - Invalid/malformed `receival_account`: refunded.
+  - Solana send fails repeatedly: refunded.
+  - Micro credit (< threshold): recorded as fees instantly; no asset lookup needed.
 
 Notes
-- Reference prefix is case-insensitive (`solana:` or `SOLANA:` both work).
-- Tiny USDD deposits ≤ `FLAT_FEE_USDD` are routed to the service’s local USDD account and not swapped.
-- If a send fails after retries, the deposit is refunded; persistent failures are quarantined and logged for manual review.
+- Asset owner must match the sender’s `owner` field of the USDD credit; otherwise it is ignored.
+- You can batch multiple swaps by using multiple assets or updating the same asset sequentially (only the row with matching `txid_toService` is considered).
+- Tiny USDD credits below `MIN_CREDIT_USDD` (default 0.100101) are treated as fees (100% micro fee policy) and skipped.
+- Keep the asset published before the refund timeout to avoid unnecessary refunds.
 
 
 ## How It Works
