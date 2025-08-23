@@ -11,6 +11,8 @@ USDD_STATUS_PROCESSED = "processed"  # (processed file)
 USDD_STATUS_FEES = "processed as fees"
 USDD_STATUS_REFUND_PENDING = "refund pending"
 USDD_STATUS_QUARANTINED = "quarantined"
+USDD_STATUS_TRADE_BAL_CHECK = "trade balance to be checked"
+USDD_STATUS_COLLECTING_REFUND = "collecting refund"
 _USDD_ALLOWED_STATUSES = {
     USDD_STATUS_PENDING,
     USDD_STATUS_READY,
@@ -21,6 +23,8 @@ _USDD_ALLOWED_STATUSES = {
     USDD_STATUS_FEES,
     USDD_STATUS_REFUND_PENDING,
     USDD_STATUS_QUARANTINED,
+    USDD_STATUS_TRADE_BAL_CHECK,
+    USDD_STATUS_COLLECTING_REFUND,
 }
 
 
@@ -78,16 +82,37 @@ def poll_nexus_usdd_deposits():
     processed_path = "processed_txids.json"
 
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-    base_cmd = [
-        config.NEXUS_CLI,
+    # Build base command. We use a WHERE clause to restrict to CREDIT contracts TO treasury and amount >= threshold.
+    base_cmd = [config.NEXUS_CLI]
+    projection = (
         "finance/transactions/token/"
-        "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount",
-        f"name={treasury_addr}",
-        "sort=timestamp",
-        "order=desc",
-    ]
+        "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
+    )
+    base_cmd.append(projection)
+    base_cmd.append(f"name={treasury_addr}")
+    base_cmd.append("sort=timestamp")
+    base_cmd.append("order=desc")
+
+    # Proper WHERE clause (Query DSL) for server-side filtering if enabled.
+    # We only want CREDIT contracts where contracts.to=treasury_addr AND contracts.amount >= MIN_CREDIT_USDD
+    # DSL operates over 'results' root; transactions list returns objects where contracts[] nested.
+    # We cannot address array members directly with > filter per doc, so we still download all then client-filter by OP/to.
+    # However if CLI supports simple amount filter we'll keep backward compatibility.
+    # Use WHERE only if flagged to avoid incompatibility on older CLI.
+    where_threshold = getattr(config, "MIN_CREDIT_USDD", None)
+    if getattr(config, "USE_NEXUS_WHERE_FILTER_USDD", True) and where_threshold:
+        # Attempt to filter by amount and OP CREDIT *heuristically*; if unsupported the CLI should ignore or error (logged).
+        # Syntax example from docs: command WHERE 'results.balance>10'
+        # For nested contracts we fall back to 'where=contracts.amount>THRESHOLD' if supported; else rely on local filtering.
+        try:
+            # Prefer a conservative filter just on amount to reduce small tx volume (OP/to filtered client-side anyway)
+            base_cmd.append(f"where='contracts.amount>={where_threshold}'")
+        except Exception:
+            pass
     limit = 100
     max_pages = int(getattr(config, "NEXUS_MAX_PAGES", 5))
+    # Anti-DoS: Limit processing per loop iteration
+    MAX_PROCESS_PER_LOOP = getattr(config, "MAX_CREDITS_PER_LOOP", 100)
 
     # Load current sets
     unprocessed = state.read_jsonl(unprocessed_path)
@@ -108,8 +133,10 @@ def poll_nexus_usdd_deposits():
     try:
         page_ts_candidates: list[int] = []
         backlog_truncated = False
+        processed_count = 0
         # Step 1 & 2: fetch treasury credits with pagination
         for page in range(max_pages):
+            cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
                 res = subprocess.run(
@@ -140,7 +167,14 @@ def poll_nexus_usdd_deposits():
                     page_ts_candidates.append(ts)
                     min_ts_page = ts if (min_ts_page is None or ts < min_ts_page) else min_ts_page
             # Process credits
+            micro_aggregated: list[dict] = []  # buffer of micro credits to aggregate (no owner lookup)
             for tx in txs:
+                # Check processing limit for this loop iteration
+                if processed_count >= MAX_PROCESS_PER_LOOP:
+                    _log("USDD_LOOP_LIMIT_REACHED", processed=processed_count, remaining=len(txs) - txs.index(tx))
+                    backlog_truncated = True
+                    break
+                    
                 if not isinstance(tx, dict):
                     continue
                 txid = tx.get("txid")
@@ -179,6 +213,32 @@ def poll_nexus_usdd_deposits():
                     amount_dec = _parse_decimal_amount(c.get("amount"))
                     if amount_dec <= 0:
                         continue
+                        
+                    # Anti-DoS: Check minimum credit threshold
+                    min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
+                    if amount_dec < min_credit_threshold:
+                        # Micro-credit: treat entirely as fees. Optionally skip owner lookup to save RPC.
+                        micro_fee_pct = getattr(config, "MICRO_CREDIT_FEE_PCT", 100)
+                        owner_val = None
+                        if not getattr(config, "SKIP_OWNER_LOOKUP_FOR_MICRO_USDD", True):
+                            owner_val = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        micro_row = {
+                            "txid": txid,
+                            "ts": ts,
+                            "from": sender,
+                            "owner": owner_val,
+                            "amount_usdd": str(amount_dec),
+                            "comment": "processed, micro credit (fee only)",
+                            "min_threshold": float(min_credit_threshold),
+                            "micro_fee_pct": micro_fee_pct,
+                        }
+                        micro_aggregated.append(micro_row)
+                        # Do not count micro credits toward per-loop limit unless configured
+                        if getattr(config, "MICRO_CREDIT_COUNT_AGAINST_LIMIT", False):
+                            processed_count += 1
+                        processed_txids.add(txid)
+                        continue
+                        
                     flat_usdd_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
                     dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
                     dyn_fee_dec = (amount_dec * Decimal(max(0, dyn_bps))) / Decimal(10000)
@@ -193,9 +253,11 @@ def poll_nexus_usdd_deposits():
                         }
                         state.append_jsonl(processed_path, row)
                         processed_txids.add(txid)
+                        processed_count += 1
                         continue
                     if txid in unprocessed_txids:
                         continue
+                    # Owner lookup only for non-micro credits
                     owner = (nexus_client.get_account_info(sender) or {}).get("owner")
                     row = {
                         "txid": txid,
@@ -209,7 +271,15 @@ def poll_nexus_usdd_deposits():
                     state.append_jsonl(unprocessed_path, row)
                     unprocessed.append(row)
                     unprocessed_txids.add(txid)
+                    processed_count += 1
                     _log("USDD_QUEUED", txid=txid, amount=str(amount_dec))
+            # Flush aggregated micro credits (single append for batch for lower IO).
+            if micro_aggregated:
+                # We still append individually for JSONL integrity but after loop to reduce interleaving.
+                for mr in micro_aggregated:
+                    state.append_jsonl(processed_path, mr)
+                    _log("USDD_MICRO_CREDIT", txid=mr.get("txid"), amount=mr.get("amount_usdd"), action="fee_only")
+
             # Break conditions
             if len(txs) < limit:
                 break  # no more pages
@@ -312,8 +382,8 @@ def poll_nexus_usdd_deposits():
                                     def _pred_rp3(x):
                                         return x.get("txid") == txid
                                     def _upd_rp3(x):
-                                        if x.get("comment") not in (USDD_STATUS_REFUNDED, USDD_STATUS_QUARANTINED):
-                                            x["comment"] = USDD_STATUS_REFUND_PENDING
+                                        if x.get("comment") not in (USDD_STATUS_REFUNDED, USDD_STATUS_QUARANTINED, USDD_STATUS_TRADE_BAL_CHECK, USDD_STATUS_COLLECTING_REFUND):
+                                            x["comment"] = USDD_STATUS_TRADE_BAL_CHECK
                                         return x
                                     state.update_jsonl_row(unprocessed_path, _pred_rp3, _upd_rp3)
 
@@ -413,9 +483,9 @@ def poll_nexus_usdd_deposits():
                 unprocessed = [x for x in unprocessed if x.get("txid") != txid]
                 state.write_jsonl(unprocessed_path, unprocessed)
                 continue
-            # Allocate reference and persist intent BEFORE sending to close crash window.
-            ref = state.next_reference()
-            memo = str(ref)
+            # Allocate reference (unique integer) BUT memo must carry nexus txid per spec: nexus_txid:<txid>
+            ref = state.next_reference()  # still stored for internal auditing
+            memo = f"nexus_txid:{txid}"
             # Persist send intent (idempotency anchor)
             def _pred_intent(x):
                 return x.get("txid") == txid and x.get("comment") == USDD_STATUS_SENDING and not x.get("reference")
@@ -567,8 +637,118 @@ def poll_nexus_usdd_deposits():
                                 state.append_jsonl(processed_path, row)
                                 _log("USDD_REFUND_QUARANTINED", txid=r.get("txid"), reason="retry_fail")
                                 continue
+            if r.get("comment") == USDD_STATUS_TRADE_BAL_CHECK:
+                new_unprocessed.append(r)
+                continue
             new_unprocessed.append(r)
         state.write_jsonl(unprocessed_path, new_unprocessed)
+
+        # Aggregate trade balance refunds: promote earliest per sender, aggregate others
+        try:
+            rows_tb = state.read_jsonl(unprocessed_path)
+            per_sender: dict[str, list[dict]] = {}
+            for row in rows_tb:
+                if row.get("comment") == USDD_STATUS_TRADE_BAL_CHECK and row.get("from"):
+                    per_sender.setdefault(row["from"], []).append(row)
+            changed = False
+            for sender, lst in per_sender.items():
+                if len(lst) <= 1:
+                    continue
+                lst.sort(key=lambda x: int(x.get("ts") or x.get("timestamp") or 0))
+                collector = lst[0]
+                def _pred_coll(x):
+                    return x.get("txid") == collector.get("txid") and x.get("comment") == USDD_STATUS_TRADE_BAL_CHECK
+                def _upd_coll(x):
+                    x["comment"] = USDD_STATUS_COLLECTING_REFUND
+                    return x
+                if state.update_jsonl_row(unprocessed_path, _pred_coll, _upd_coll):
+                    changed = True
+                for extra in lst[1:]:
+                    txid_ex = extra.get("txid")
+                    if not txid_ex:
+                        continue
+                    row_out = dict(extra)
+                    row_out["comment"] = "processed (aggregated trade balance)"
+                    state.append_jsonl(processed_path, row_out)
+                    try:
+                        state.mark_nexus_processed(txid_ex, ts=int(extra.get("ts") or extra.get("timestamp") or 0), reason="aggregated_trade_balance")
+                    except Exception:
+                        pass
+                    changed = True
+            if changed:
+                # Remove aggregated rows from unprocessed
+                keep_rows = [r for r in state.read_jsonl(unprocessed_path) if r.get("comment") != "processed (aggregated trade balance)"]
+                state.write_jsonl(unprocessed_path, keep_rows)
+        except Exception:
+            pass
+
+        # Execute consolidated refund for collecting trade balance rows
+        try:
+            rows_collect = state.read_jsonl(unprocessed_path)
+            processed_rows_cache = None
+            changed_collect = False
+            for r in rows_collect:
+                if r.get("comment") != USDD_STATUS_COLLECTING_REFUND:
+                    continue
+                sender = r.get("from")
+                if not sender:
+                    continue
+                # Idempotency: skip if already refunded
+                if r.get("txid") in refunded_txids:
+                    continue
+                refund_key = f"usdd_collect_refund:{r.get('txid')}"
+                if not state.should_attempt(refund_key):
+                    continue
+                state.record_attempt(refund_key)
+                # Lazy load processed rows once
+                if processed_rows_cache is None:
+                    try:
+                        processed_rows_cache = state.read_jsonl(processed_path)
+                    except Exception:
+                        processed_rows_cache = []
+                from decimal import Decimal as _D
+                total_dec = _parse_decimal_amount(r.get("amount_usdd"))
+                # Include aggregated entries already moved to processed for this sender
+                for pr in processed_rows_cache:
+                    if pr.get("from") == sender and pr.get("comment") == "processed (aggregated trade balance)":
+                        try:
+                            total_dec += _parse_decimal_amount(pr.get("amount_usdd"))
+                        except Exception:
+                            continue
+                amt_str = _format_token_amount(total_dec, config.USDD_DECIMALS)
+                reason = "aggregated_refund"
+                if nexus_client.refund_usdd(sender, amt_str, reason):
+                    # Mark collecting row refunded
+                    row_out = dict(r)
+                    row_out["comment"] = USDD_STATUS_REFUNDED
+                    row_out["aggregated_refund_total"] = amt_str
+                    state.append_jsonl(processed_path, row_out)
+                    refunded_txids.add(r.get("txid"))
+                    changed_collect = True
+                else:
+                    attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                    if attempts >= config.MAX_ACTION_ATTEMPTS:
+                        row_q = dict(r)
+                        row_q["comment"] = USDD_STATUS_QUARANTINED
+                        row_q["aggregated_refund_total_attempted"] = amt_str
+                        state.append_jsonl(processed_path, row_q)
+                        changed_collect = True
+            if changed_collect:
+                # Rewrite unprocessed without refunded/quarantined collecting rows
+                keep_rows = []
+                for r in rows_collect:
+                    if r.get("comment") == USDD_STATUS_COLLECTING_REFUND:
+                        if r.get("txid") in refunded_txids:
+                            continue
+                        # If moved to quarantined we added processed row, drop from unprocessed
+                        # Determine if quarantined by searching processed cache for txid with QUARANTINED
+                        if processed_rows_cache is not None:
+                            if any((p.get("txid") == r.get("txid") and p.get("comment") == USDD_STATUS_QUARANTINED) for p in processed_rows_cache):
+                                continue
+                    keep_rows.append(r)
+                state.write_jsonl(unprocessed_path, keep_rows)
+        except Exception:
+            pass
 
         # Prune stale (> STALE_ROW_SEC) rows to processed for manual review so they do not block waterline
         try:

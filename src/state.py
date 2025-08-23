@@ -726,3 +726,40 @@ def next_reference() -> int:
         except Exception:
             pass
         return int(val)
+
+# Ignored micro deposit tracking (optional, lightweight counters only)
+_ignored_counters = {"usdc": 0, "usdd": 0}
+_last_vault_balance_cache = None
+
+def increment_ignored(kind: str, count: int = 1):
+    try:
+        if kind in _ignored_counters:
+            _ignored_counters[kind] += count
+    except Exception:
+        pass
+
+def get_ignored_counters():
+    return dict(_ignored_counters)
+
+LAST_VAULT_BAL_PATH = getattr(config, "LAST_VAULT_BALANCE_FILE", "last_vault_balance.json")
+
+def load_last_vault_balance() -> int:
+    global _last_vault_balance_cache
+    if _last_vault_balance_cache is not None:
+        return _last_vault_balance_cache
+    try:
+        with open(LAST_VAULT_BAL_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            _last_vault_balance_cache = int(data.get("balance", 0))
+    except Exception:
+        _last_vault_balance_cache = 0
+    return _last_vault_balance_cache
+
+def save_last_vault_balance(balance_units: int):
+    global _last_vault_balance_cache
+    _last_vault_balance_cache = int(balance_units or 0)
+    try:
+        with open(LAST_VAULT_BAL_PATH, "w", encoding="utf-8") as f:
+            json.dump({"balance": _last_vault_balance_cache}, f)
+    except Exception:
+        pass

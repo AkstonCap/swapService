@@ -94,10 +94,40 @@ def poll_solana_deposits():
         import time as _time
         poll_start = _time.time()
         fetch_count = 0
+        processed_count = 0
         client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
+        # Pre-balance micro batch skip
+        if getattr(config, "IGNORE_MICRO_USDC", False):
+            try:
+                current_bal = solana_client.get_vault_usdc_balance_units(client)
+                last_bal = state.load_last_vault_balance()
+                delta = current_bal - last_bal
+                if delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0):
+                    # Advance waterline opportunistically using recent signatures
+                    try:
+                        sigs_meta = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=20)
+                        newest_ts = 0
+                        for entry in getattr(sigs_meta, 'value', []) or []:
+                            try:
+                                bt = int(getattr(entry, 'block_time', 0) or entry.get('blockTime') or 0)
+                            except Exception:
+                                bt = 0
+                            if bt > newest_ts:
+                                newest_ts = bt
+                        if newest_ts:
+                            state.propose_solana_waterline(newest_ts)
+                    except Exception:
+                        pass
+                    state.save_last_vault_balance(current_bal)
+                    _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
+                    return
+            except Exception:
+                pass
         limit = 100
         # --- Pagination over signatures to avoid missing older deposits ---
         MAX_PAGES = int(getattr(config, "SOLANA_PAGINATION_PAGES", 5))
+        # Anti-DoS: Limit processing per loop iteration
+        MAX_PROCESS_PER_LOOP = getattr(config, "MAX_DEPOSITS_PER_LOOP", 100)
         before_sig = None
         sig_results: list = []
         pages = 0
@@ -402,6 +432,11 @@ def poll_solana_deposits():
             pass
 
         for sig in sig_list:
+            # Check if we've hit processing limit for this loop iteration
+            if processed_count >= MAX_PROCESS_PER_LOOP:
+                _log("USDC_LOOP_LIMIT_REACHED", processed=processed_count, remaining=len(sig_list) - sig_list.index(sig))
+                break
+                
             # Cooperative stop: respect global stop event if present
             try:
                 from .main import _stop_event as _global_stop
@@ -487,7 +522,27 @@ def poll_solana_deposits():
                 dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000 if dynamic_bps > 0 else 0
                 net_usdc_for_mint = max(0, pre_dynamic_net - dynamic_fee_usdc)
 
-                if net_usdc_for_mint <= 0:
+                # Anti-DoS: Check minimum deposit threshold  
+                min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # 0.100101 USDC default
+                if net_usdc_for_mint > 0 and net_usdc_for_mint < min_deposit_threshold:
+                    # Micro-deposit: treat as fee-only donation
+                    micro_fee_pct = getattr(config, "MICRO_DEPOSIT_FEE_PCT", 100)
+                    fee_amount = (amount_usdc_units * micro_fee_pct) // 100
+                    fees.add_usdc_fee(fee_amount, sig=sig, kind="micro_deposit_fee")
+                    _log("USDC_MICRO_DEPOSIT", sig=sig, amount=amount_usdc_units, net=net_usdc_for_mint, min_threshold=min_deposit_threshold, fee_taken=fee_amount)
+                    entry = {
+                        "sig": sig,
+                        "amount_usdc_units": amount_usdc_units,
+                        "ts": sig_bt.get(sig) or 0,
+                        "from": source_token_acc,
+                        "comment": "processed, micro deposit (fee only)",
+                        "net_usdc_for_mint": net_usdc_for_mint,
+                        "min_threshold": min_deposit_threshold,
+                        "fee_taken": fee_amount,
+                    }
+                    state.append_jsonl(config.PROCESSED_SWAPS_FILE, entry)
+                    mark_processed = True
+                elif net_usdc_for_mint <= 0:
                     # Entire deposit consumed by fees (flat + dynamic). Tag as fee_only.
                     fees.add_usdc_fee(amount_usdc_units, sig=sig, kind="fee_only")
                     _log("USDC_FEE_ONLY", sig=sig, amount=amount_usdc_units, multi=len(transfer_events))
@@ -549,7 +604,7 @@ def poll_solana_deposits():
                     else:
                         # Missing memo entirely: refund path after fees
                         refundable = max(0, amount_usdc_units - flat_fee_units)
-                        if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing memo"):
+                        if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing memo", deposit_sig=sig):
                             if flat_fee_units > 0:
                                 fees.add_usdc_fee(flat_fee_units, sig=sig, kind="refund_flat")
                             out = {
@@ -643,7 +698,27 @@ def poll_solana_deposits():
                         dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000 if dynamic_bps > 0 else 0
                         net_usdc_for_mint = max(0, pre_dynamic_net - dynamic_fee_usdc)
 
-                        if net_usdc_for_mint <= 0:
+                        # Anti-DoS: Check minimum deposit threshold
+                        min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # 0.100101 USDC default
+                        if net_usdc_for_mint > 0 and net_usdc_for_mint < min_deposit_threshold:
+                            # Micro-deposit: treat as fee-only donation
+                            micro_fee_pct = getattr(config, "MICRO_DEPOSIT_FEE_PCT", 100)
+                            fee_amount = (amount_usdc_units * micro_fee_pct) // 100
+                            fees.add_usdc_fee(fee_amount, sig=sig, kind="micro_deposit_fee")
+                            _log("USDC_MICRO_DEPOSIT", sig=sig, amount=amount_usdc_units, net=net_usdc_for_mint, min_threshold=min_deposit_threshold, fee_taken=fee_amount)
+                            entry = {
+                                "sig": sig,
+                                "amount_usdc_units": amount_usdc_units,
+                                "ts": sig_bt.get(sig) or 0,
+                                "from": source_token_acc,
+                                "comment": "processed, micro deposit (fee only)",
+                                "net_usdc_for_mint": net_usdc_for_mint,
+                                "min_threshold": min_deposit_threshold,
+                                "fee_taken": fee_amount,
+                            }
+                            state.append_jsonl(config.PROCESSED_SWAPS_FILE, entry)
+                            mark_processed = True
+                        elif net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units, sig=sig, kind="fee_only")
                             _log("USDC_FEE_ONLY", sig=sig, amount=amount_usdc_units, path="delta")
                             # blank line suppressed
@@ -690,7 +765,7 @@ def poll_solana_deposits():
                                     pass
                             else:
                                 refundable = max(0, amount_usdc_units - flat_fee_units)
-                                if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing/invalid memo"):
+                                if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing/invalid memo", deposit_sig=sig):
                                     if flat_fee_units > 0:
                                         fees.add_usdc_fee(flat_fee_units, sig=sig, kind="refund_flat")
                                     out = {
@@ -706,74 +781,8 @@ def poll_solana_deposits():
                                         state.add_refunded_sig(sig)
                                     except Exception:
                                         pass
-                                    try:
-                                        unprocessed = [r for r in unprocessed if r.get("sig") != sig]
-                                        rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-                                        rows = [r for r in rows if r.get("sig") != sig]
-                                        state.write_jsonl(config.UNPROCESSED_SIGS_FILE, rows)
-                                    except Exception:
-                                        pass
-                                    mark_processed = True
-                                    _log("USDC_REFUNDED", sig=sig, amount=amount_usdc_units, reason="invalid_memo", path="delta")
-                                    try:
-                                        refundable = max(0, amount_usdc_units - flat_fee_units)
-                                        print(f"[USDC_REFUNDED] sig={sig} refundable_units={refundable} reason=invalid_memo")
-                                        print()
-                                    except Exception:
-                                        pass
                                 else:
                                     page_has_unprocessed_deposit = True
-                except Exception:
-                    pass
-
-            if mark_processed:
-                ts_bt = sig_bt.get(sig) or 0
-                state.mark_solana_processed(sig, ts=ts_bt, reason="deposit processed")
-                if ts_bt:
-                    confirmed_bt_candidates.append(int(ts_bt))
-            elif found_deposit:
-                page_has_unprocessed_deposit = True
-            else:
-                try:
-                    meta = tx.get("meta") or {}
-                    pre = meta.get("preTokenBalances") or []
-                    post = meta.get("postTokenBalances") or []
-                    acct_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
-                    def _akey(i):
-                        try:
-                            k = acct_keys[i]
-                            if isinstance(k, str):
-                                return k
-                            if isinstance(k, dict):
-                                return k.get("pubkey") or k.get("pubKey") or ""
-                        except Exception:
-                            return ""
-                        return ""
-                    def _amount(entry):
-                        try:
-                            return int(((entry.get("uiTokenAmount") or {}).get("amount")) or 0)
-                        except Exception:
-                            return 0
-                    vault_addr = str(config.VAULT_USDC_ACCOUNT)
-                    pre_amt = 0
-                    post_amt = 0
-                    for e in pre:
-                        try:
-                            if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
-                                pre_amt = _amount(e)
-                        except Exception:
-                            pass
-                    for e in post:
-                        try:
-                            if e.get("mint") == str(config.USDC_MINT) and _akey(int(e.get("accountIndex"))) == vault_addr:
-                                post_amt = _amount(e)
-                        except Exception:
-                            pass
-                    delta_final = post_amt - pre_amt
-                    # Suppress non-deposit noise (no print)
-                    if delta_final > 0:
-                        page_has_unprocessed_deposit = True
-                        continue
                 except Exception:
                     pass
                 ts_bt = sig_bt.get(sig) or 0
@@ -858,14 +867,14 @@ def poll_solana_deposits():
                             if state.should_attempt(refund_key):
                                 state.record_attempt(refund_key)
                                 refundable = max(0, amt - flat_fee_units)
-                                if refundable > 0 and solana_client.refund_usdc_to_source(src, refundable, "USDD debit failed"):
+                                if refundable > 0 and solana_client.refund_usdc_to_source(src, refundable, "USDD debit failed", deposit_sig=sig):
                                     if flat_fee_units > 0:
                                         fees.add_usdc_fee(flat_fee_units, sig=sig, kind="refund_flat")
                                     state.finalize_refund(dict(r), reason="debit_failed")
                                 else:
                                     attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
                                     if attempts >= config.MAX_ACTION_ATTEMPTS:
-                                        if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND"):
+                                        if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND", deposit_sig=sig):
                                             state.log_failed_refund({
                                                 "type": "refund_failure",
                                                 "sig": sig,
@@ -916,7 +925,7 @@ def poll_solana_deposits():
                     if stale_age and comment in ("ready for processing", "memo unresolved"):
                         # Quarantine stale unprocessed deposit (>24h) instead of refunding again
                         refundable = max(0, amt - flat_fee_units)
-                        if refundable > 0 and solana_client.move_usdc_to_quarantine(refundable, note="STALE_UNPROCESSED"):
+                        if refundable > 0 and solana_client.move_usdc_to_quarantine(refundable, note="STALE_UNPROCESSED", deposit_sig=r.get("sig")):
                             state.log_failed_refund({
                                 "type": "stale_quarantine",
                                 "sig": r.get("sig"),
@@ -975,7 +984,7 @@ def poll_solana_deposits():
                         refund_key = f"refund_usdc:{r.get('sig')}"
                         if state.should_attempt(refund_key):
                             state.record_attempt(refund_key)
-                            if solana_client.refund_usdc_to_source(src, refundable, "timeout or unresolved receival_account"):
+                            if solana_client.refund_usdc_to_source(src, refundable, "timeout or unresolved receival_account", deposit_sig=sig):
                                 if flat_fee_units > 0:
                                     fees.add_usdc_fee(flat_fee_units, sig=r.get('sig'), kind="refund_flat")
                                 state.finalize_refund(dict(r), reason="timeout_or_unresolved")
@@ -988,7 +997,7 @@ def poll_solana_deposits():
                             else:
                                 attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
                                 if attempts >= config.MAX_ACTION_ATTEMPTS:
-                                    if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND"):
+                                    if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND", deposit_sig=r.get("sig")):
                                         state.log_failed_refund({
                                             "type": "refund_failure",
                                             "sig": r.get("sig"),

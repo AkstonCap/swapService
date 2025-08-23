@@ -352,12 +352,20 @@ def _is_token_account_for_mint(token_account_addr: str, mint: PublicKey) -> bool
 
 def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
     """Send USDC base units directly to an existing USDC token account address."""
-    # Check if this reference was already processed
+    # Idempotency short‑circuit for memo formats we recognize
     from . import state
-    if memo and memo.isdigit():
-        ref_key = f"nexus_ref_{memo}"
-        if ref_key in state.processed_nexus_txs:
-            return True, None  # Already processed this reference
+    if memo:
+        # Legacy numeric reference
+        if memo.isdigit():
+            ref_key = f"nexus_ref_{memo}"
+            if ref_key in state.processed_nexus_txs:
+                return True, None
+        # New structured memo nexus_txid:<txid>
+        elif memo.startswith("nexus_txid:"):
+            txid_part = memo.split(":", 1)[1]
+            proc_key = f"nexus_txid:{txid_part}"
+            if proc_key in state.processed_nexus_txs:
+                return True, None
     
     try:
         if amount_base_units <= 0:
@@ -385,12 +393,16 @@ def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_bas
         sig = _build_and_send_legacy_tx(ixs, kp)
         print(f"Sent USDC to token account tx sig: {sig}")
         
-        # Mark reference as processed if provided
-        if memo and memo.isdigit():
-            try:
-                state.mark_nexus_processed(f"nexus_ref_{memo}", reason="usdc_sent")
-            except Exception:
-                pass
+        # Mark processed based on memo form for future idempotency
+        try:
+            if memo:
+                if memo.isdigit():
+                    state.mark_nexus_processed(f"nexus_ref_{memo}", reason="usdc_sent")
+                elif memo.startswith("nexus_txid:"):
+                    txid_part = memo.split(":", 1)[1]
+                    state.mark_nexus_processed(f"nexus_txid:{txid_part}", reason="usdc_sent")
+        except Exception:
+            pass
         
         return True, sig
     except Exception as e:
@@ -527,6 +539,87 @@ def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]
     return None
 
 
+def scan_recent_memos(search_limit: int = 400) -> dict:
+    """Scan recent signatures for vault USDC account collecting structured memos.
+    Returns dict: {
+        'nexus_txids': { txid: signature },
+        'refund_sigs': { deposit_sig: refund_tx_sig },
+    }
+    Best effort; ignores errors.
+    """
+    out = {"nexus_txids": {}, "refund_sigs": {}}
+    try:
+        client = Client(config.RPC_URL)
+    except Exception:
+        return out
+    try:
+        resp = _rpc_call(client.get_signatures_for_address, PublicKey.from_string(str(config.VAULT_USDC_ACCOUNT)), limit=search_limit)
+    except Exception:
+        return out
+    entries = _rpc_get_value(resp)
+    if not isinstance(entries, list):
+        return out
+    for ent in entries:
+        try:
+            sig = ent.get("signature") if isinstance(ent, dict) else None
+            if not sig:
+                continue
+            # Fetch transaction (short timeout)
+            try:
+                tx_resp = _rpc_call(client.get_transaction, sig, encoding="jsonParsed", timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 6))
+            except Exception:
+                continue
+            tx_val = _rpc_get_result(tx_resp)
+            # Inspect instructions for memo
+            try:
+                tx_obj = tx_val.get("transaction") if isinstance(tx_val, dict) else None
+                msg = (tx_obj or {}).get("message") if isinstance(tx_obj, dict) else None
+                insts = (msg or {}).get("instructions") if isinstance(msg, dict) else None
+            except Exception:
+                insts = None
+            memos: list[str] = []
+            if isinstance(insts, list):
+                for ix in insts:
+                    try:
+                        prog = ix.get("programId") or ix.get("program")
+                        if prog and str(prog).startswith("Memo111"):
+                            data = ix.get("data")
+                            if isinstance(data, list) and data:
+                                data = data[0]
+                            if isinstance(data, str):
+                                memos.append(data)
+                    except Exception:
+                        continue
+            # Fallback logs
+            if not memos:
+                try:
+                    logs = (tx_val.get("meta") or {}).get("logMessages") if isinstance(tx_val, dict) else None
+                    if isinstance(logs, list):
+                        for lg in logs:
+                            if isinstance(lg, str) and ("nexus_txid:" in lg or "refundSig:" in lg):
+                                memos.append(lg)
+                except Exception:
+                    pass
+            for m in memos:
+                if "nexus_txid:" in m:
+                    try:
+                        txid = m.split("nexus_txid:", 1)[1].strip().split()[0]
+                        if txid and txid not in out["nexus_txids"]:
+                            out["nexus_txids"][txid] = sig
+                    except Exception:
+                        pass
+                if "refundSig:" in m:
+                    try:
+                        dsig = m.split("refundSig:", 1)[1].strip().split()[0]
+                        if dsig and dsig not in out["refund_sigs"]:
+                            out["refund_sigs"][dsig] = sig
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    return out
+
+
 ## Memo extraction removed.
 
 
@@ -552,8 +645,10 @@ def derive_usdc_ata(owner_addr: str) -> str | None:
         return None
 
 
-def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str) -> bool:
-    """Refund USDC back to the sender's token account (no memo required)."""
+def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str, deposit_sig: str | None = None) -> bool:
+    """Refund USDC back to the sender's token account.
+    Adds memo refundSig:<deposit_sig> if deposit_sig provided for idempotent replay detection.
+    """
     # Check if this refund was already processed by checking the reason for signature context
     from . import state
     if ":" in reason and len(reason.split(":")) >= 2:
@@ -576,6 +671,11 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
                 signers=[],
             ),
         ]
+        memo_ix = None
+        if deposit_sig:
+            memo_ix = _memo_ix(f"refundSig:{deposit_sig}")
+        if memo_ix:
+            ixs.append(memo_ix)
         sig = _build_and_send_legacy_tx(ixs, kp)
         print(f"Refunded USDC tx sig: {sig}")  # retain basic trace
         return True
@@ -584,8 +684,13 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
         return False
 
 
-def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None) -> bool:
-    """Move USDC from vault token account to a self-owned quarantine USDC token account (does not affect backing ratio)."""
+def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None, deposit_sig: str | None = None) -> bool:
+    """Move USDC to quarantine with structured memo for later idempotency.
+    Memo precedence:
+      quarantinedSig:<deposit_sig>
+      quarantined:<note>
+      quarantined
+    """
     try:
         dest = getattr(config, "USDC_QUARANTINE_ACCOUNT", None)
         if not dest:
@@ -604,8 +709,18 @@ def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None) -> 
                 signers=[],
             )
         ]
+        memo_txt = None
+        if deposit_sig:
+            memo_txt = f"quarantinedSig:{deposit_sig}"
+        elif note:
+            memo_txt = f"quarantined:{note}"
+        else:
+            memo_txt = "quarantined"
+        mix = _memo_ix(memo_txt)
+        if mix:
+            ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Moved USDC to quarantine, sig: {sig}")  # retain basic trace
+        print(f"Moved USDC to quarantine, sig: {sig} memo={memo_txt}")
         return True
     except Exception as e:
         print(f"Error moving USDC to quarantine: {e}")

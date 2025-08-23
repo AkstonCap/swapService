@@ -162,6 +162,25 @@ def run():
     except Exception as e:
         print(f"   Startup metrics error: {e}")
 
+    # Startup recovery (idempotent) – rebuild processed markers & seed reference counter if needed
+    try:
+        from . import startup_recovery
+        rec = startup_recovery.perform_startup_recovery()
+        print(f"   Startup recovery: ref_seeded={rec.get('reference_seeded')} added_nexus_processed={rec.get('added_nexus_processed')} added_refunded={rec.get('added_refunded_sigs')} (memos scanned nexus={rec.get('found_nexus_memos')} refunds={rec.get('found_refund_memos')})")
+    except Exception as e:
+        print(f"   Startup recovery error: {e}")
+
+    # Balance reconciliation check (USDC→USDD direction) – detect potential double-mints
+    try:
+        from . import balance_reconciler
+        bal_result = balance_reconciler.run_balance_reconciliation(dry_run=True)
+        if bal_result.get('discrepancies'):
+            print(f"   ⚠ Balance check: {len(bal_result['discrepancies'])} addresses have surplus USDD (total: {bal_result.get('total_surplus_usdd', 0)} units)")
+        else:
+            print(f"   ✓ Balance check: All {bal_result.get('checked_addresses', 0)} USDD addresses match expected balances")
+    except Exception as e:
+        print(f"   Balance reconciliation error: {e}")
+
     # Setup graceful shutdown via Ctrl+C (SIGINT) or SIGTERM
     import signal, threading
     global _stop_event
@@ -205,6 +224,16 @@ def run():
                                 _last_reconcile = now
                     except Exception as e:
                         print(f"[reconcile] error: {e}")
+
+                # Periodic balance reconciliation check (every 10 minutes) – detect double-mints
+                if now % 600 == 0:  # Every 10 minutes
+                    try:
+                        from . import balance_reconciler
+                        bal_result = _safe_call(balance_reconciler.run_balance_reconciliation, dry_run=True, timeout_sec=15)
+                        if bal_result.get('discrepancies'):
+                            print(f"[balance_check] ⚠ Found {len(bal_result['discrepancies'])} addresses with surplus USDD (total: {bal_result.get('total_surplus_usdd', 0)} units)")
+                    except Exception as e:
+                        print(f"[balance_check] error: {e}")
                 
                 # Optional: DEX conversions (SOL top-ups) with timeout protection
                 if config.FEE_CONVERSION_ENABLED:
