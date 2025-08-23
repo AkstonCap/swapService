@@ -80,7 +80,7 @@ HEARTBEAT_MIN_INTERVAL_SEC = max(10, int(os.getenv("HEARTBEAT_MIN_INTERVAL_SEC",
 HEARTBEAT_WATERLINE_ENABLED = os.getenv("HEARTBEAT_WATERLINE_ENABLED", "true").lower() in ("1","true","yes","on")
 HEARTBEAT_WATERLINE_SOLANA_FIELD = os.getenv("HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
 HEARTBEAT_WATERLINE_NEXUS_FIELD = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_usdd")
-HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC", "120"))
+HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC", "0"))  # safety window disabled
 
 # Fees (optional)
 # One flat USDC fee (token units, e.g., 0.1 USDC) and one dynamic fee (bps of USDC amount),
@@ -99,6 +99,24 @@ FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 
 # Nexus congestion fee for USDD refunds (token units)
 NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
+
+# Anti-DoS protections
+MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.100101")  # minimum deposit to process as swap
+MIN_DEPOSIT_USDC_UNITS = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
+MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.100101")  # minimum credit to process as swap
+MIN_CREDIT_USDD_UNITS = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+MAX_DEPOSITS_PER_LOOP = int(os.getenv("MAX_DEPOSITS_PER_LOOP", "100"))  # batch processing limit
+MAX_CREDITS_PER_LOOP = int(os.getenv("MAX_CREDITS_PER_LOOP", "100"))  # batch processing limit for USDD credits
+MICRO_DEPOSIT_FEE_PCT = int(os.getenv("MICRO_DEPOSIT_FEE_PCT", "100"))  # 100% fee for sub-minimum deposits
+MICRO_CREDIT_FEE_PCT = int(os.getenv("MICRO_CREDIT_FEE_PCT", "100"))  # 100% fee for sub-minimum credits
+
+# Advanced micro-credit handling
+# If true, build a Nexus WHERE clause (instead of simple field filter) to server-side filter transactions.
+USE_NEXUS_WHERE_FILTER_USDD = os.getenv("USE_NEXUS_WHERE_FILTER_USDD", "true").lower() in ("1","true","yes","on")
+# If true we skip expensive owner lookups for micro credits below threshold.
+SKIP_OWNER_LOOKUP_FOR_MICRO_USDD = os.getenv("SKIP_OWNER_LOOKUP_FOR_MICRO_USDD", "true").lower() in ("1","true","yes","on")
+# If false, micro credits do not count against MAX_CREDITS_PER_LOOP (lets us drain real swaps faster under spam).
+MICRO_CREDIT_COUNT_AGAINST_LIMIT = os.getenv("MICRO_CREDIT_COUNT_AGAINST_LIMIT", "false").lower() in ("1","true","yes","on")
 
 # Fee conversions (scaffolding / optional)
 FEE_CONVERSION_ENABLED = os.getenv("FEE_CONVERSION_ENABLED", "false").lower() in ("1","true","yes","on")
