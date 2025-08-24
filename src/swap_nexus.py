@@ -217,26 +217,7 @@ def poll_nexus_usdd_deposits():
                     # Anti-DoS: Check minimum credit threshold
                     min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
                     if amount_dec < min_credit_threshold:
-                        # Micro-credit: treat entirely as fees. Optionally skip owner lookup to save RPC.
-                        micro_fee_pct = getattr(config, "MICRO_CREDIT_FEE_PCT", 100)
-                        owner_val = None
-                        if not getattr(config, "SKIP_OWNER_LOOKUP_FOR_MICRO_USDD", True):
-                            owner_val = (nexus_client.get_account_info(sender) or {}).get("owner")
-                        micro_row = {
-                            "txid": txid,
-                            "ts": ts,
-                            "from": sender,
-                            "owner": owner_val,
-                            "amount_usdd": str(amount_dec),
-                            "comment": "processed, micro credit (fee only)",
-                            "min_threshold": float(min_credit_threshold),
-                            "micro_fee_pct": micro_fee_pct,
-                        }
-                        micro_aggregated.append(micro_row)
-                        # Do not count micro credits toward per-loop limit unless configured
-                        if getattr(config, "MICRO_CREDIT_COUNT_AGAINST_LIMIT", False):
-                            processed_count += 1
-                        processed_txids.add(txid)
+                        # Ignore micro credit entirely: no state writes, no fee accounting.
                         continue
                         
                     flat_usdd_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
@@ -273,12 +254,7 @@ def poll_nexus_usdd_deposits():
                     unprocessed_txids.add(txid)
                     processed_count += 1
                     _log("USDD_QUEUED", txid=txid, amount=str(amount_dec))
-            # Flush aggregated micro credits (single append for batch for lower IO).
-            if micro_aggregated:
-                # We still append individually for JSONL integrity but after loop to reduce interleaving.
-                for mr in micro_aggregated:
-                    state.append_jsonl(processed_path, mr)
-                    _log("USDD_MICRO_CREDIT", txid=mr.get("txid"), amount=mr.get("amount_usdd"), action="fee_only")
+            # Micro credits are fully ignored now (no aggregation flush)
 
             # Break conditions
             if len(txs) < limit:

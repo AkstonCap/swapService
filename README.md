@@ -1,6 +1,23 @@
 # USDC ↔ USDD Bidirectional Swap Service
 
-A Python service that enables automatic swapping between USDC (Solana) and USDD (Nexus) in both directions, with strict validation, automatic refunds on invalid input, loop-safety, and an optional on-chain heartbeat for public status checking.
+User-facing guide for performing swaps between USDC (Solana) and USDD (Nexus).
+
+Operator / setup documentation: see **`SETUP.md`**.  
+Security hardening: **`SECURITY.md`**.  
+Configuration reference: **`CONFIG.md`**.
+
+---
+
+## Quick Overview
+The service lets you swap:
+- USDC → USDD: Send USDC to the service vault with a memo that specifies a Nexus (USDD) account.
+- USDD → USDC: Send USDD to the treasury and publish an asset mapping your USDD transaction `txid` to a Solana receival account.
+
+Thresholds & Fees (defaults – operator may change):
+- Minimum swap amount both directions: `0.100101` of the source token (smaller = treated as fees / ignored).
+- Flat fee (USDC path) & dynamic fee (bps) may apply as configured.
+
+---
 
 ## How to swap USDD for USDC
 
@@ -80,6 +97,61 @@ Notes
 - You can batch multiple swaps by using multiple assets or updating the same asset sequentially (only the row with matching `txid_toService` is considered).
 - Tiny USDD credits below `MIN_CREDIT_USDD` (default 0.100101) are treated as fees (100% micro fee policy) and skipped.
 - Keep the asset published before the refund timeout to avoid unnecessary refunds.
+
+---
+
+## Summary of Both Directions
+
+### USDC → USDD (Solana to Nexus)
+1. Send USDC to the vault token account (`VAULT_USDC_ACCOUNT`) with memo: `nexus:<NEXUS_USDD_ACCOUNT>`.
+2. Service validates the Nexus account & token, mints/sends USDD minus fees.
+3. Invalid or missing memo → refund (flat fee may apply). Tiny deposits ≤ flat fee are treated as fees.
+
+### USDD → USDC (Nexus to Solana)
+1. Send USDD to treasury (`NEXUS_USDD_TREASURY_ACCOUNT`).
+2. Publish asset with `txid_toService` + `receival_account` (Solana wallet or USDC ATA).
+3. Service finds mapping, validates address / existing ATA, sends net USDC. If mapping missing past timeout → refund.
+
+---
+
+## Common Questions
+**Q: How fast are swaps?**  Depends on polling and chain confirmation. Typical: a few Solana blocks (USDC→USDD) or one Nexus credit + mapping publish cycle (USDD→USDC).  
+**Q: Can I reuse the same asset?** Yes—just update its fields for each new `txid_toService`, or create per‑swap assets.  
+**Q: What if I forget to publish the asset?** After the refund timeout the USDD is refunded (minus any congestion or micro handling fees).  
+**Q: Do you create my USDC ATA?** No. Ensure it already exists (most wallets auto‑create on first receive).  
+**Q: Are sub‑threshold amounts lost?** They are treated as fees/donations per policy; do not send below the published minimum.  
+
+---
+
+## Minimal Cheat Sheet
+
+USDC→USDD:
+```
+Send USDC to <VAULT_USDC_ACCOUNT>
+Memo: nexus:<YOUR_USDD_ACCOUNT>
+Amount ≥ 0.100101 USDC
+```
+
+USDD→USDC:
+```
+Send USDD to <NEXUS_USDD_TREASURY_ACCOUNT>
+Grab txid from CLI output
+Publish or update asset with fields: {"txid_toService":"<TXID>","receival_account":"<SOL_OR_USDC_TOKEN_ACCOUNT>"}
+Amount ≥ 0.100101 USDD
+```
+
+---
+
+## Need Full Setup / Configuration Details?
+See:
+- `SETUP.md` (installation, architecture, operations)
+- `SECURITY.md` (hardening & threat model)
+- `CONFIG.md` (environment variable reference)
+
+---
+
+## License
+Provided as‑is. Use at your own risk. See `SETUP.md` for extended security notes.
 
 
 ## How It Works

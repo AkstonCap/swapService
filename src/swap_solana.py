@@ -525,23 +525,8 @@ def poll_solana_deposits():
                 # Anti-DoS: Check minimum deposit threshold  
                 min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # 0.100101 USDC default
                 if net_usdc_for_mint > 0 and net_usdc_for_mint < min_deposit_threshold:
-                    # Micro-deposit: treat as fee-only donation
-                    micro_fee_pct = getattr(config, "MICRO_DEPOSIT_FEE_PCT", 100)
-                    fee_amount = (amount_usdc_units * micro_fee_pct) // 100
-                    fees.add_usdc_fee(fee_amount, sig=sig, kind="micro_deposit_fee")
-                    _log("USDC_MICRO_DEPOSIT", sig=sig, amount=amount_usdc_units, net=net_usdc_for_mint, min_threshold=min_deposit_threshold, fee_taken=fee_amount)
-                    entry = {
-                        "sig": sig,
-                        "amount_usdc_units": amount_usdc_units,
-                        "ts": sig_bt.get(sig) or 0,
-                        "from": source_token_acc,
-                        "comment": "processed, micro deposit (fee only)",
-                        "net_usdc_for_mint": net_usdc_for_mint,
-                        "min_threshold": min_deposit_threshold,
-                        "fee_taken": fee_amount,
-                    }
-                    state.append_jsonl(config.PROCESSED_SWAPS_FILE, entry)
-                    mark_processed = True
+                    # Ignore micro-deposit entirely: no writes, no processing, leave untracked to minimize compute.
+                    return
                 elif net_usdc_for_mint <= 0:
                     # Entire deposit consumed by fees (flat + dynamic). Tag as fee_only.
                     fees.add_usdc_fee(amount_usdc_units, sig=sig, kind="fee_only")
@@ -701,23 +686,8 @@ def poll_solana_deposits():
                         # Anti-DoS: Check minimum deposit threshold
                         min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # 0.100101 USDC default
                         if net_usdc_for_mint > 0 and net_usdc_for_mint < min_deposit_threshold:
-                            # Micro-deposit: treat as fee-only donation
-                            micro_fee_pct = getattr(config, "MICRO_DEPOSIT_FEE_PCT", 100)
-                            fee_amount = (amount_usdc_units * micro_fee_pct) // 100
-                            fees.add_usdc_fee(fee_amount, sig=sig, kind="micro_deposit_fee")
-                            _log("USDC_MICRO_DEPOSIT", sig=sig, amount=amount_usdc_units, net=net_usdc_for_mint, min_threshold=min_deposit_threshold, fee_taken=fee_amount)
-                            entry = {
-                                "sig": sig,
-                                "amount_usdc_units": amount_usdc_units,
-                                "ts": sig_bt.get(sig) or 0,
-                                "from": source_token_acc,
-                                "comment": "processed, micro deposit (fee only)",
-                                "net_usdc_for_mint": net_usdc_for_mint,
-                                "min_threshold": min_deposit_threshold,
-                                "fee_taken": fee_amount,
-                            }
-                            state.append_jsonl(config.PROCESSED_SWAPS_FILE, entry)
-                            mark_processed = True
+                            # Ignore micro-deposit entirely.
+                            return
                         elif net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units, sig=sig, kind="fee_only")
                             _log("USDC_FEE_ONLY", sig=sig, amount=amount_usdc_units, path="delta")
