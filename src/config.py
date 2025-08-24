@@ -42,7 +42,10 @@ NEXUS_PIN = os.getenv("NEXUS_PIN", "")
 USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # deprecated: USDC fees remain in vault
 
 # Polling & State
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))  # legacy/global fallback
+# Optional chain-specific poll intervals (seconds). Default to POLL_INTERVAL if unset.
+SOLANA_POLL_INTERVAL = int(os.getenv("SOLANA_POLL_INTERVAL", str(POLL_INTERVAL)))
+NEXUS_POLL_INTERVAL = int(os.getenv("NEXUS_POLL_INTERVAL", str(POLL_INTERVAL)))
 PROCESSED_SIG_FILE = os.getenv("PROCESSED_SIG_FILE", "processed_sigs.json")
 PROCESSED_NEXUS_FILE = os.getenv("PROCESSED_NEXUS_FILE", "processed_nexus_txs.json")
 ATTEMPT_STATE_FILE = os.getenv("ATTEMPT_STATE_FILE", "attempt_state.json")

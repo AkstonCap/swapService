@@ -314,7 +314,11 @@ def run():
                 print(f"Prune error: {e}")
             
             elapsed = time.time() - loop_slice_start
-            remaining = max(0, config.POLL_INTERVAL - elapsed)
+            # Use chain-specific intervals; sleep for the minimum to maintain overall cadence.
+            sol_iv = getattr(config, 'SOLANA_POLL_INTERVAL', config.POLL_INTERVAL)
+            nex_iv = getattr(config, 'NEXUS_POLL_INTERVAL', config.POLL_INTERVAL)
+            base_iv = max(sol_iv, nex_iv)
+            remaining = max(0, base_iv - elapsed)
             
             # Sleep in short chunks to react quickly to Ctrl+C
             sleep_chunk = min(1.0, remaining)
