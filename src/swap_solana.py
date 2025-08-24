@@ -522,11 +522,13 @@ def poll_solana_deposits():
                 dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000 if dynamic_bps > 0 else 0
                 net_usdc_for_mint = max(0, pre_dynamic_net - dynamic_fee_usdc)
 
-                # Anti-DoS: Check minimum deposit threshold  
-                min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # 0.100101 USDC default
-                if net_usdc_for_mint > 0 and net_usdc_for_mint < min_deposit_threshold:
-                    # Ignore micro-deposit entirely: no writes, no processing, leave untracked to minimize compute.
-                    return
+                # Anti-DoS: Check minimum deposit threshold (apply to GROSS amount, not net after fees)
+                min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # e.g. 0.100101 USDC in base units
+                if amount_usdc_units < min_deposit_threshold:
+                    # Ignore true micro deposit (below threshold) entirely (design choice per user request)
+                    # Do NOT treat as fees; simply skip so attacker waste SOL fees without service work.
+                    # Continue scanning remaining signatures instead of returning early.
+                    continue
                 elif net_usdc_for_mint <= 0:
                     # Entire deposit consumed by fees (flat + dynamic). Tag as fee_only.
                     fees.add_usdc_fee(amount_usdc_units, sig=sig, kind="fee_only")
@@ -683,11 +685,11 @@ def poll_solana_deposits():
                         dynamic_fee_usdc = (pre_dynamic_net * dynamic_bps) // 10000 if dynamic_bps > 0 else 0
                         net_usdc_for_mint = max(0, pre_dynamic_net - dynamic_fee_usdc)
 
-                        # Anti-DoS: Check minimum deposit threshold
-                        min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)  # 0.100101 USDC default
-                        if net_usdc_for_mint > 0 and net_usdc_for_mint < min_deposit_threshold:
-                            # Ignore micro-deposit entirely.
-                            return
+                        # Anti-DoS: Check minimum deposit threshold on gross amount
+                        min_deposit_threshold = getattr(config, "MIN_DEPOSIT_USDC_UNITS", 100101)
+                        if amount_usdc_units < min_deposit_threshold:
+                            # Skip micro (gross below threshold) and continue scanning
+                            continue
                         elif net_usdc_for_mint <= 0:
                             fees.add_usdc_fee(amount_usdc_units, sig=sig, kind="fee_only")
                             _log("USDC_FEE_ONLY", sig=sig, amount=amount_usdc_units, path="delta")
