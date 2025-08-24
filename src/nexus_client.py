@@ -1,6 +1,6 @@
 import json
 import subprocess
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any
 from . import config
 
@@ -96,8 +96,28 @@ def is_expected_token(account_info: Dict[str, Any], expected: str) -> bool:
     return False
 
 
+def _format_usdd_amount(amount_units: int) -> str:
+    """Convert internal base units (USDD_DECIMALS) into decimal string required by Nexus CLI.
+
+    Nexus finance API expects human-readable whole/decimal token amounts, not raw base units.
+    Example: with USDD_DECIMALS=6, 110000 base units -> "0.11".
+    """
+    try:
+        decs = int(getattr(config, 'USDD_DECIMALS', 6))
+        if decs <= 0:
+            return str(int(amount_units))
+        q = Decimal(amount_units) / (Decimal(10) ** decs)
+        # Normalize: remove trailing zeros while keeping at least one digit
+        s = format(q.normalize(), 'f')
+        if '.' in s:
+            s = s.rstrip('0').rstrip('.') or '0'
+        return s
+    except Exception:
+        return str(int(amount_units))
+
+
 def debit_usdd(to_addr: str, amount_usdd_units: int, reference: int | str | None = 0) -> bool:
-    """Debit/mint USDD to an account. Reference must be uint64 (or omitted)."""
+    """Debit/mint USDD to an account. Amount supplied in internal base units; converted to decimal string."""
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
         return False
@@ -111,15 +131,8 @@ def debit_usdd(to_addr: str, amount_usdd_units: int, reference: int | str | None
     except Exception:
         # If non-numeric provided, omit to satisfy uint64 restriction
         ref_part = []
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/debit/token",
-        "from=USDD",
-        f"to={to_addr}",
-        f"amount={amount_usdd_units}",
-        *ref_part,
-        f"pin={config.NEXUS_PIN}",
-    ]
+    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", *ref_part, f"pin={config.NEXUS_PIN}"]
     print(">>> Nexus debit:", [c if not str(c).startswith("pin=") else "pin=***" for c in cmd])
     try:
         code, out, err = _run(cmd, timeout=30)
@@ -132,19 +145,12 @@ def debit_usdd(to_addr: str, amount_usdd_units: int, reference: int | str | None
         print("Nexus debit exception:", e)
         return False
 
-def debit_usdd_with_txid(to_addr: str, amount_usdd: int, reference: int) -> tuple[bool, str | None]:
-    """Perform debit and attempt to parse a txid from output."""
+def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -> tuple[bool, str | None]:
+    """Perform debit (amount in base units) and attempt to parse a txid from output."""
     if not config.NEXUS_PIN:
         return (False, None)
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/debit/token",
-        "from=USDD",
-        f"to={to_addr}",
-        f"amount={amount_usdd}",
-        f"reference={reference}",
-        f"pin={config.NEXUS_PIN}",
-    ]
+    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     code, out, err = _run(cmd, timeout=5)
     if code != 0:
         return (False, None)
@@ -162,7 +168,7 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd: int, reference: int) -> tupl
 
 
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
-    """Refund USDD by transferring from treasury to the recipient (no mint)."""
+    """Refund USDD by transferring from treasury to the recipient (amount in base units)."""
     # Check if this refund was already processed by checking for txid in reason
     from . import state
     if "txid:" in reason:
@@ -178,21 +184,12 @@ def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     return transfer_usdd_between_accounts(treas, to_addr, amount_usdd_units, ref)
 
 def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_units: int, reference: str) -> bool:
-    """Transfer USDD between two Nexus token accounts using finance/debit/account (no mint).
-    from_addr and to_addr are account addresses (registers) for the USDD token.
-    """
+    """Transfer USDD between two Nexus token accounts. Amount is base units internally, formatted for CLI."""
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
         return False
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/debit/account",
-        f"from={from_addr}",
-        f"to={to_addr}",
-        f"amount={amount_usdd_units}",
-        f"reference={reference}",
-        f"pin={config.NEXUS_PIN}",
-    ]
+    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    cmd = [config.NEXUS_CLI, "finance/debit/account", f"from={from_addr}", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     try:
         code, out, err = _run(cmd, timeout=30)
         if code != 0:
@@ -203,16 +200,19 @@ def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_uni
         print("Nexus transfer exception:", e)
         return False
 
-def debit_account_with_txid(from_addr: str, to_addr: str, amount: int, reference: int | str) -> tuple[bool, str | None]:
-    """Debit from a specific account (e.g., treasury) to recipient and parse txid."""
+def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, reference: int | str) -> tuple[bool, str | None]:
+    """Debit from a specific account (e.g., treasury) to recipient and parse txid.
+    Input amount is in internal base units; formatted as decimal token amount for Nexus CLI.
+    """
     if not config.NEXUS_PIN:
         return (False, None)
+    amount_str = _format_usdd_amount(int(amount_units))
     cmd = [
         config.NEXUS_CLI,
         "finance/debit/account",
         f"from={from_addr}",
         f"to={to_addr}",
-        f"amount={amount}",
+        f"amount={amount_str}",
         f"reference={reference}",
         f"pin={config.NEXUS_PIN}",
     ]

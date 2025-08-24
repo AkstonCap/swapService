@@ -797,13 +797,15 @@ def poll_solana_deposits():
                     pre_dyn = max(0, amt - flat_fee_units)
                     dyn_fee = (pre_dyn * dyn_bps) // 10000 if dyn_bps > 0 else 0
                     net_usdc = max(0, pre_dyn - dyn_fee)
-                    usdd_units = scale_amount(net_usdc, config.USDC_DECIMALS, config.USDD_DECIMALS)
+                    # Convert net USDC units to decimal amount for 1:1 USDC->USDD swap
+                    net_usdc_decimal = Decimal(net_usdc) / (10 ** config.USDC_DECIMALS)
                     ref = state.next_reference()
                     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
                     if not treas:
                         ok, txid = (False, None)
                     else:
-                        ok, txid = nexus_client.debit_account_with_txid(treas, recv, usdd_units, ref)
+                        # Pass decimal amount directly; nexus_client will format appropriately
+                        ok, txid = nexus_client.debit_account_with_txid(treas, recv, net_usdc_decimal, ref)
                     if ok and txid:
                         total_fee = flat_fee_units + dyn_fee
                         # Record fee components separately for audit clarity.
@@ -820,7 +822,7 @@ def poll_solana_deposits():
                             return x
                         state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
                         try:
-                            print(f"[USDC_DEBITED] sig={sig} txid={txid} ref={ref} net_usdc={net_usdc} usdd_units={usdd_units}")
+                            print(f"[USDC_DEBITED] sig={sig} txid={txid} ref={ref} net_usdc={net_usdc} usdd_decimal={net_usdc_decimal}")
                             print()
                         except Exception:
                             pass

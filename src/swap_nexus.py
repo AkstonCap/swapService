@@ -82,14 +82,14 @@ def poll_nexus_usdd_deposits():
     processed_path = "processed_txids.json"
 
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-    # Build base command. We use a WHERE clause to restrict to CREDIT contracts TO treasury and amount >= threshold.
+    # Build base command. Use register/transactions/finance:token to get both debits and credits.
     base_cmd = [config.NEXUS_CLI]
     projection = (
-        "finance/transactions/token/"
+        "register/transactions/finance:token/"
         "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
     )
     base_cmd.append(projection)
-    base_cmd.append(f"name={treasury_addr}")
+    base_cmd.append(f"name=USDD")
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")
 
@@ -199,15 +199,20 @@ def poll_nexus_usdd_deposits():
                         continue
                     if str(c.get("OP") or "").upper() != "CREDIT":
                         continue
+                    # Look for CREDIT operations TO the treasury account (user sending USDD to treasury for swapping)
                     to = c.get("to")
                     def _addr(obj) -> str:
                         if isinstance(obj, dict):
+                            # Check both address field and name field
                             a = obj.get("address") or obj.get("name")
                             return str(a) if a else ""
                         if isinstance(obj, str):
                             return obj
                         return ""
-                    if _addr(to) != treasury_addr:
+                    
+                    to_addr = _addr(to)
+                    # Skip if this credit is not TO our treasury account
+                    if to_addr != treasury_addr:
                         continue
                     sender = _addr(c.get("from"))
                     amount_dec = _parse_decimal_amount(c.get("amount"))
