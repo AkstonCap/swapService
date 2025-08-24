@@ -213,15 +213,27 @@ def run():
                 global _last_reconcile
                 if (now - _last_reconcile) >= max(60, config.BACKING_RECONCILE_INTERVAL_SEC):
                     try:
-                        # Compute surplus: vault_usdc - circ_usdd with timeout protection
                         vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=8)
                         circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=8)
                         surplus = max(0, vault_usdc - circ_usdd)
-                        if surplus > 0 and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            if _safe_call(nexus_client.debit_usdd, config.NEXUS_USDD_FEES_ACCOUNT, surplus, "FEE_RECONCILE", timeout_sec=10):
-                                print(f"[reconcile] Minted {surplus} USDD to fees account to restore 1:1 backing")
+                        # Skip reconcile if any pending Solana deposits not yet swapped (avoid preemptive fee mint from fresh deposits)
+                        pending_deposits = False
+                        try:
+                            unproc_rows = _safe_call(state.read_jsonl, config.UNPROCESSED_SIGS_FILE, timeout_sec=3) or []
+                            if any(True for r in unproc_rows if r.get('comment') in ('ready for processing','memo unresolved','refunded','debited, awaiting confirmations') or not r.get('comment')):
+                                pending_deposits = True
+                        except Exception:
+                            pending_deposits = True  # fail safe: treat as pending
+                        threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS', 0)
+                        # Only reconcile if: surplus strictly exceeds threshold AND no pending deposits
+                        if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
+                            if _safe_call(nexus_client.debit_usdd, config.NEXUS_USDD_FEES_ACCOUNT, surplus, 'FEE_RECONCILE', timeout_sec=10):
+                                print(f"[reconcile] Minted {surplus} USDD to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()
                                 _last_reconcile = now
+                        else:
+                            # Optional debug: comment out to stay silent in normal ops.
+                            pass
                     except Exception as e:
                         print(f"[reconcile] error: {e}")
 
