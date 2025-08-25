@@ -1,8 +1,8 @@
 import time
 import threading
 from . import config, state
-from .swap_solana import poll_solana_deposits
-from .swap_nexus import poll_nexus_usdd_deposits
+from .swap_solana import poll_solana_deposits, process_unprocessed_entries
+from .swap_nexus import poll_nexus_usdd_deposits, process_unprocessed_txids
 
 _last_heartbeat = 0
 _last_reconcile = 0
@@ -154,11 +154,11 @@ def run():
         usdc_disp = _fmt_units(usdc_units, config.USDC_DECIMALS)
         print(f"   USDC Vault Balance: {usdc_disp} USDC ({usdc_units} base) — {config.VAULT_USDC_ACCOUNT}")
 
-        usdd_units = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=10)
-        usdd_disp = _fmt_units(usdd_units, config.USDD_DECIMALS)
+        usdd_amount = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=10)
+        # usdd_disp = _fmt_units(usdd_amount, config.USDD_DECIMALS)
         treas = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', '')
         suffix = f" — Treasury: {treas}" if treas else ""
-        print(f"   USDD Circulating Supply: {usdd_disp} USDD ({usdd_units} base){suffix}")
+        print(f"   USDD Circulating Supply: {usdd_amount} USDD ({usdd_units} base){suffix}")
     except Exception as e:
         print(f"   Startup metrics error: {e}")
 
@@ -292,7 +292,9 @@ def run():
             loop_slice_start = time.time()
             
             SOLANA_BUDGET = getattr(config, "SOLANA_POLL_TIME_BUDGET_SEC", 15)
-            NEXUS_BUDGET = getattr(config, "NEXUS_POLL_TIME_BUDGET_SEC", 15)
+            NEXUS_POLL_BUDGET = getattr(config, "NEXUS_POLL_TIME_BUDGET_SEC", 15)
+            UNPROCESSED_BUDGET = getattr(config, "UNPROCESSED_PROCESS_BUDGET_SEC", 30)
+            NEXUS_PROCESS_BUDGET = getattr(config, "UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC", 30)
             
             if _stop_event.is_set():
                 break
@@ -300,7 +302,16 @@ def run():
             
             if _stop_event.is_set():
                 break
-            _run_with_watchdog(poll_nexus_usdd_deposits, "nexus", NEXUS_BUDGET)
+            # Process unprocessed entries independently of signature polling
+            _run_with_watchdog(process_unprocessed_entries, "unprocessed", UNPROCESSED_BUDGET)
+            
+            if _stop_event.is_set():
+                break
+            _run_with_watchdog(poll_nexus_usdd_deposits, "nexus_poll", NEXUS_POLL_BUDGET)
+            
+            if _stop_event.is_set():
+                break
+            _run_with_watchdog(process_unprocessed_txids, "nexus_process", NEXUS_PROCESS_BUDGET)
             
             if _stop_event.is_set():
                 break

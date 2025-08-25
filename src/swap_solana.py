@@ -87,6 +87,304 @@ def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
     return int(amount) // (10 ** (src_decimals - dst_decimals))
 
 
+def process_unprocessed_entries():
+    """Process queued USDC deposits independent of new signature polling.
+    Prioritizes ready entries and handles confirmations, refunds, and quarantine.
+    """
+    import time as _time
+    
+    process_start = _time.time()
+    PROCESS_BUDGET_SEC = getattr(config, "UNPROCESSED_PROCESS_BUDGET_SEC", 30)
+    
+    try:
+        # Priority 1: Process ready entries (has receival_account)
+        rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+        for r in rows:
+            if _time.time() - process_start > PROCESS_BUDGET_SEC:
+                _log("UNPROCESSED_BUDGET_EXCEEDED", budget_sec=PROCESS_BUDGET_SEC)
+                break
+                
+            if r.get("comment") == "ready for processing" and r.get("receival_account"):
+                if r.get("txid"):
+                    continue
+                sig = r.get("sig")
+                # Reservation to prevent concurrent debit
+                if not state.reserve_action("debit", sig):
+                    continue
+                sig = r.get("sig")
+                recv = r.get("receival_account")
+                amt = int(r.get("amount_usdc_units") or 0)
+                flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
+                dyn_bps = max(0, int(getattr(config, "DYNAMIC_FEE_BPS", 0)))
+                pre_dyn = max(0, amt - flat_fee_units)
+                dyn_fee = (pre_dyn * dyn_bps) // 10000 if dyn_bps > 0 else 0
+                net_usdc = max(0, pre_dyn - dyn_fee)
+                # Convert net USDC units to decimal amount for 1:1 USDC->USDD swap
+                net_usdc_decimal = Decimal(net_usdc) / (10 ** config.USDC_DECIMALS)
+                ref = state.next_reference()
+                treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+                if not treas:
+                    ok, txid = (False, None)
+                else:
+                    # Pass decimal amount directly; nexus_client will format appropriately
+                    ok, txid = nexus_client.debit_account_with_txid(treas, recv, net_usdc_decimal, ref)
+                if ok and txid:
+                    total_fee = flat_fee_units + dyn_fee
+                    # Record fee components separately for audit clarity.
+                    if flat_fee_units > 0:
+                        fees.add_usdc_fee(flat_fee_units, sig=sig, kind="flat")
+                    if dyn_fee > 0:
+                        fees.add_usdc_fee(dyn_fee, sig=sig, kind="dynamic")
+                    def _pred(x):
+                        return x.get("sig") == sig
+                    def _upd(x):
+                        x["txid"] = txid
+                        x["reference"] = ref
+                        x["comment"] = "debited, awaiting confirmations"
+                        return x
+                    state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
+                    try:
+                        print(f"[USDC_DEBITED] sig={sig} txid={txid} ref={ref} net_usdc={net_usdc} usdd_decimal={net_usdc_decimal}")
+                        print()
+                    except Exception:
+                        pass
+                else:
+                    # Release reservation on failure
+                    state.release_reservation("debit", sig)
+                    try:
+                        print(f"[USDC_DEBIT_FAIL] sig={sig} net_usdc={net_usdc} reason=debit_failed")
+                        print()
+                    except Exception:
+                        pass
+                    # Debit failed: attempt USDC refund (retain flat fee only)
+                    src = r.get("from")
+                    if src:
+                        refund_key = f"refund_usdc:{sig}"
+                        if state.should_attempt(refund_key):
+                            state.record_attempt(refund_key)
+                            refundable = max(0, amt - flat_fee_units)
+                            if refundable > 0 and solana_client.refund_usdc_to_source(src, refundable, "USDD debit failed", deposit_sig=sig):
+                                if flat_fee_units > 0:
+                                    fees.add_usdc_fee(flat_fee_units, sig=sig, kind="refund_flat")
+                                state.finalize_refund(dict(r), reason="debit_failed")
+                            else:
+                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                                if attempts >= config.MAX_ACTION_ATTEMPTS:
+                                    if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND", deposit_sig=sig):
+                                        state.log_failed_refund({
+                                            "type": "refund_failure",
+                                            "sig": sig,
+                                            "reason": "Debit failed",
+                                            "source_token_acc": src,
+                                            "amount_units": refundable,
+                                        })
+                                        out = dict(r)
+                                        out["comment"] = "quarantined"
+                                        state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
+    except Exception:
+        # Suppress processing ready entries error noise
+        pass
+
+    try:
+        # Priority 2: Check confirmations for debited entries
+        rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+        new_unprocessed: list[dict] = []
+        for r in rows:
+            if _time.time() - process_start > PROCESS_BUDGET_SEC:
+                new_unprocessed.append(r)  # Keep remaining entries
+                continue
+                
+            comment = r.get("comment")
+            if comment == "debited, awaiting confirmations" and r.get("txid"):
+                st = nexus_client.get_debit_status(r["txid"]) or {}
+                conf = int((st.get("confirmations") or 0))
+                if conf > 1:
+                    out = dict(r)
+                    out["comment"] = "processed"
+                    state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
+                    try:
+                        state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="processed")
+                    except Exception:
+                        pass
+                    continue
+            # Refund path on timeout or invalid receival account
+            ts = int(r.get("ts") or 0)
+            now_time = _time.time()
+            age_ok = (ts and (now_time - ts) > config.REFUND_TIMEOUT_SEC)
+            stale_age = (ts and (now_time - ts) > getattr(config, "STALE_DEPOSIT_QUARANTINE_SEC", 86400))
+            if age_ok:
+                src = r.get("from")
+                amt = int(r.get("amount_usdc_units") or 0)
+                flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
+                refundable = max(0, amt - flat_fee_units)
+                should_refund = False
+                if comment in ("ready for processing", "memo unresolved") and not r.get("receival_account"):
+                    should_refund = True
+                elif comment == "debited, awaiting confirmations":
+                    # Never refund after a debit has been initiated and txid recorded; rely on confirmations.
+                    should_refund = False
+                if stale_age and comment in ("ready for processing", "memo unresolved"):
+                    # Quarantine stale unprocessed deposit (>24h) instead of refunding again
+                    refundable = max(0, amt - flat_fee_units)
+                    if refundable > 0 and solana_client.move_usdc_to_quarantine(refundable, note="STALE_UNPROCESSED", deposit_sig=r.get("sig")):
+                        state.log_failed_refund({
+                            "type": "stale_quarantine",
+                            "sig": r.get("sig"),
+                            "reason": "stale_unprocessed",
+                            "age_sec": int(now_time - ts),
+                            "source_token_acc": src,
+                            "amount_units": refundable,
+                        })
+                        out = dict(r)
+                        out["comment"] = "quarantined"
+                        state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
+                        try:
+                            state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="stale_quarantined")
+                        except Exception:
+                            pass
+                        _log("USDC_QUARANTINED", sig=r.get("sig"), reason="stale_unprocessed", age=int(now_time - ts))
+                        try:
+                            print(f"[USDC_QUARANTINED] sig={r.get('sig')} amount_units={refundable} reason=stale_unprocessed age={int(now_time - ts)}")
+                            print()
+                        except Exception:
+                            pass
+                        try:
+                            state.release_reservation("debit", r.get("sig"))
+                        except Exception:
+                            pass
+                        continue
+                    else:
+                        # If we cannot quarantine (e.g., no refundable), mark processed to avoid infinite looping
+                        try:
+                            state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="stale_no_refund")
+                        except Exception:
+                            pass
+                        _log("USDC_STALE_NO_QUARANTINE", sig=r.get("sig"), age=int(now_time - ts))
+                        continue
+                if stale_age and comment == "debited, awaiting confirmations":
+                    # Debit initiated but still unconfirmed after stale threshold: log for manual review (no refund)
+                    state.log_failed_refund({
+                        "type": "stale_debit",
+                        "sig": r.get("sig"),
+                        "reason": "stale_debit_no_confirm",
+                        "age_sec": int(now_time - ts),
+                        "txid": r.get("txid"),
+                        "receival_account": r.get("receival_account"),
+                        "amount_units": amt,
+                    })
+                    _log("USDC_STALE_DEBIT", sig=r.get("sig"), age=int(now_time - ts), txid=r.get("txid"))
+                    try:
+                        print(f"[USDC_QUARANTINED] sig={r.get('sig')} amount_units={amt} reason=stale_debit_no_confirm age={int(now_time - ts)}")
+                        print()
+                    except Exception:
+                        pass
+                    # Keep it in list for potential later confirmation, do not refund/quarantine.
+                    new_unprocessed.append(r)
+                    continue
+                if should_refund and src and refundable > 0:
+                    refund_key = f"refund_usdc:{r.get('sig')}"
+                    if state.should_attempt(refund_key):
+                        state.record_attempt(refund_key)
+                        sig = r.get("sig")  # Fix undefined sig variable
+                        if solana_client.refund_usdc_to_source(src, refundable, "timeout or unresolved receival_account", deposit_sig=sig):
+                            if flat_fee_units > 0:
+                                fees.add_usdc_fee(flat_fee_units, sig=r.get('sig'), kind="refund_flat")
+                            state.finalize_refund(dict(r), reason="timeout_or_unresolved")
+                            # release possible stale reservation
+                            try:
+                                state.release_reservation("debit", r.get("sig"))
+                            except Exception:
+                                pass
+                            continue
+                        else:
+                            attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                            if attempts >= config.MAX_ACTION_ATTEMPTS:
+                                if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND", deposit_sig=r.get("sig")):
+                                    state.log_failed_refund({
+                                        "type": "refund_failure",
+                                        "sig": r.get("sig"),
+                                        "reason": "timeout/unconfirmed",
+                                        "source_token_acc": src,
+                                        "amount_units": refundable,
+                                    })
+                                    out = dict(r)
+                                    out["comment"] = "quarantined"
+                                    state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
+                                    try:
+                                        state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="quarantined")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        state.release_reservation("debit", r.get("sig"))
+                                    except Exception:
+                                        pass
+                                    continue
+            new_unprocessed.append(r)
+        state.write_jsonl(config.UNPROCESSED_SIGS_FILE, new_unprocessed)
+    except Exception:
+        # Suppress confirm/move processed error noise
+        pass
+
+    try:
+        # Priority 3: Mark refund due entries and retry memo resolution
+        rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+        now = _time.time()
+        for r in rows:
+            if _time.time() - process_start > PROCESS_BUDGET_SEC:
+                break
+                
+            ts = int(r.get("ts") or 0)
+            if (not r.get("receival_account") and ts and now - ts > config.REFUND_TIMEOUT_SEC):
+                def _pred(x):
+                    return x.get("sig") == r.get("sig")
+                def _upd(x):
+                    x["comment"] = "refund due"
+                    return x
+                state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
+    except Exception:
+        # Suppress refund annotation error noise
+        pass
+
+    # Cleanup stale rows and update waterline
+    try:
+        rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
+        now_ts = _time.time()
+        active_ts = []
+        for r in rows:
+            rts = int(r.get("ts") or 0)
+            if not rts:
+                continue
+            age = now_ts - rts
+            if age > getattr(config, "STALE_ROW_SEC", 86400):
+                # Stale row -> mark for manual review and move to processed to unblock waterline
+                out = dict(r)
+                out["comment"] = "stale_manual_review"
+                state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
+                try:
+                    state.mark_solana_processed(r.get("sig"), ts=rts, reason="stale_manual_review")
+                except Exception:
+                    pass
+            else:
+                active_ts.append(rts)
+        # Rewrite unprocessed dropping stale rows
+        new_rows = [r for r in rows if r.get("comment") != "stale_manual_review"]
+        state.write_jsonl(config.UNPROCESSED_SIGS_FILE, new_rows)
+        if active_ts:
+            min_ts = min(active_ts)
+            state.propose_solana_waterline(int(max(0, min_ts - config.HEARTBEAT_WATERLINE_SAFETY_SEC)))
+        else:
+            # No unprocessed entries left: advance waterline to current time minus buffer
+            # This prevents unnecessary re-scanning of old signatures
+            current_ts = int(now_ts)
+            waterline_ts = max(0, current_ts - config.HEARTBEAT_WATERLINE_SAFETY_SEC)
+            state.propose_solana_waterline(waterline_ts)
+            _log("WATERLINE_ADVANCED", new_ts=waterline_ts, reason="no_unprocessed_entries")
+    except Exception:
+        pass
+
+    state.save_state()
+
+
 def poll_solana_deposits():
     from solana.rpc.api import Client
     from solders.signature import Signature
@@ -120,6 +418,8 @@ def poll_solana_deposits():
                         pass
                     state.save_last_vault_balance(current_bal)
                     _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
+                    # Still process existing unprocessed entries before returning
+                    process_unprocessed_entries()
                     return
             except Exception:
                 pass
@@ -715,7 +1015,7 @@ def poll_solana_deposits():
                                 state.append_jsonl(config.UNPROCESSED_SIGS_FILE, entry)
                                 unprocessed.append(entry)
                                 _log("USDC_QUEUED", sig=sig, amount=amount_usdc_units, from_acct=source_token_acc, path="delta")
-                            recv = _extract_nexus_receival_from_memo(tx)
+                            recv, raw_cands = _extract_nexus_receival_from_memo(tx)
                             if recv:
                                 def _pred(r):
                                     return r.get("sig") == sig
@@ -735,6 +1035,20 @@ def poll_solana_deposits():
                                     print()
                                 except Exception:
                                     pass
+                            elif raw_cands:
+                                def _pred2(r):
+                                    return r.get("sig") == sig
+                                def _upd2(r):
+                                    r["raw_memo_candidates"] = list(raw_cands)
+                                    r["comment"] = "memo unresolved"
+                                    return r
+                                state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred2, _upd2)
+                                for r in unprocessed:
+                                    if r.get("sig") == sig:
+                                        r["raw_memo_candidates"] = list(raw_cands)
+                                        r["comment"] = "memo unresolved"
+                                        break
+                                _log("USDC_MEMO_UNRESOLVED", sig=sig, amount=amount_usdc_units, path="delta", candidates=len(raw_cands))
                             else:
                                 refundable = max(0, amount_usdc_units - flat_fee_units)
                                 if source_token_acc and refundable > 0 and solana_client.refund_usdc_to_source(source_token_acc, refundable, "missing/invalid memo", deposit_sig=sig):
@@ -779,272 +1093,5 @@ def poll_solana_deposits():
         # Suppress top-level poll errors to keep terminal focused on deposit lifecycle
         pass
     finally:
-        try:
-            rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-            for r in rows:
-                if r.get("comment") == "ready for processing" and r.get("receival_account"):
-                    if r.get("txid"):
-                        continue
-                    sig = r.get("sig")
-                    # Reservation to prevent concurrent debit
-                    if not state.reserve_action("debit", sig):
-                        continue
-                    sig = r.get("sig")
-                    recv = r.get("receival_account")
-                    amt = int(r.get("amount_usdc_units") or 0)
-                    flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
-                    dyn_bps = max(0, int(getattr(config, "DYNAMIC_FEE_BPS", 0)))
-                    pre_dyn = max(0, amt - flat_fee_units)
-                    dyn_fee = (pre_dyn * dyn_bps) // 10000 if dyn_bps > 0 else 0
-                    net_usdc = max(0, pre_dyn - dyn_fee)
-                    # Convert net USDC units to decimal amount for 1:1 USDC->USDD swap
-                    net_usdc_decimal = Decimal(net_usdc) / (10 ** config.USDC_DECIMALS)
-                    ref = state.next_reference()
-                    treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-                    if not treas:
-                        ok, txid = (False, None)
-                    else:
-                        # Pass decimal amount directly; nexus_client will format appropriately
-                        ok, txid = nexus_client.debit_account_with_txid(treas, recv, net_usdc_decimal, ref)
-                    if ok and txid:
-                        total_fee = flat_fee_units + dyn_fee
-                        # Record fee components separately for audit clarity.
-                        if flat_fee_units > 0:
-                            fees.add_usdc_fee(flat_fee_units, sig=sig, kind="flat")
-                        if dyn_fee > 0:
-                            fees.add_usdc_fee(dyn_fee, sig=sig, kind="dynamic")
-                        def _pred(x):
-                            return x.get("sig") == sig
-                        def _upd(x):
-                            x["txid"] = txid
-                            x["reference"] = ref
-                            x["comment"] = "debited, awaiting confirmations"
-                            return x
-                        state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
-                        try:
-                            print(f"[USDC_DEBITED] sig={sig} txid={txid} ref={ref} net_usdc={net_usdc} usdd_decimal={net_usdc_decimal}")
-                            print()
-                        except Exception:
-                            pass
-                    else:
-                        # Release reservation on failure
-                        state.release_reservation("debit", sig)
-                        try:
-                            print(f"[USDC_DEBIT_FAIL] sig={sig} net_usdc={net_usdc} reason=debit_failed")
-                            print()
-                        except Exception:
-                            pass
-                        # Debit failed: attempt USDC refund (retain flat fee only)
-                        src = r.get("from")
-                        if src:
-                            refund_key = f"refund_usdc:{sig}"
-                            if state.should_attempt(refund_key):
-                                state.record_attempt(refund_key)
-                                refundable = max(0, amt - flat_fee_units)
-                                if refundable > 0 and solana_client.refund_usdc_to_source(src, refundable, "USDD debit failed", deposit_sig=sig):
-                                    if flat_fee_units > 0:
-                                        fees.add_usdc_fee(flat_fee_units, sig=sig, kind="refund_flat")
-                                    state.finalize_refund(dict(r), reason="debit_failed")
-                                else:
-                                    attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
-                                    if attempts >= config.MAX_ACTION_ATTEMPTS:
-                                        if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND", deposit_sig=sig):
-                                            state.log_failed_refund({
-                                                "type": "refund_failure",
-                                                "sig": sig,
-                                                "reason": "Debit failed",
-                                                "source_token_acc": src,
-                                                "amount_units": refundable,
-                                            })
-                                            out = dict(r)
-                                            out["comment"] = "quarantined"
-                                            state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
-        except Exception:
-            # Suppress processing ready entries error noise
-            pass
-
-        try:
-            rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-            new_unprocessed: list[dict] = []
-            for r in rows:
-                comment = r.get("comment")
-                if comment == "debited, awaiting confirmations" and r.get("txid"):
-                    st = nexus_client.get_debit_status(r["txid"]) or {}
-                    conf = int((st.get("confirmations") or 0))
-                    if conf > 1:
-                        out = dict(r)
-                        out["comment"] = "processed"
-                        state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
-                        try:
-                            state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="processed")
-                        except Exception:
-                            pass
-                        continue
-                # Refund path on timeout or invalid receival account
-                ts = int(r.get("ts") or 0)
-                now_time = __import__("time").time()
-                age_ok = (ts and (now_time - ts) > config.REFUND_TIMEOUT_SEC)
-                stale_age = (ts and (now_time - ts) > getattr(config, "STALE_DEPOSIT_QUARANTINE_SEC", 86400))
-                if age_ok:
-                    src = r.get("from")
-                    amt = int(r.get("amount_usdc_units") or 0)
-                    flat_fee_units = max(0, int(getattr(config, "FLAT_FEE_USDC_UNITS", 0)))
-                    refundable = max(0, amt - flat_fee_units)
-                    should_refund = False
-                    if comment in ("ready for processing", "memo unresolved") and not r.get("receival_account"):
-                        should_refund = True
-                    elif comment == "debited, awaiting confirmations":
-                        # Never refund after a debit has been initiated and txid recorded; rely on confirmations.
-                        should_refund = False
-                    if stale_age and comment in ("ready for processing", "memo unresolved"):
-                        # Quarantine stale unprocessed deposit (>24h) instead of refunding again
-                        refundable = max(0, amt - flat_fee_units)
-                        if refundable > 0 and solana_client.move_usdc_to_quarantine(refundable, note="STALE_UNPROCESSED", deposit_sig=r.get("sig")):
-                            state.log_failed_refund({
-                                "type": "stale_quarantine",
-                                "sig": r.get("sig"),
-                                "reason": "stale_unprocessed",
-                                "age_sec": int(now_time - ts),
-                                "source_token_acc": src,
-                                "amount_units": refundable,
-                            })
-                            out = dict(r)
-                            out["comment"] = "quarantined"
-                            state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
-                            try:
-                                state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="stale_quarantined")
-                            except Exception:
-                                pass
-                            _log("USDC_QUARANTINED", sig=r.get("sig"), reason="stale_unprocessed", age=int(now_time - ts))
-                            try:
-                                print(f"[USDC_QUARANTINED] sig={r.get('sig')} amount_units={refundable} reason=stale_unprocessed age={int(now_time - ts)}")
-                                print()
-                            except Exception:
-                                pass
-                            try:
-                                state.release_reservation("debit", r.get("sig"))
-                            except Exception:
-                                pass
-                            continue
-                        else:
-                            # If we cannot quarantine (e.g., no refundable), mark processed to avoid infinite looping
-                            try:
-                                state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="stale_no_refund")
-                            except Exception:
-                                pass
-                            _log("USDC_STALE_NO_QUARANTINE", sig=r.get("sig"), age=int(now_time - ts))
-                            continue
-                    if stale_age and comment == "debited, awaiting confirmations":
-                        # Debit initiated but still unconfirmed after stale threshold: log for manual review (no refund)
-                        state.log_failed_refund({
-                            "type": "stale_debit",
-                            "sig": r.get("sig"),
-                            "reason": "stale_debit_no_confirm",
-                            "age_sec": int(now_time - ts),
-                            "txid": r.get("txid"),
-                            "receival_account": r.get("receival_account"),
-                            "amount_units": amt,
-                        })
-                        _log("USDC_STALE_DEBIT", sig=r.get("sig"), age=int(now_time - ts), txid=r.get("txid"))
-                        try:
-                            print(f"[USDC_QUARANTINED] sig={r.get('sig')} amount_units={amt} reason=stale_debit_no_confirm age={int(now_time - ts)}")
-                            print()
-                        except Exception:
-                            pass
-                        # Keep it in list for potential later confirmation, do not refund/quarantine.
-                        new_unprocessed.append(r)
-                        continue
-                    if should_refund and src and refundable > 0:
-                        refund_key = f"refund_usdc:{r.get('sig')}"
-                        if state.should_attempt(refund_key):
-                            state.record_attempt(refund_key)
-                            if solana_client.refund_usdc_to_source(src, refundable, "timeout or unresolved receival_account", deposit_sig=sig):
-                                if flat_fee_units > 0:
-                                    fees.add_usdc_fee(flat_fee_units, sig=r.get('sig'), kind="refund_flat")
-                                state.finalize_refund(dict(r), reason="timeout_or_unresolved")
-                                # release possible stale reservation
-                                try:
-                                    state.release_reservation("debit", r.get("sig"))
-                                except Exception:
-                                    pass
-                                continue
-                            else:
-                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
-                                if attempts >= config.MAX_ACTION_ATTEMPTS:
-                                    if solana_client.move_usdc_to_quarantine(refundable, note="FAILED_REFUND", deposit_sig=r.get("sig")):
-                                        state.log_failed_refund({
-                                            "type": "refund_failure",
-                                            "sig": r.get("sig"),
-                                            "reason": "timeout/unconfirmed",
-                                            "source_token_acc": src,
-                                            "amount_units": refundable,
-                                        })
-                                        out = dict(r)
-                                        out["comment"] = "quarantined"
-                                        state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
-                                        try:
-                                            state.mark_solana_processed(r.get("sig"), ts=int(r.get("ts") or 0), reason="quarantined")
-                                        except Exception:
-                                            pass
-                                        try:
-                                            state.release_reservation("debit", r.get("sig"))
-                                        except Exception:
-                                            pass
-                                        continue
-                new_unprocessed.append(r)
-            state.write_jsonl(config.UNPROCESSED_SIGS_FILE, new_unprocessed)
-        except Exception:
-            # Suppress confirm/move processed error noise
-            pass
-
-        try:
-            rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-            now = __import__("time").time()
-            for r in rows:
-                ts = int(r.get("ts") or 0)
-                if (not r.get("receival_account") and ts and now - ts > config.REFUND_TIMEOUT_SEC):
-                    def _pred(x):
-                        return x.get("sig") == r.get("sig")
-                    def _upd(x):
-                        x["comment"] = "refund due"
-                        return x
-                    state.update_jsonl_row(config.UNPROCESSED_SIGS_FILE, _pred, _upd)
-        except Exception:
-            # Suppress refund annotation error noise
-            pass
-
-        # After updates, set waterline to min ts in unprocessed minus buffer
-        try:
-            rows = state.read_jsonl(config.UNPROCESSED_SIGS_FILE)
-            now_ts = __import__("time").time()
-            active_ts = []
-            for r in rows:
-                rts = int(r.get("ts") or 0)
-                if not rts:
-                    continue
-                age = now_ts - rts
-                if age > getattr(config, "STALE_ROW_SEC", 86400):
-                    # Stale row -> mark for manual review and move to processed to unblock waterline
-                    out = dict(r)
-                    out["comment"] = "stale_manual_review"
-                    state.append_jsonl(config.PROCESSED_SWAPS_FILE, out)
-                    try:
-                        state.mark_solana_processed(r.get("sig"), ts=rts, reason="stale_manual_review")
-                    except Exception:
-                        pass
-                else:
-                    active_ts.append(rts)
-            # Rewrite unprocessed dropping stale rows
-            new_rows = [r for r in rows if r.get("comment") != "stale_manual_review"]
-            state.write_jsonl(config.UNPROCESSED_SIGS_FILE, new_rows)
-            if active_ts:
-                min_ts = min(active_ts)
-                state.propose_solana_waterline(int(max(0, min_ts - config.HEARTBEAT_WATERLINE_SAFETY_SEC)))
-            else:
-                # No active rows -> allow advancing to earliest processed candidate if we had any confirmed_bt_candidates
-                if 'confirmed_bt_candidates' in locals() and confirmed_bt_candidates:
-                    state.propose_solana_waterline(int(min(confirmed_bt_candidates)))
-        except Exception:
-            pass
-
-        state.save_state()
+        # Process unprocessed entries regardless of signature polling results
+        process_unprocessed_entries()
