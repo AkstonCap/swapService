@@ -464,7 +464,8 @@ def poll_nexus_usdd_deposits():
                 break
         if backlog_truncated:
             print(f"[warn] USDD_PAGINATION_BACKLOG: reached max pages ({max_pages}) with full pages; potential older deposits pending.")
-"""
+
+        """
         # Step 3: resolve receival_account for unprocessed (skip already refunded)
         for r in list(unprocessed):
             cmt = r.get("comment") or ""
@@ -945,7 +946,7 @@ def poll_nexus_usdd_deposits():
                 state.write_jsonl(unprocessed_path, active_rows)
         except Exception:
             pass
-"""
+        """
         # Step 6: waterline proposal (only advance when safe)
         try:
             safety = int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0))
