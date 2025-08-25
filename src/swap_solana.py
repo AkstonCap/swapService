@@ -402,20 +402,8 @@ def poll_solana_deposits():
                 delta = current_bal - last_bal
                 if delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0):
                     # Advance waterline opportunistically using recent signatures
-                    try:
-                        sigs_meta = client.get_signatures_for_address(config.VAULT_USDC_ACCOUNT, limit=20)
-                        newest_ts = 0
-                        for entry in getattr(sigs_meta, 'value', []) or []:
-                            try:
-                                bt = int(getattr(entry, 'block_time', 0) or entry.get('blockTime') or 0)
-                            except Exception:
-                                bt = 0
-                            if bt > newest_ts:
-                                newest_ts = bt
-                        if newest_ts:
-                            state.propose_solana_waterline(newest_ts)
-                    except Exception:
-                        pass
+                    state.propose_solana_waterline(poll_start)
+                    
                     state.save_last_vault_balance(current_bal)
                     _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
                     # Still process existing unprocessed entries before returning
