@@ -158,7 +158,7 @@ def run():
         # usdd_disp = _fmt_units(usdd_amount, config.USDD_DECIMALS)
         treas = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', '')
         suffix = f" — Treasury: {treas}" if treas else ""
-        print(f"   USDD Circulating Supply: {usdd_amount} USDD ({usdd_units} base){suffix}")
+        print(f"   USDD Circulating Supply: {usdd_amount} USDD ){suffix}")
     except Exception as e:
         print(f"   Startup metrics error: {e}")
 
@@ -291,8 +291,8 @@ def run():
             # Guard long-running pollers with watchdog timeouts so Ctrl+C remains responsive
             loop_slice_start = time.time()
             
-            SOLANA_BUDGET = getattr(config, "SOLANA_POLL_TIME_BUDGET_SEC", 15)
-            NEXUS_POLL_BUDGET = getattr(config, "NEXUS_POLL_TIME_BUDGET_SEC", 15)
+            SOLANA_BUDGET = getattr(config, "SOLANA_POLL_TIME_BUDGET_SEC", 20)
+            NEXUS_POLL_BUDGET = getattr(config, "NEXUS_POLL_TIME_BUDGET_SEC", 20)
             UNPROCESSED_BUDGET = getattr(config, "UNPROCESSED_PROCESS_BUDGET_SEC", 30)
             NEXUS_PROCESS_BUDGET = getattr(config, "UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC", 30)
             
