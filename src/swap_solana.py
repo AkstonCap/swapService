@@ -395,7 +395,7 @@ def poll_solana_deposits():
         processed_count = 0
         client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
         # Pre-balance micro batch skip
-        if getattr(config, "IGNORE_MICRO_USDC", False):
+        if getattr(config, "IGNORE_MICRO_USDC", True):
             try:
                 current_bal = solana_client.get_vault_usdc_balance_units(client)
                 last_bal = state.load_last_vault_balance()
