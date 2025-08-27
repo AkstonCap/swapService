@@ -22,6 +22,7 @@ last_sent_sig: str | None = None
 TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
+#def fetch_token_account_balance(token):
 
 def _rpc_to_json(resp):
     try:
