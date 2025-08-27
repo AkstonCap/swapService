@@ -393,7 +393,7 @@ def poll_solana_deposits():
         poll_start = _time.time()
         fetch_count = 0
         processed_count = 0
-        client = Client(getattr(config, "SOLANA_RPC_URL", getattr(config, "RPC_URL", None)))
+        client = Client(getattr(config, "RPC_URL", None))
         # Pre-balance micro batch skip
         if getattr(config, "IGNORE_MICRO_USDC", True):
             try:
@@ -407,7 +407,7 @@ def poll_solana_deposits():
                     state.save_last_vault_balance(current_bal)
                     _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
                     # Still process existing unprocessed entries before returning
-                    process_unprocessed_entries()
+                    #process_unprocessed_entries()
                     return
             except Exception:
                 pass
