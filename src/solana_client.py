@@ -22,7 +22,127 @@ last_sent_sig: str | None = None
 TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
-#def fetch_token_account_balance(token):
+
+def fetch_token_account_transaction_history(token_account_addr: str) -> list:
+    """Fetch the transaction history of a Solana token account.
+    
+    Args:
+        token_account_addr: The token account address as a string.
+        
+    Returns:
+        A list of transactions (dict), or an empty list on error.
+    """
+    try:
+        client = Client(config.RPC_URL)
+        resp = _rpc_call(client.get_token_account_transaction_history, PublicKey.from_string(token_account_addr))
+        return _rpc_get_value(resp) or []
+    except Exception:
+        return []
+    
+
+def send_usdc(destination: str, amount_base_units: int, memo: str | None = None, mode: str = "auto", deposit_sig: str | None = None) -> tuple[bool, str | None]:
+    """
+    Unified function to send USDC from vault to various destinations.
+    
+    Args:
+        destination: Target address (owner address or token account address)
+        amount_base_units: Amount in base units
+        memo: Optional memo string for transaction
+        mode: Send mode - "auto" (detect type), "owner" (derive ATA), "token_account" (direct), "refund", "quarantine"
+        deposit_sig: For refund/quarantine modes, the original deposit signature
+        
+    Returns:
+        Tuple of (success: bool, signature: str | None)
+    """
+    if amount_base_units <= 0:
+        return True, None
+    
+    # Idempotency checks for structured memos
+    from . import state
+    if memo:
+        if memo.isdigit():
+            ref_key = f"nexus_ref_{memo}"
+            if ref_key in state.processed_nexus_txs:
+                return True, None
+        elif memo.startswith("nexus_txid:"):
+            txid_part = memo.split(":", 1)[1]
+            proc_key = f"nexus_txid:{txid_part}"
+            if proc_key in state.processed_nexus_txs:
+                return True, None
+    
+    try:
+        kp = load_vault_keypair()
+        client = Client(config.RPC_URL)
+        
+        # Determine destination token account based on mode
+        if mode == "token_account" or (mode == "auto" and _is_token_account_for_mint(destination, config.USDC_MINT)):
+            dest_token_account = PublicKey.from_string(destination)
+        elif mode == "owner" or (mode == "auto" and not _is_token_account_for_mint(destination, config.USDC_MINT)):
+            owner = PublicKey.from_string(destination)
+            dest_token_account = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
+            # For owner mode, check if ATA exists
+            if mode == "owner":
+                ata_info = _rpc_get_value(_rpc_call(client.get_account_info, dest_token_account))
+                if ata_info is None:
+                    print("Recipient USDC ATA is missing; not creating it. Ask recipient to initialize their USDC ATA.")
+                    return False, None
+        elif mode == "refund":
+            dest_token_account = PublicKey.from_string(destination)
+        elif mode == "quarantine":
+            quarantine_addr = getattr(config, "USDC_QUARANTINE_ACCOUNT", None)
+            if not quarantine_addr:
+                print("Quarantine account not configured; skipping move")
+                return False, None
+            dest_token_account = PublicKey.from_string(quarantine_addr)
+            # Set quarantine memo
+            if deposit_sig:
+                memo = f"quarantinedSig:{deposit_sig}"
+            elif memo:
+                memo = f"quarantined:{memo}"
+            else:
+                memo = "quarantined"
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+        
+        # Build transfer instruction
+        ix = transfer_checked(
+            program_id=TOKEN_PROGRAM_ID,
+            source=config.VAULT_USDC_ACCOUNT,
+            mint=config.USDC_MINT,
+            dest=dest_token_account,
+            owner=kp.pubkey(),
+            amount=amount_base_units,
+            decimals=config.USDC_DECIMALS,
+            signers=[],
+        )
+        
+        # Build instructions list
+        ixs = [ix]
+        mix = _memo_ix(memo)
+        if mix:
+            ixs.append(mix)
+        
+        # Send transaction
+        sig = _build_and_send_legacy_tx(ixs, kp)
+        
+        # Mark processed for idempotency
+        try:
+            if memo:
+                if memo.isdigit():
+                    state.mark_nexus_processed(f"nexus_ref_{memo}", reason="usdc_sent")
+                elif memo.startswith("nexus_txid:"):
+                    txid_part = memo.split(":", 1)[1]
+                    state.mark_nexus_processed(f"nexus_txid:{txid_part}", reason="usdc_sent")
+        except Exception:
+            pass
+        
+        print(f"Sent USDC tx sig: {sig} (mode: {mode})")
+        return True, sig
+        
+    except Exception as e:
+        print(f"Error sending USDC: {e}")
+        return False, None
+
 
 def _rpc_to_json(resp):
     try:
@@ -425,9 +545,6 @@ def ensure_send_usdc_owner_or_ata(addr_maybe_owner_or_token: str, amount_base_un
     except Exception as e:
         print(f"Error in ensure_send_usdc_owner_or_ata: {e}")
         return False
-
-
-# was_usdc_sent_for_nexus_tx removed (obsolete; superseded by reference + memo recovery)
 
 
 def is_valid_usdc_token_account(addr: str) -> bool:
