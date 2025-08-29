@@ -24,6 +24,7 @@ VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
 VAULT_USDC_ACCOUNT = PublicKey.from_string(os.getenv("VAULT_USDC_ACCOUNT"))
 USDC_MINT = PublicKey.from_string(os.getenv("USDC_MINT"))
 SOL_MINT = PublicKey.from_string(os.getenv("SOL_MINT"))
+SOL_MAIN_ACCOUNT = PublicKey.from_string(os.getenv("SOL_MAIN_ACCOUNT"))
 
 # Decimals
 USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
@@ -88,13 +89,13 @@ HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC",
 # Fees (optional)
 # One flat USDC fee (token units, e.g., 0.1 USDC) and one dynamic fee (bps of USDC amount),
 # used consistently across both swap directions.
-FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.1")  # fixed fee in USDC token units
-FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # tiny routing threshold in USDD token units
+FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.5")  # fixed fee in USDC token units for USDD->USDC swaps
+FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # tiny routing threshold in USDD tokens for USDC->USDD swaps
 def _to_units(s: str, decimals: int) -> int:
     from decimal import Decimal
     return int((Decimal(s) * (Decimal(10) ** decimals)).to_integral_value())
 FLAT_FEE_USDC_UNITS = _to_units(FLAT_FEE_USDC, USDC_DECIMALS)
-FLAT_FEE_USDD_UNITS = _to_units(FLAT_FEE_USDD, USDD_DECIMALS)
+FLAT_FEE_USDC_UNITS_REFUND = _to_units(FLAT_FEE_USDD, USDC_DECIMALS)
 
 # Single dynamic fee setting (bps of USDC amount). Applies to both directions.
 DYNAMIC_FEE_BPS = int(os.getenv("DYNAMIC_FEE_BPS", "10"))  # 10 bps = 0.1%
@@ -106,7 +107,7 @@ NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 # Anti-DoS protections
 MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.100101")  # minimum deposit to process as swap
 MIN_DEPOSIT_USDC_UNITS = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
-MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.100101")  # minimum credit to process as swap
+MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.500501")  # minimum credit to process as swap
 MIN_CREDIT_USDD_UNITS = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
 MAX_DEPOSITS_PER_LOOP = int(os.getenv("MAX_DEPOSITS_PER_LOOP", "100"))  # batch processing limit
 MAX_CREDITS_PER_LOOP = int(os.getenv("MAX_CREDITS_PER_LOOP", "100"))  # batch processing limit for USDD credits

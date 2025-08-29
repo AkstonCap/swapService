@@ -154,7 +154,7 @@ def run():
         usdc_disp = _fmt_units(usdc_units, config.USDC_DECIMALS)
         print(f"   USDC Vault Balance: {usdc_disp} USDC ({usdc_units} base) — {config.VAULT_USDC_ACCOUNT}")
 
-        usdd_amount = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=10)
+        usdd_amount = _safe_call(nexus_client.get_circulating_usdd, timeout_sec=10)
         # usdd_disp = _fmt_units(usdd_amount, config.USDD_DECIMALS)
         treas = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', '')
         suffix = f" — Treasury: {treas}" if treas else ""

@@ -3,6 +3,8 @@ import subprocess
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any
 from . import config
+from . import state_db, nexus_client
+import time
 
 
 def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
@@ -61,6 +63,19 @@ def get_account_info(nexus_addr: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
+def is_valid_usdd_account(account: str) -> bool:
+    """Check if a Nexus account exists and is a USDD token account."""
+    info = get_account_info(account)
+    if not info:
+        return False
+    if not info.get("address"):
+        return False
+    if info.get("ticker") != "USDD":
+        return False
+    return True
+
+
 def account_exists_and_owner(account: Dict[str, Any], owner: str | None = None) -> bool:
     if not isinstance(account, dict):
         return False
@@ -116,41 +131,20 @@ def _format_usdd_amount(amount_units: int) -> str:
         return str(int(amount_units))
 
 
-def debit_usdd(to_addr: str, amount_usdd_units: int, reference: int | str | None = 0) -> bool:
-    """Debit/mint USDD to an account. Amount supplied in internal base units; converted to decimal string."""
-    if not config.NEXUS_PIN:
-        print("ERROR: NEXUS_PIN not set")
-        return False
-    # Normalize reference: allow int or str numeric; omit if falsy
-    ref_part: list[str] = []
-    try:
-        if reference is not None:
-            # Accept int or numeric string; default to 0
-            ref_val = int(reference)
-            ref_part = [f"reference={ref_val}"]
-    except Exception:
-        # If non-numeric provided, omit to satisfy uint64 restriction
-        ref_part = []
-    amount_str = _format_usdd_amount(int(amount_usdd_units))
-    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", *ref_part, f"pin={config.NEXUS_PIN}"]
-    print(">>> Nexus debit:", [c if not str(c).startswith("pin=") else "pin=***" for c in cmd])
-    try:
-        code, out, err = _run(cmd, timeout=30)
-        if code != 0:
-            print("Nexus debit error:", err or out)
-            return False
-        print("Nexus debit ok:", out.strip())
-        return True
-    except Exception as e:
-        print("Nexus debit exception:", e)
-        return False
 
-def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -> tuple[bool, str | None]:
+def get_usdd_send_amount(amount_usdc: int) -> int:
+    """Calculate the USDD amount to send, accounting for fees."""
+    base_amount = amount_usdc / 10**config.USDC_DECIMALS
+    fee = base_amount * config.DYNAMIC_FEE_BPS / 10000 + config.FLAT_FEE_USDD
+    return base_amount - fee
+
+
+def debit_usdd_with_txid(to_addr: str, amount_usdd: int, reference: int) -> tuple[bool, str | None]:
     """Perform debit (amount in base units) and attempt to parse a txid from output."""
     if not config.NEXUS_PIN:
         return (False, None)
-    amount_str = _format_usdd_amount(int(amount_usdd_units))
-    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
+    
+    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_usdd}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     code, out, err = _run(cmd, timeout=5)
     if code != 0:
         return (False, None)
@@ -160,11 +154,53 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -
     if isinstance(data, dict):
         txid = data.get("txid")
     if not txid:
-        for line in (out or "").splitlines():
-            if "txid=" in line:
-                txid = line.split("txid=", 1)[1].strip().split()[0]
-                break
+        return (False, None)
     return (True, str(txid) if txid else None)
+
+
+def get_transaction_confirmations(txid: str) -> int | None:
+    """Fetch transaction details by txid."""
+    cmd = [config.NEXUS_CLI, "finance/transactions/token", f"name=USDD"]
+    try:
+        code, out, err = _run(cmd, timeout=5)
+        if code != 0:
+            return None
+        res = _parse_json_lenient(out)
+        res = [tx for tx in res if tx.get("txid") == txid]
+        return int(res[0].get("confirmations")) if res else None
+    except Exception as e:
+        print(f"Error fetching transaction {txid}: {e}")
+    return None
+
+
+def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
+
+    sigs = state_db.filter_unprocessed_sigs({
+        'status': 'debited, awaiting_confirmation',
+        'limit': 1000
+    })
+    if not sigs:
+        return 0
+
+    processed_count = 0
+    time_start = time.monotonic()
+    current_time = time_start
+
+    for sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, status, reference in sigs:
+        
+        confirmations = get_transaction_confirmations(txid)
+        if confirmations is not None and confirmations < min_confirmations:
+            continue
+        elif confirmations >= min_confirmations:
+            state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, "debit_confirmed", reference)
+            state_db.remove_unprocessed_sig(sig)
+            processed_count += 1
+        
+        current_time = time.monotonic()
+        if current_time - time_start > timeout:
+            break
+
+    return processed_count
 
 
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
@@ -229,18 +265,6 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
                 txid = line.split("txid=", 1)[1].strip().split()[0]
                 break
     return (True, str(txid) if txid else None)
-
-def send_tiny_usdd_to_local(amount_usdd_units: int, note: str = "TINY_USDD") -> bool:
-    to_addr = config.NEXUS_USDD_LOCAL_ACCOUNT or config.NEXUS_USDD_TREASURY_ACCOUNT
-    from_addr = config.NEXUS_USDD_TREASURY_ACCOUNT
-    if not to_addr or not from_addr:
-        print("No local/treasury USDD account configured; skipping tiny USDD routing")
-        return False
-    # Move funds from treasury to local to avoid minting new supply
-    return transfer_usdd_between_accounts(from_addr, to_addr, amount_usdd_units, note)
-
-
-# Legacy signature-based helpers removed (string references are no longer used).
 
 
 # --- Asset mapping for swaps (distordiaSwap) ---
@@ -376,18 +400,6 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
         items.sort(key=_key)
         best = items[0]
         return {"receival_account": best.get("receival_account"), "owner": best.get("owner")}
-    except Exception:
-        return None
-
-def get_debit_status(txid: str) -> Optional[Dict[str, Any]]:
-    """Fetch debit by txid and return confirmation info from finance/get/debit."""
-    try:
-        cmd = [config.NEXUS_CLI, "finance/get/debit", f"txid={txid}"]
-        code, out, err = _run(cmd, timeout=10)
-        if code != 0:
-            return None
-        data = _parse_json_lenient(out)
-        return data if isinstance(data, dict) else None
     except Exception:
         return None
 
@@ -601,7 +613,7 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
 
 
 # --- Treasury and metrics ---
-def get_circulating_usdd_units() -> int:
+def get_circulating_usdd() -> int:
     cmd = [config.NEXUS_CLI, "finance/get/token/currentsupply", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=10)
@@ -622,11 +634,6 @@ def get_circulating_usdd_units() -> int:
     except Exception as e:
         print("Nexus USDD current supply exception:", e)
         return 0
-
-
-def debit_usdd_to_self(amount_usdd_units: int, reference: str) -> bool:
-    # Mint/credit into our treasury USDD account (config.NEXUS_USDD_TREASURY_ACCOUNT)
-    return debit_usdd(config.NEXUS_USDD_TREASURY_ACCOUNT, amount_usdd_units, reference)
 
 
 def get_nxs_default_balance_units() -> int:
@@ -662,16 +669,61 @@ def get_usdd_local_balance_units() -> int:
         return 0
 
 
-def transfer_usdd_treasury_to_local(amount_usdd_units: int, reference: str = "REBALANCE") -> bool:
-    """Move USDD from treasury to local account without minting."""
-    if not config.NEXUS_USDD_TREASURY_ACCOUNT or not config.NEXUS_USDD_LOCAL_ACCOUNT:
+## Heartbeat asset handling
+# last_poll_timestamp, 
+# last_safe_timestamp_nexus, 
+# last_safe_timestamp_solana,
+# solana_token {ticker, vault_address, balance}
+# nexus_token {name, balance}
+
+def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int | None) -> bool:
+    """Update the heartbeat asset information."""
+    cmd = [
+        config.NEXUS_CLI, 
+        "assets/update/asset", 
+        f"name={config.NEXUS_HEARTBEAT_ASSET_NAME}", 
+        f"format=basic",  
+        f"pin={config.NEXUS_PIN}"
+    ]
+
+    # Conditionally add fields only if they are not None
+    if last_poll is not None:
+        cmd.append(f"last_poll_timestamp={last_poll}")
+
+    if wline_nxs is not None:
+        cmd.append(f"last_safe_timestamp_nexus={wline_nxs}")
+    
+    if wline_sol is not None:
+        cmd.append(f"last_safe_timestamp_solana={wline_sol}")
+
+    try:
+        code, out, err = _run(cmd, timeout=5)
+        if code != 0:
+            print("Nexus: update heartbeat asset error:", err or out)
+            return False
+        data = _parse_json_lenient(out)
+        if data.get("success"):
+            return True
+        else:
+            return False
+    except Exception as e:
+        print("Error updating heartbeat asset:", e)
         return False
-    return transfer_usdd_between_accounts(config.NEXUS_USDD_TREASURY_ACCOUNT, config.NEXUS_USDD_LOCAL_ACCOUNT, amount_usdd_units, reference)
+    
 
-
-def mint_usdd_to_local(amount_usdd_units: int, reference: str = "REBALANCE_TO_1") -> bool:
-    """Mint new USDD into the local account to increase circulating supply (uses debit to local)."""
-    if not config.NEXUS_USDD_LOCAL_ACCOUNT:
-        return False
-    return debit_usdd(config.NEXUS_USDD_LOCAL_ACCOUNT, amount_usdd_units, reference)
-
+def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
+    cmd = [config.NEXUS_CLI, "assets/get/asset", f"name={config.NEXUS_HEARTBEAT_ASSET_NAME}"]
+    try:
+        code, out, err = _run(cmd, timeout=5)
+        if code != 0:
+            print("Nexus: get heartbeat asset error:", err or out)
+            return None
+        data = _parse_json_lenient(out)
+        if not isinstance(data, dict) or not data.get("address"):
+            print("Nexus: get heartbeat asset failed:", out)
+            return None
+        return data
+    except Exception as e:
+        print("Error getting heartbeat asset:", e)
+        return None
+    
