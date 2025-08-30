@@ -3,6 +3,7 @@ import threading
 from . import config, state
 from .swap_solana import poll_solana_deposits, process_unprocessed_entries
 from .swap_nexus import poll_nexus_usdd_deposits, process_unprocessed_txids
+from .nexus_client import get_heartbeat_asset, update_heartbeat_asset
 
 _last_heartbeat = 0
 _last_reconcile = 0
@@ -150,12 +151,12 @@ def run():
             except Exception:
                 return str(units)
 
-        usdc_units = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=10)
+        usdc_units = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=5)
         usdc_disp = _fmt_units(usdc_units, config.USDC_DECIMALS)
         print(f"   USDC Vault Balance: {usdc_disp} USDC ({usdc_units} base) — {config.VAULT_USDC_ACCOUNT}")
 
         usdd_amount = _safe_call(nexus_client.get_circulating_usdd, timeout_sec=10)
-        # usdd_disp = _fmt_units(usdd_amount, config.USDD_DECIMALS)
+        
         treas = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', '')
         suffix = f" — Treasury: {treas}" if treas else ""
         print(f"   USDD Circulating Supply: {usdd_amount} USDD ){suffix}")
