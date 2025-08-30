@@ -77,6 +77,25 @@ def init_db():
             status TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            nickname TEXT PRIMARY KEY,
+            chain TEXT,
+            ticker TEXT,
+            name TEXT,
+            address TEXT,
+            balance REAL,
+            timestamp INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS heartbeat (
+            name TEXT PRIMARY KEY,
+            last_beat INTEGER,
+            wline_sol INTEGER,
+            wline_nxs INTEGER
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -322,5 +341,71 @@ def get_latest_reference() -> int:
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else 0
+
+
+## Accounts
+
+def insert_account(nickname: str, chain: str, ticker: str, name: str, address: str, balance: float, timestamp: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO accounts (nickname, chain, ticker, name, address, balance, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (nickname, chain, ticker, name, address, balance, timestamp))
+    conn.commit()
+    conn.close()
+
+def get_account(nickname: str) -> Optional[Tuple[str, str, str, str, str, float, int]]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM accounts WHERE nickname = ?", (nickname,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def update_account_balance_timestamp(nickname: str, balance: float, timestamp: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE accounts
+        SET balance = ?, timestamp = ?
+        WHERE nickname = ?
+    """, (balance, timestamp, nickname))
+    conn.commit()
+    conn.close()
+
+
+## Heartbeat
+
+def insert_heartbeat(name: str, last_beat: int, wline_sol: int, wline_nxs: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO heartbeat (name, last_beat, wline_sol, wline_nxs)
+        VALUES (?, ?, ?, ?)
+    """, (name, last_beat, wline_sol, wline_nxs))
+    conn.commit()
+    conn.close()
+
+def get_heartbeat(name: str) -> Optional[Tuple[str, int, int, int]]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM heartbeat WHERE name = ?", (name,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def update_heartbeat(name: str, last_beat: int | None = None, wline_sol: int | None = None, wline_nxs: int | None = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE heartbeat
+        SET last_beat = COALESCE(?, last_beat),
+            wline_sol = COALESCE(?, wline_sol),
+            wline_nxs = COALESCE(?, wline_nxs)
+        WHERE name = ?
+    """, (last_beat, wline_sol, wline_nxs, name))
+    conn.commit()
+    conn.close()
 
 # Add similar functions for other state (e.g., nexus txids, fees)
