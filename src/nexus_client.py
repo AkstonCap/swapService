@@ -703,6 +703,12 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
             return False
         data = _parse_json_lenient(out)
         if data.get("success"):
+            state_db.update_heartbeat(
+                name=config.NEXUS_HEARTBEAT_ASSET_NAME,
+                last_beat=last_poll,
+                wline_sol=wline_sol,
+                wline_nxs=wline_nxs
+            )
             return True
         else:
             return False
