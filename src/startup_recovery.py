@@ -16,7 +16,7 @@ Design notes:
 """
 from __future__ import annotations
 import json, os
-from . import config, state, solana_client
+from . import config, state, solana_client, nexus_client, state_db
 
 QUARANTINED_MEMO_PREFIX = "quarantinedSig:"
 
