@@ -673,8 +673,8 @@ def get_usdd_local_balance_units() -> int:
 # last_poll_timestamp, 
 # last_safe_timestamp_nexus, 
 # last_safe_timestamp_solana,
-# solana_token {ticker, vault_address, balance}
-# nexus_token {name, balance}
+# vaulted_token {chain, ticker, vault_address, balance}
+# minted_nexus_token {name, address, supply}
 
 def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int | None) -> bool:
     """Update the heartbeat asset information."""
