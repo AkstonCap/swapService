@@ -129,15 +129,14 @@ def read_heartbeat_waterlines() -> tuple[int, int]:
 
 
 def run():
-    print()
+    print("\n")
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
     print(f"   USDC Vault: {config.VAULT_USDC_ACCOUNT}")
     print(f"   USDD Treasury: {config.NEXUS_USDD_TREASURY_ACCOUNT}")
     print("   Monitoring:")
     print("   - USDC → USDD: Solana deposits mapped via Nexus asset (distordiaSwap)")
-    print("   - USDD → USDC: USDD deposits mapped to Solana recipients (internal state/idempotency)")
-    print()
+    print("   - USDD → USDC: USDD deposits mapped to Solana recipients (internal state/idempotency)\n")
 
     # Startup balances summary (USDC vault + USDD circulating supply) with timeout protection
     try:
