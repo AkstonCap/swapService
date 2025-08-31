@@ -372,26 +372,22 @@ def poll_solana_deposits():
             return
         
         poll_start = _time.time()
+        current_bal = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
+        last_bal = state.load_last_vault_balance()
+        delta = current_bal - last_bal
+        
+        # Pre-balance micro batch skip
+        if delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0):
+            # Advance waterline opportunistically using recent signatures
+            state.propose_solana_waterline(poll_start)                    
+            state.save_last_vault_balance(current_bal)
+            nexus_client.update_heartbeat_asset(poll_start, None, poll_start)
+            _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
+            # Still process existing unprocessed entries before returning
+            return
         
         client = Client(getattr(config, "RPC_URL", None))
-        # Pre-balance micro batch skip
-        if getattr(config, "IGNORE_MICRO_USDC", True):
-            try:
-                current_bal = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
-                last_bal = state.load_last_vault_balance()
-                delta = current_bal - last_bal
-                if delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0):
-                    # Advance waterline opportunistically using recent signatures
-                    state.propose_solana_waterline(poll_start)                    
-                    state.save_last_vault_balance(current_bal)
-                    nexus_client.update_heartbeat_asset(poll_start, None, poll_start)
-                    _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
-                    # Still process existing unprocessed entries before returning
-                    #process_unprocessed_entries()
-                    return
-            except Exception:
-                pass
-        
+       
         usdc_deposits = solana_client.fetch_filtered_token_account_transaction_history(
             config.USDC_MINT, wline_sol, config.MIN_DEPOSIT_USDC_UNITS, 10.0
             )
