@@ -20,62 +20,9 @@ from . import config, state, solana_client, nexus_client, state_db
 
 QUARANTINED_MEMO_PREFIX = "quarantinedSig:"
 
-def _read_jsonl_fast(path: str):
-    rows = []
-    if not os.path.exists(path):
-        return rows
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        rows.append(obj)
-                except Exception:
-                    continue
-    except Exception:
-        return rows
-    return rows
-
-def seed_reference_counter_if_needed() -> int | None:
-    path = config.REFERENCE_COUNTER_FILE
-    if os.path.exists(path):
-        # Already present; trust existing sequence
-        return None
-    candidates: list[int] = []
-    # Scan unprocessed & processed USDC->USDD (Solana deposits) logs for 'reference'
-    for p in (config.UNPROCESSED_SIGS_FILE, config.PROCESSED_SWAPS_FILE):
-        for row in _read_jsonl_fast(p):
-            try:
-                ref = row.get('reference')
-                if isinstance(ref, int):
-                    candidates.append(ref)
-                elif isinstance(ref, str) and ref.isdigit():
-                    candidates.append(int(ref))
-            except Exception:
-                continue
-    # Also look at unprocessed Nexus txids list for stored references
-    for p in ("unprocessed_txids.json", "processed_txids.json"):
-        for row in _read_jsonl_fast(p):
-            try:
-                ref = row.get('reference')
-                if isinstance(ref, int):
-                    candidates.append(ref)
-                elif isinstance(ref, str) and ref.isdigit():
-                    candidates.append(int(ref))
-            except Exception:
-                continue
-    next_val = (max(candidates) + 1) if candidates else 1
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump({'next': next_val}, f)
-        return next_val
-    except Exception:
-        return None
 
 def reconstruct_processed_from_memos(scan_limit: int | None = None) -> dict:
+    
     if scan_limit is None:
         scan_limit = int(getattr(config, 'STARTUP_SCAN_SIGNATURE_LIMIT', 300))
     memo_map = solana_client.scan_recent_memos(search_limit=scan_limit)
@@ -120,7 +67,7 @@ def reconstruct_processed_from_memos(scan_limit: int | None = None) -> dict:
     }
 
 def perform_startup_recovery() -> dict:
-    seeded = seed_reference_counter_if_needed()
+    seeded = nexus_client.get_last_reference()
     memo_stats = reconstruct_processed_from_memos()
     return {
         'reference_seeded': seeded,
