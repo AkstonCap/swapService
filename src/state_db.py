@@ -78,6 +78,30 @@ def init_db():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS refunded_txids (
+            txid TEXT PRIMARY KEY,
+            timestamp INTEGER,
+            amount_usdd REAL,
+            from_address TEXT,
+            to_address TEXT,
+            owner_from_address TEXT,
+            confirmations_credit INTEGER,
+            status TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS quarantined_txids (
+            txid TEXT PRIMARY KEY,
+            timestamp INTEGER,
+            amount_usdd REAL,
+            from_address TEXT,
+            to_address TEXT,
+            owner TEXT,
+            sig TEXT,
+            status TEXT
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS accounts (
             nickname TEXT PRIMARY KEY,
             chain TEXT,
@@ -100,18 +124,12 @@ def init_db():
     conn.close()
 
 
+## Unprocessed Signatures
+
 def is_unprocessed_sig(sig: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM unprocessed_sigs WHERE sig = ?", (sig,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
-
-def is_quarantined_sig(sig: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM quarantined_sigs WHERE sig = ?", (sig,))
     result = cursor.fetchone()
     conn.close()
     return result is not None
@@ -329,6 +347,35 @@ def mark_quarantined_sig(sig: str, timestamp: int, from_address: str, amount_usd
     """, (sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status))
     conn.commit()
     conn.close()
+
+def is_quarantined_sig(sig: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM quarantined_sigs WHERE sig = ?", (sig,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+## Unprocessed txids
+
+def mark_unprocessed_txid(txid: str, sig: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO unprocessed_txids (txid, sig)
+        VALUES (?, ?)
+    """, (txid, sig))
+    conn.commit()
+    conn.close()
+
+def is_unprocessed_txid(txid: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM unprocessed_txids WHERE txid = ?", (txid,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
 
 
 ## Processed txids
