@@ -733,3 +733,35 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
         print("Error getting heartbeat asset:", e)
         return None
     
+
+## Reference integer fetching
+
+def get_last_reference() -> int | None:
+    cmd = [config.NEXUS_CLI, "finance/transactions/token/timestamp,contracts.OP,contracts.id,contracts.reference", "name=USDD", "sort=timestamp", "order=desc", "limit=50"]
+    try:
+        code, out, err = _run(cmd, timeout=5)
+        if code != 0:
+            print("Nexus: get last reference error:", err or out)
+            return None
+        data = _parse_json_lenient(out)
+        txs = data if isinstance(data, list) else [data]
+        for tx in (txs or []):
+            if not isinstance(tx, dict):
+                continue
+            for c in (tx.get("contracts") or []):
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("OP")).upper() != "DEBIT":
+                    continue
+                ref = c.get("reference")
+                if ref is not None:
+                    try:
+                        return int(ref)
+                    except Exception:
+                        continue
+                elif ref is None:
+                    continue
+        return None
+    except Exception as e:
+        print("Error getting last reference:", e)
+        return None
