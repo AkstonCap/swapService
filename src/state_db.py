@@ -297,13 +297,36 @@ def remove_unprocessed_sig(sig: str):
 
 ## Processed Signatures
 
-def mark_processed_sig(sig: str, timestamp: int, amount_usdc_units: int, txid: str | None, amount_usdd_debited: float, status: str | None = None, reference: str | None = None):
+def mark_processed_sig(
+    sig: str,
+    timestamp: int,
+    amount_usdc_units: int | None = None,
+    txid: str | None = None,
+    amount_usdd: float | None = None,
+    status: str | None = None,
+    reference: int | None = None,
+):
+    """Insert/update a processed signature record.
+
+    Backward compatibility:
+      Older call sites used: mark_processed_sig(sig, timestamp, "status text")
+      In that case the third positional argument (amount_usdc_units) is actually a status string.
+    """
+    # Back-compat shim: if amount_usdc_units is actually a status string and no other
+    # fields were supplied, treat it as status.
+    if isinstance(amount_usdc_units, str) and status is None and txid is None and amount_usdd is None and reference is None:
+        status = amount_usdc_units  # type: ignore
+        amount_usdc_units = None
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO processed_sigs (sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, status, reference)
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO processed_sigs (sig, timestamp, amount_usdc_units, txid, amount_usdd, status, reference)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, status, reference))
+        """,
+        (sig, timestamp, amount_usdc_units, txid, amount_usdd, status, reference),
+    )
     conn.commit()
     conn.close()
 
@@ -314,6 +337,15 @@ def is_processed_sig(sig: str) -> bool:
     result = cursor.fetchone()
     conn.close()
     return result is not None
+
+def get_latest_reference() -> int:
+    """Fetch the latest used debit reference from processed_sigs (correct table holding reference)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT reference FROM processed_sigs WHERE reference IS NOT NULL ORDER BY reference DESC LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 
 ## Refunded Signatures
@@ -338,7 +370,21 @@ def is_refunded_sig(sig: str) -> bool:
 
 ## Quarantined sigs
 
-def mark_quarantined_sig(sig: str, timestamp: int, from_address: str, amount_usdc_units: int, memo: str | None, quarantine_sig: str | None, quarantined_units: int | None, status: str | None = None):
+def mark_quarantined_sig(
+    sig: str,
+    timestamp: int,
+    from_address: str,
+    amount_usdc_units: int,
+    memo: str | None,
+    quarantine_sig: str | None = None,  
+    quarantined_units: int | None = None,  
+    status: str | None = None,
+):
+    """Insert/update quarantined signature.
+
+    Table schema only has: sig, timestamp, from_address, amount_usdc_units, memo, status.
+    Extra legacy fields (quarantine_sig, quarantined_units) are ignored.
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -357,15 +403,32 @@ def is_quarantined_sig(sig: str) -> bool:
     return result is not None
 
 
-## Unprocessed txids
+## Unprocessed txids USDD -> USDC
 
-def mark_unprocessed_txid(txid: str, sig: str):
+def mark_unprocessed_txid(
+    txid: str,
+    sig: str | None = None,  # legacy unused param (no 'sig' column in table)
+    timestamp: int | None = None,
+    amount_usdd: float | None = None,
+    from_address: str | None = None,
+    to_address: str | None = None,
+    owner_from_address: str | None = None,
+    confirmations_credit: int | None = None,
+    status: str | None = None,
+):
+    """Insert/update an unprocessed Nexus txid.
+
+    The historical signature parameter is ignored because the table has no 'sig' column.
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO unprocessed_txids (txid, sig)
-        VALUES (?, ?)
-    """, (txid, sig))
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO unprocessed_txids (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status),
+    )
     conn.commit()
     conn.close()
 
@@ -380,15 +443,59 @@ def is_unprocessed_txid(txid: str) -> bool:
 
 ## Processed txids
 
-def get_latest_reference() -> int:
-    """Fetch the latest used debit reference from processed txids in DB."""
+def mark_processed_txid(txid: str, sig: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT reference FROM processed_txids WHERE reference IS NOT NULL ORDER BY reference DESC LIMIT 1")
-    row = cursor.fetchone()
+    cursor.execute("""
+        INSERT OR REPLACE INTO processed_txids (txid, sig)
+        VALUES (?, ?)
+    """, (txid, sig))
+    conn.commit()
     conn.close()
-    return row[0] if row else 0
 
+
+
+
+## Refunded txids
+
+def mark_refunded_txid(txid: str, sig: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO refunded_txids (txid, sig)
+        VALUES (?, ?)
+    """, (txid, sig))
+    conn.commit()
+    conn.close()
+
+def is_refunded_txid(txid: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM refunded_txids WHERE txid = ?", (txid,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+## Quarantined txids
+
+def mark_quarantined_txid(txid: str, sig: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO quarantined_txids (txid, sig)
+        VALUES (?, ?)
+    """, (txid, sig))
+    conn.commit()
+    conn.close()
+
+def is_quarantined_txid(txid: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM quarantined_txids WHERE txid = ?", (txid,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
 
 ## Accounts
 
