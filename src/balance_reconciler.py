@@ -1,261 +1,272 @@
-"""Balance reconciliation for USDC→USDD direction to prevent double-minting.
+"""Trade reconciliation between treasury USDD account and a specified user USDD account.
 
-Since Nexus debit references are limited to uint64 integers (can't include USDC deposit signatures),
-we verify that the cumulative USDD balance for each recipient address matches expected deposits minus fees.
+Objective
+---------
+After a given waterline timestamp (e.g. service last consistent checkpoint) compute the net
+USDD value flow for an account participating in both swap directions and detect any surplus
+or deficit (should be 0 if accounting is correct, ignoring in-flight, unconfirmed items).
 
-Logic:
-1. For each USDD address that received credits from treasury, calculate expected balance:
-   Expected = Sum(USDC deposits with valid memo) - Sum(fees) converted to USDD units
-2. Query actual Nexus balance for that address
-3. If actual > expected, flag potential double-mint and optionally issue corrective refund
+Requested Components (interpreted):
+ 1. Credits to USDD from the account address (user -> treasury) representing USDD->USDC swaps
+    (i.e. processed txids where from_address = user and to_address = treasury; or processed_txids
+    recorded as such after confirmation).
+ 2. Debits from treasury to the account address (treasury -> user) representing completed
+    USDC->USDD swaps or explicit refunds (processed_sigs joined to unprocessed_sigs on sig with memo nexus:<user>).
+ 3. Solana USDC deposit signatures (to vault) whose memo resolves to the user's Nexus address
+    (from unprocessed_sigs & processed_sigs) – used to recompute expected minted USDD net of fees.
+ 4. Non-refunded deposit signatures (exclude any appearing in refunded_sigs) for that user.
 
-This catches scenarios where a USDC deposit was processed twice due to state loss.
+We then derive:
+    net_treasury_out = treasury_debits_to_user_usdd
+    net_treasury_in  = user_credits_to_treasury_usdd
+    swap_net_expected = net_minted_usdd_for_user (from USDC deposits net fees)
+    trade_delta = (net_treasury_out - net_treasury_in) - swap_net_expected
+
+Interpretation:
+  trade_delta ~ 0  => balanced.
+  trade_delta > 0  => treasury appears to have sent more USDD than covered by user deposits.
+  trade_delta < 0  => user has over-contributed (or deposits not yet minted/refunded).
+
+Assumptions / Notes:
+ - processed_sigs lacks direct Nexus address; we recover it via the memo stored in unprocessed_sigs (format nexus:<addr>).
+ - amount_usdd in processed_sigs is treated as net USDD delivered; if null we recompute using fee schedule.
+ - For simplicity we ignore partially processed / awaiting confirmation statuses; only statuses starting
+   with 'debit_confirmed' or equal to 'processed' are regarded as minted.
+ - 'Refunds' on USDC side (returning USDC) reduce the effective deposit base automatically because
+   the refunded sig won't appear with a minted status.
+ - This module does NOT mutate state; it only reads DB and remote balances (optional).
 """
-from decimal import Decimal, ROUND_DOWN
-from typing import Dict, List, Tuple
-from . import config, state, nexus_client, solana_client
-import json
-import os
+
+from __future__ import annotations
+from typing import Dict, List, Tuple, Iterable
+from decimal import Decimal
+import sqlite3
+from . import config, state_db, nexus_client
+
+ELIGIBLE_SIG_STATUSES = ("debit_confirmed", "processed")
+
+# ---------------------------------------------------------------------------
+# Low-level DB helpers
+# ---------------------------------------------------------------------------
+
+def _db() -> sqlite3.Connection:
+    return sqlite3.connect(state_db.DB_PATH)
 
 
-def _read_jsonl_safe(path: str) -> List[Dict]:
-    """Read JSONL file safely, returning empty list on error."""
-    rows = []
-    if not os.path.exists(path):
-        return rows
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        rows.append(obj)
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return rows
+def _extract_nexus_address_from_memo(memo: str | None) -> str | None:
+    if not memo:
+        return None
+    if memo.lower().startswith("nexus:"):
+        addr = memo.split(":", 1)[1].strip()
+        return addr or None
+    return None
 
 
-def _usdc_to_usdd_units(usdc_units: int) -> int:
-    """Convert USDC base units to USDD base units using configured decimals."""
-    if config.USDC_DECIMALS == config.USDD_DECIMALS:
-        return usdc_units
-    if config.USDC_DECIMALS < config.USDD_DECIMALS:
-        return usdc_units * (10 ** (config.USDD_DECIMALS - config.USDC_DECIMALS))
-    return usdc_units // (10 ** (config.USDC_DECIMALS - config.USDD_DECIMALS))
+def _fee_net_usdd(amount_usdc_units: int) -> int:
+    flat_fee = max(0, int(getattr(config, 'FLAT_FEE_USDC_UNITS', 0)))
+    dynamic_bps = max(0, int(getattr(config, 'DYNAMIC_FEE_BPS', 0)))
+    pre_dynamic = max(0, amount_usdc_units - flat_fee)
+    dynamic_fee = (pre_dynamic * dynamic_bps) // 10_000
+    net_usdd = max(0, amount_usdc_units - (flat_fee + dynamic_fee)) * (10 ** config.USDC_DECIMALS)
+    return net_usdd
 
 
-def calculate_expected_balances() -> Dict[str, Dict]:
-    """Calculate expected USDD balances for each address based on processed USDC deposits.
-    
-    Returns:
-        Dict[usdd_address, {
-            'expected_usdd_units': int,
-            'deposits': List[{sig, amount_usdc, net_usdd, fees}],
-            'total_deposits_usdc': int,
-            'total_fees_usdc': int
-        }]
+# ---------------------------------------------------------------------------
+# Core aggregation
+# ---------------------------------------------------------------------------
+
+def _fetch_processed_sigs_for_account(usdd_account: str, waterline_ts: int) -> List[Tuple[str, int, int | None, str | None, float | None, str | None, int | None]]:
+    """Join processed_sigs with unprocessed_sigs on sig to recover memos and filter for account."""
+    q = """
+        SELECT ps.sig, ps.timestamp, ps.amount_usdc_units, ps.txid, ps.amount_usdd, ps.status, ps.reference,
+               us.memo
+        FROM processed_sigs ps
+        LEFT JOIN unprocessed_sigs us ON us.sig = ps.sig
+        WHERE ps.timestamp >= ? AND ps.status IS NOT NULL
+        ORDER BY ps.timestamp ASC
     """
-    expected = {}
-    
-    # Scan processed swaps (successful USDC→USDD)
-    processed_swaps = _read_jsonl_safe(config.PROCESSED_SWAPS_FILE)
-    
-    for row in processed_swaps:
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(q, (waterline_ts,))
+    rows = cur.fetchall()
+    conn.close()
+    # Filter in python for matching memo nexus:usdd_account
+    filtered: List[Tuple[str, int, int | None, str | None, float | None, str | None, int | None]] = []
+    for sig, ts, amt_usdc, txid, amt_usdd, status, ref, memo in rows:
+        addr = _extract_nexus_address_from_memo(memo)
+        if addr == usdd_account and status and (status.lower().startswith(ELIGIBLE_SIG_STATUSES[0]) or status.lower() in ELIGIBLE_SIG_STATUSES):
+            filtered.append((sig, ts, amt_usdc, txid, amt_usdd, status, ref))
+    return filtered
+
+
+def _fetch_processed_txids_for_account(usdd_account: str, treasury: str, waterline_ts: int) -> Tuple[int, int]:
+    """Return (credits_from_account_to_treasury_usdd, debits_from_treasury_to_account_usdd) from processed_txids."""
+    q = """
+        SELECT timestamp, amount_usdd, from_address, to_address
+        FROM processed_txids
+        WHERE timestamp >= ? AND from_address IS NOT NULL AND to_address IS NOT NULL
+    """
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(q, (waterline_ts,))
+    credits = 0  # account -> treasury
+    debits = 0   # treasury -> account
+    for ts, amt_usdd, from_addr, to_addr in cur.fetchall():
         try:
-            # Skip non-USDC-deposit entries
-            if not row.get('sig') or row.get('comment') in ('refunded', 'quarantined', 'processed, smaller than fees'):
-                continue
-                
-            # Must have receival_account (USDD address) and processing succeeded
-            usdd_addr = row.get('receival_account')
-            if not usdd_addr or row.get('comment') != 'processed':
-                continue
-                
-            amount_usdc = int(row.get('amount_usdc_units', 0))
-            if amount_usdc <= 0:
-                continue
-                
-            # Calculate fees and net USDD
-            flat_fee = max(0, int(getattr(config, 'FLAT_FEE_USDC_UNITS', 0)))
-            dynamic_bps = max(0, int(getattr(config, 'DYNAMIC_FEE_BPS', 0)))
-            pre_dynamic = max(0, amount_usdc - flat_fee)
-            dynamic_fee = (pre_dynamic * dynamic_bps) // 10000
-            total_fee = flat_fee + dynamic_fee
-            net_usdc = max(0, amount_usdc - total_fee)
-            net_usdd = _usdc_to_usdd_units(net_usdc)
-            
-            if usdd_addr not in expected:
-                expected[usdd_addr] = {
-                    'expected_usdd_units': 0,
-                    'deposits': [],
-                    'total_deposits_usdc': 0,
-                    'total_fees_usdc': 0
-                }
-                
-            expected[usdd_addr]['expected_usdd_units'] += net_usdd
-            expected[usdd_addr]['total_deposits_usdc'] += amount_usdc
-            expected[usdd_addr]['total_fees_usdc'] += total_fee
-            expected[usdd_addr]['deposits'].append({
-                'sig': row.get('sig'),
-                'amount_usdc': amount_usdc,
-                'net_usdd': net_usdd,
-                'fees': total_fee,
-                'ts': row.get('ts', 0)
-            })
-            
+            amt = int(amt_usdd or 0)
         except Exception:
-            continue
-            
-    return expected
+            amt = 0
+        if from_addr == usdd_account and to_addr == treasury:
+            credits += amt
+        elif from_addr == treasury and to_addr == usdd_account:
+            debits += amt
+    conn.close()
+    return credits, debits
 
 
-def get_actual_usdd_balance(usdd_address: str) -> int:
-    """Get actual USDD balance for an address from Nexus."""
-    try:
-        account_info = nexus_client.get_account_info(usdd_address)
-        if not account_info:
-            return 0
-            
-        # Check if this is a valid USDD token account
-        if not nexus_client.is_expected_token(account_info, config.NEXUS_TOKEN_NAME):
-            return 0
-            
-        # Extract balance
-        balance = account_info.get('balance')
-        if balance is None and isinstance(account_info.get('result'), dict):
-            balance = account_info['result'].get('balance')
-            
-        if balance is not None:
-            return int(Decimal(str(balance)))
-        return 0
-        
-    except Exception:
-        return 0
-
-
-def reconcile_balances(dry_run: bool = True) -> Dict:
-    """Reconcile expected vs actual USDD balances.
-    
-    Args:
-        dry_run: If True, only report discrepancies. If False, issue corrective refunds.
-        
-    Returns:
-        {
-            'checked_addresses': int,
-            'discrepancies': List[{
-                'address': str,
-                'expected': int,
-                'actual': int,
-                'surplus': int,
-                'action_taken': str
-            }],
-            'total_surplus_usdd': int
-        }
+def _fetch_refunded_sigs_for_account(usdd_account: str, waterline_ts: int) -> set[str]:
+    q = """
+        SELECT sig, timestamp, from_address, memo FROM refunded_sigs WHERE timestamp >= ?
     """
-    expected_balances = calculate_expected_balances()
-    discrepancies = []
-    total_surplus = 0
-    
-    for usdd_addr, expected_data in expected_balances.items():
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(q, (waterline_ts,))
+    refunded = set()
+    for sig, ts, from_addr, memo in cur.fetchall():
+        if not memo:
+            continue
+        addr = _extract_nexus_address_from_memo(memo)
+        if addr == usdd_account:
+            refunded.add(sig)
+    conn.close()
+    return refunded
+
+
+def _fetch_deposit_sigs_for_account(usdd_account: str, waterline_ts: int) -> List[Tuple[str, int, int]]:
+    """All Solana deposit signatures (unprocessed + processed) after waterline that target the account via memo.
+    Return list of (sig, timestamp, amount_usdc_units)."""
+    q = """
+        SELECT sig, timestamp, memo, amount_usdc_units FROM unprocessed_sigs WHERE timestamp >= ?
+        UNION ALL
+        SELECT ps.sig, ps.timestamp, us.memo, ps.amount_usdc_units
+        FROM processed_sigs ps
+        LEFT JOIN unprocessed_sigs us ON us.sig = ps.sig
+        WHERE ps.timestamp >= ?
+    """
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(q, (waterline_ts, waterline_ts))
+    out: List[Tuple[str, int, int]] = []
+    for sig, ts, memo, amt in cur.fetchall():
+        addr = _extract_nexus_address_from_memo(memo)
+        if addr == usdd_account:
+            try:
+                out.append((sig, int(ts), int(amt or 0)))
+            except Exception:
+                continue
+    conn.close()
+    return out
+
+
+def reconcile_account_trades(usdd_account: str, waterline_ts: int, include_remote_balance: bool = False) -> Dict:
+    treasury = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', None)
+    if not treasury:
+        raise ValueError("NEXUS_USDD_TREASURY_ACCOUNT not configured")
+
+    processed_sigs_rows = _fetch_processed_sigs_for_account(usdd_account, waterline_ts)
+    credits_from_acct_txids, debits_to_acct_txids = _fetch_processed_txids_for_account(usdd_account, treasury, waterline_ts)
+    deposit_sigs = _fetch_deposit_sigs_for_account(usdd_account, waterline_ts)
+    refunded_sig_set = _fetch_refunded_sigs_for_account(usdd_account, waterline_ts)
+
+    # Net minted USDD for processed sigs
+    minted_usdd = 0
+    details_processed: List[Dict] = []
+    for sig, ts, amt_usdc, txid, amt_usdd, status, ref in processed_sigs_rows:
+        if amt_usdd is not None:
+            net_usdd = int(amt_usdd)
+        else:
+            net_usdd = _fee_net_usdd(int(amt_usdc or 0))
+        minted_usdd += net_usdd
+        details_processed.append({
+            'sig': sig,
+            'ts': ts,
+            'amount_usdc_units': amt_usdc,
+            'net_usdd': net_usdd,
+            'txid': txid,
+            'status': status,
+            'reference': ref,
+        })
+
+    # Expected net from deposit signatures (exclude those refunded)
+    expected_net_from_deposits = 0
+    non_refunded_deposits_usdc = 0
+    for sig, ts, amt_usdc in deposit_sigs:
+        if sig in refunded_sig_set:
+            continue
+        non_refunded_deposits_usdc += amt_usdc
+        expected_net_from_deposits += _fee_net_usdd(amt_usdc)
+
+    # Compose USDD flow summary
+    # treasury_out = minted_usdd (swaps) + debits_to_acct_txids (generic processed_txids from treasury)
+    treasury_out = minted_usdd + debits_to_acct_txids
+    treasury_in = credits_from_acct_txids  # user -> treasury
+
+    # trade_delta definition
+    trade_delta = (treasury_out - treasury_in) - expected_net_from_deposits
+
+    remote_balance = None
+    if include_remote_balance:
         try:
-            expected_usdd = expected_data['expected_usdd_units']
-            actual_usdd = get_actual_usdd_balance(usdd_addr)
-            
-            # Allow small tolerance for rounding differences
-            tolerance = max(1, expected_usdd // 1000000)  # 0.0001% tolerance
-            surplus = actual_usdd - expected_usdd
-            
-            if surplus > tolerance:
-                action_taken = "dry_run" if dry_run else "none"
-                
-                # Issue corrective refund if not dry run
-                if not dry_run and surplus > 0:
-                    try:
-                        # Refund surplus USDD back to treasury
-                        success = nexus_client.transfer_usdd_between_accounts(
-                            from_addr=usdd_addr,
-                            to_addr=config.NEXUS_USDD_TREASURY_ACCOUNT,
-                            amount_usdd_units=surplus,
-                            reference=f"balance_correction_{usdd_addr[:8]}"
-                        )
-                        action_taken = "refunded" if success else "refund_failed"
-                    except Exception:
-                        action_taken = "refund_error"
-                
-                discrepancies.append({
-                    'address': usdd_addr,
-                    'expected': expected_usdd,
-                    'actual': actual_usdd,
-                    'surplus': surplus,
-                    'deposits_count': len(expected_data['deposits']),
-                    'total_deposits_usdc': expected_data['total_deposits_usdc'],
-                    'action_taken': action_taken
-                })
-                total_surplus += surplus
-                
-        except Exception as e:
-            discrepancies.append({
-                'address': usdd_addr,
-                'expected': expected_data['expected_usdd_units'],
-                'actual': 0,
-                'surplus': 0,
-                'error': str(e),
-                'action_taken': 'error'
-            })
-    
+            acct_info = nexus_client.get_account_info(usdd_account)
+            if acct_info and isinstance(acct_info, dict):
+                bal = acct_info.get('balance')
+                if bal is None and isinstance(acct_info.get('result'), dict):
+                    bal = acct_info['result'].get('balance')
+                if bal is not None:
+                    remote_balance = int(Decimal(str(bal)))
+        except Exception:
+            remote_balance = None
+
     return {
-        'checked_addresses': len(expected_balances),
-        'discrepancies': discrepancies,
-        'total_surplus_usdd': total_surplus,
-        'dry_run': dry_run
+        'account': usdd_account,
+        'waterline_ts': waterline_ts,
+        'minted_usdd': minted_usdd,
+        'treasury_out_usdd': treasury_out,
+        'treasury_in_usdd': treasury_in,
+        'expected_net_from_deposits_usdd': expected_net_from_deposits,
+        'non_refunded_deposits_usdc_units': non_refunded_deposits_usdc,
+        'processed_sig_count': len(details_processed),
+        'deposit_sig_count': len(deposit_sigs),
+        'refunded_sig_count': len(refunded_sig_set),
+        'trade_delta_usdd': trade_delta,
+        'remote_balance_usdd': remote_balance,
+        'processed_sigs': details_processed[:50],  # cap for readability
     }
 
 
-def log_balance_discrepancies(result: Dict):
-    """Log balance reconciliation results."""
-    if not result['discrepancies']:
-        print(f"[balance_check] ✓ All {result['checked_addresses']} USDD addresses match expected balances")
-        return
-        
-    print(f"[balance_check] ⚠ Found {len(result['discrepancies'])} discrepancies out of {result['checked_addresses']} addresses:")
-    print(f"[balance_check] Total surplus: {result['total_surplus_usdd']} USDD units")
-    
-    for disc in result['discrepancies'][:5]:  # Show first 5
-        addr_short = disc['address'][:8] + "..." if len(disc['address']) > 12 else disc['address']
-        print(f"[balance_check]   {addr_short}: expected={disc['expected']} actual={disc['actual']} surplus={disc['surplus']} action={disc['action_taken']}")
-        
-    if len(result['discrepancies']) > 5:
-        print(f"[balance_check]   ... and {len(result['discrepancies']) - 5} more")
+def print_account_reconciliation(summary: Dict):
+    acct = summary['account']
+    delta = summary['trade_delta_usdd']
+    print(f"[reconcile] account={acct} minted={summary['minted_usdd']} treas_out={summary['treasury_out_usdd']} treas_in={summary['treasury_in_usdd']} expected_net_deposits={summary['expected_net_from_deposits_usdd']} delta={delta}")
+    if summary.get('remote_balance_usdd') is not None:
+        print(f"[reconcile] remote_balance={summary['remote_balance_usdd']}")
+    if delta != 0:
+        print(f"[reconcile] WARNING non-zero trade delta (possible imbalance or in-flight operations)")
 
 
-def run_balance_reconciliation(dry_run: bool = True, enable_corrections: bool = False) -> Dict:
-    """Main entry point for balance reconciliation.
-    
-    Args:
-        dry_run: If True, only report discrepancies
-        enable_corrections: If True and dry_run=False, issue corrective refunds
-        
-    Returns:
-        Reconciliation results dict
-    """
-    if not dry_run and not enable_corrections:
-        print("[balance_check] Corrective actions disabled; running as dry_run")
-        dry_run = True
-        
-    try:
-        result = reconcile_balances(dry_run=dry_run)
-        log_balance_discrepancies(result)
-        return result
-    except Exception as e:
-        print(f"[balance_check] Error during reconciliation: {e}")
-        return {
-            'checked_addresses': 0,
-            'discrepancies': [],
-            'total_surplus_usdd': 0,
-            'error': str(e)
-        }
+def reconcile_multiple(accounts: Iterable[str], waterline_ts: int, include_remote_balance: bool = False) -> List[Dict]:
+    results = []
+    for acct in accounts:
+        try:
+            res = reconcile_account_trades(acct, waterline_ts, include_remote_balance=include_remote_balance)
+            print_account_reconciliation(res)
+            results.append(res)
+        except Exception as e:
+            print(f"[reconcile] error for {acct}: {e}")
+    return results
+
+
+def run_single(account: str, waterline_ts: int, include_remote_balance: bool = False) -> Dict:
+    res = reconcile_account_trades(account, waterline_ts, include_remote_balance=include_remote_balance)
+    print_account_reconciliation(res)
+    return res
