@@ -30,20 +30,19 @@ def reconstruct_processed_from_memos(scan_limit: int | None = None) -> dict:
     added_refunds = 0
     # Add nexus_txid processed markers
     for txid, sig in memo_map.get('nexus_txids', {}).items():
-        key = f"nexus_txid:{txid}"
-        if key in state.processed_nexus_txs:
+        if txid in state_db.processed_txids:
             continue
         try:
-            state.mark_nexus_processed(key, reason="startup_recover_memo")
+            state_db.mark_processed_txid(txid, sig)
             added_nexus += 1
         except Exception:
             pass
     # Add refunded sig markers (append to refunded_sigs file if absent)
     for dep_sig, refund_sig in memo_map.get('refund_sigs', {}).items():
-        if state.is_refunded(dep_sig):
+        if state_db.is_refunded(dep_sig):
             continue
         try:
-            state.atomic_add_refunded_sig(dep_sig)
+            state_db.mark_refunded_sig(dep_sig, refund_sig)
             added_refunds += 1
         except Exception:
             pass
@@ -51,10 +50,10 @@ def reconstruct_processed_from_memos(scan_limit: int | None = None) -> dict:
     found_quarantine = len(memo_map.get('quarantined_sigs', {})) if isinstance(memo_map, dict) else 0
     if found_quarantine:
         for qsig in memo_map.get('quarantined_sigs', {}).keys():
-            if qsig in state.processed_sigs:
+            if qsig in state_db.processed_sigs:
                 continue
             try:
-                state.mark_solana_processed(qsig, reason="quarantined_startup")
+                state_db.mark_quarantined_sig(qsig, reason="quarantined_startup")
             except Exception:
                 pass
     return {
