@@ -66,8 +66,8 @@ def _fee_net_usdd(amount_usdc_units: int) -> int:
     flat_fee = max(0, int(getattr(config, 'FLAT_FEE_USDC_UNITS', 0)))
     dynamic_bps = max(0, int(getattr(config, 'DYNAMIC_FEE_BPS', 0)))
     pre_dynamic = max(0, amount_usdc_units - flat_fee)
-    dynamic_fee = (pre_dynamic * dynamic_bps) // 10_000
-    net_usdd = max(0, amount_usdc_units - (flat_fee + dynamic_fee)) * (10 ** config.USDC_DECIMALS)
+    dynamic_fee = (amount_usdc_units * dynamic_bps) // 10_000
+    net_usdd = max(0, amount_usdc_units - (flat_fee + dynamic_fee)) / (10 ** config.USDC_DECIMALS)
     return net_usdd
 
 
