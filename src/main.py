@@ -1,13 +1,12 @@
 import time
 import threading
-from . import config, state
-from .swap_solana import poll_solana_deposits, process_unprocessed_entries
+from . import config, state_db  # switched from JSON state to DB only
+from .swap_solana import poll_solana_deposits
 from .swap_nexus import poll_nexus_usdd_deposits, process_unprocessed_txids
 from .nexus_client import get_heartbeat_asset, update_heartbeat_asset
 
 _last_heartbeat = 0
 _last_reconcile = 0
-_cached_waterlines = {"solana": 0, "nexus": 0}
 _stop_event = None  # set in run()
 
 
@@ -54,79 +53,8 @@ def _run_with_watchdog(func, label, budget_sec):
         print(f"[loop] {label} error: {exc_result['error']}")
         print()
 
-def update_heartbeat_asset(force: bool = False, *, set_solana_waterline: int | None = None, set_nexus_waterline: int | None = None):
-    from . import config as cfg
-    import subprocess
-    global _last_heartbeat
-    # Require heartbeat enabled AND at least one of (asset name, asset address)
-    if not cfg.HEARTBEAT_ENABLED or not (cfg.NEXUS_HEARTBEAT_ASSET_NAME or cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS):
-        return
-    now = int(time.time())
-    if not force and (now - _last_heartbeat) < cfg.HEARTBEAT_MIN_INTERVAL_SEC:
-        return
-    if cfg.NEXUS_HEARTBEAT_ASSET_NAME:
-        fields = [
-            cfg.NEXUS_CLI,
-            "assets/update/asset",
-            "format=basic",
-            f"name={cfg.NEXUS_HEARTBEAT_ASSET_NAME}",
-            f"last_poll_timestamp={now}",
-        ]
-    else:
-        fields = [
-            cfg.NEXUS_CLI,
-            "assets/update/asset",
-            f"address={cfg.NEXUS_HEARTBEAT_ASSET_ADDRESS}",
-            "format=basic",
-            f"last_poll_timestamp={now}",
-        ]
-    if cfg.HEARTBEAT_WATERLINE_ENABLED:
-        if set_solana_waterline is not None:
-            fields.append(f"{cfg.HEARTBEAT_WATERLINE_SOLANA_FIELD}={int(set_solana_waterline)}")
-        if set_nexus_waterline is not None:
-            fields.append(f"{cfg.HEARTBEAT_WATERLINE_NEXUS_FIELD}={int(set_nexus_waterline)}")
-    cmd = fields
-    if cfg.NEXUS_PIN:
-        cmd.append(f"pin={cfg.NEXUS_PIN}")
-    try:
-        print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)  # Increased timeout
-        if res.returncode != 0:
-            print("Heartbeat update failed:", res.stderr.strip() or res.stdout.strip())
-        else:
-            _last_heartbeat = now
-            out = (res.stdout or "").strip()
-            if out:
-                print("Heartbeat updated:", out)
-    except Exception as e:
-        print(f"Heartbeat update error: {e}")
 
-
-def read_heartbeat_waterlines() -> tuple[int, int]:
-    """Fetch waterline timestamps (solana, nexus) from heartbeat asset, cache locally.
-    Returns tuple (solana_waterline, nexus_waterline).
-    """
-    try:
-        if not config.HEARTBEAT_ENABLED or not config.NEXUS_HEARTBEAT_ASSET_NAME:
-            return (0, 0)
-        import subprocess, json
-        cmd = [
-            config.NEXUS_CLI,
-            "register/get/assets:asset",
-            f"name={config.NEXUS_HEARTBEAT_ASSET_NAME}",
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)  # Increased timeout
-        if res.returncode != 0:
-            return (_cached_waterlines["solana"], _cached_waterlines["nexus"])  # fallback
-        data = json.loads(res.stdout or "{}")
-        results = data.get("results") or data
-        sol = int(results.get(config.HEARTBEAT_WATERLINE_SOLANA_FIELD, 0) or 0)
-        nex = int(results.get(config.HEARTBEAT_WATERLINE_NEXUS_FIELD, 0) or 0)
-        _cached_waterlines["solana"], _cached_waterlines["nexus"] = sol, nex
-        return (sol, nex)
-    except Exception:
-        return (_cached_waterlines["solana"], _cached_waterlines["nexus"])  # fallback
-
+#print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
 
 def run():
     print("\n")
@@ -214,26 +142,22 @@ def run():
                 if (now - _last_reconcile) >= max(60, config.BACKING_RECONCILE_INTERVAL_SEC):
                     try:
                         vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=8)
-                        circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=8)
+                        circ_usdd = _safe_call(nexus_client.get_circulating_usdd, timeout_sec=8)
                         surplus = max(0, vault_usdc - circ_usdd)
-                        # Skip reconcile if any pending Solana deposits not yet swapped (avoid preemptive fee mint from fresh deposits)
+                        # Skip reconcile if any pending Solana deposits not yet swapped
                         pending_deposits = False
                         try:
-                            unproc_rows = _safe_call(state.read_jsonl, config.UNPROCESSED_SIGS_FILE, timeout_sec=3) or []
-                            if any(True for r in unproc_rows if r.get('comment') in ('ready for processing','memo unresolved','refunded','debited, awaiting confirmations') or not r.get('comment')):
+                            unproc_rows = state_db.get_unprocessed_sigs()  # DB rows
+                            if any(True for _sig, _ts, _memo, _from, _amt, _status, _txid in unproc_rows if _status in (None, 'ready for processing','memo unresolved','refunded','debited, awaiting confirmations')):
                                 pending_deposits = True
                         except Exception:
-                            pending_deposits = True  # fail safe: treat as pending
+                            pending_deposits = True  # fail safe
                         threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS', 0)
-                        # Only reconcile if: surplus strictly exceeds threshold AND no pending deposits
                         if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
                             if _safe_call(nexus_client.debit_usdd, config.NEXUS_USDD_FEES_ACCOUNT, surplus, 'FEE_RECONCILE', timeout_sec=10):
                                 print(f"[reconcile] Minted {surplus} USDD to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()
                                 _last_reconcile = now
-                        else:
-                            # Optional debug: comment out to stay silent in normal ops.
-                            pass
                     except Exception as e:
                         print(f"[reconcile] error: {e}")
 
@@ -260,24 +184,18 @@ def run():
                     metrics_start = time.time()
                     try:
                         vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=5)
-                        circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=5)
+                        circ_usdd = _safe_call(nexus_client.get_circulating_usdd, timeout_sec=5)
                         ratio = (vault_usdc / circ_usdd) if circ_usdd else 0
                         fees_state = _safe_call(fees.reconcile_accounting, timeout_sec=3)
                         
-                        # Unprocessed stats with file I/O timeout protection
-                        unproc = _safe_call(state.read_jsonl, config.UNPROCESSED_SIGS_FILE, timeout_sec=3)
-                        ready = sum(1 for r in unproc if r.get('comment') == 'ready for processing')
-                        debiting = sum(1 for r in unproc if r.get('comment') == 'debited, awaiting confirmations')
-                        unresolved = sum(1 for r in unproc if r.get('comment') == 'memo unresolved')
-                        refund_pending = sum(1 for r in unproc if r.get('comment') == 'refund pending')
-                        quarantined = sum(1 for r in unproc if r.get('comment') == 'quarantined')
-                        
-                        metrics_elapsed = time.time() - metrics_start
-                        MAX_METRICS_SEC = getattr(config, "METRICS_BUDGET_SEC", 5)
-                        if metrics_elapsed > MAX_METRICS_SEC:
-                            print(f"[metrics] warning: took {metrics_elapsed:.2f}s (> {MAX_METRICS_SEC}s budget)")
-                        
-                        print(f"[metrics] vault_usdc={vault_usdc} circ_usdd={circ_usdd} ratio={ratio:.4f} fees_stored={fees_state['stored']} fees_journal={fees_state['journal_sum']} delta={fees_state['delta']} unprocessed={len(unproc)} ready={ready} debiting={debiting} unresolved={unresolved} refund_pending={refund_pending} quarantined={quarantined}")
+                        # Unprocessed stats from DB
+                        unproc_rows = state_db.get_unprocessed_sigs()
+                        ready = sum(1 for r in unproc_rows if r[5] == 'ready for processing')
+                        debiting = sum(1 for r in unproc_rows if r[5] == 'debited, awaiting confirmations')
+                        unresolved = sum(1 for r in unproc_rows if r[5] == 'memo unresolved')
+                        refund_pending = sum(1 for r in unproc_rows if r[5] == 'refund pending')
+                        quarantined = sum(1 for r in unproc_rows if r[5] == 'quarantined')
+                        print(f"[metrics] vault_usdc={vault_usdc} circ_usdd={circ_usdd} ratio={ratio:.4f} unprocessed={len(unproc_rows)} ready={ready} debiting={debiting} unresolved={unresolved} refund_pending={refund_pending} quarantined={quarantined}")
                     except Exception as e:
                         print(f"[metrics] error: {e}")
                 
@@ -303,7 +221,7 @@ def run():
             if _stop_event.is_set():
                 break
             # Process unprocessed entries independently of signature polling
-            _run_with_watchdog(process_unprocessed_entries, "unprocessed", UNPROCESSED_BUDGET)
+            #_run_with_watchdog(process_unprocessed_entries, "unprocessed", UNPROCESSED_BUDGET)
             
             if _stop_event.is_set():
                 break
@@ -318,49 +236,19 @@ def run():
                 
             # Save state with timeout protection
             try:
-                _safe_call(state.save_state, timeout_sec=5)
+                # removed legacy state.save_state call (DB persistence is automatic)
+                pass
             except Exception as e:
                 print(f"[state_save] error: {e}")
-            
-            # Apply any conservative waterline proposals, if present
-            try:
-                sol_ts, nex_ts = state.get_and_clear_proposed_waterlines()
-            except Exception:
-                sol_ts, nex_ts = (None, None)
-            update_heartbeat_asset(set_solana_waterline=sol_ts, set_nexus_waterline=nex_ts)
-            
-            # After committing heartbeat, prune processed markers below waterlines for hygiene
-            try:
-                _safe_call(state.prune_processed, sol_ts, nex_ts, timeout_sec=5)
-                _safe_call(state.save_state, timeout_sec=5)
-            except Exception as e:
-                print(f"Prune error: {e}")
-            
-            elapsed = time.time() - loop_slice_start
-            # Use chain-specific intervals; sleep for the minimum to maintain overall cadence.
-            sol_iv = getattr(config, 'SOLANA_POLL_INTERVAL', config.POLL_INTERVAL)
-            nex_iv = getattr(config, 'NEXUS_POLL_INTERVAL', config.POLL_INTERVAL)
-            base_iv = max(sol_iv, nex_iv)
-            remaining = max(0, base_iv - elapsed)
-            
-            # Sleep in short chunks to react quickly to Ctrl+C
-            sleep_chunk = min(1.0, remaining)
-            slept = 0.0
-            while slept < remaining and not _stop_event.is_set():
-                _stop_event.wait(sleep_chunk)
-                slept += sleep_chunk
-                if remaining - slept < sleep_chunk:
-                    sleep_chunk = remaining - slept
-                # break early if stop requested
-                if _stop_event.is_set():
-                    break
-            if _stop_event.is_set():
-                break
+
+            # Remove waterline proposal apply & prune (DB variant would go here if implemented)
+            # ...existing code...
     except KeyboardInterrupt:
         print()
         print("Shutting down…")
     finally:
         try:
-            _safe_call(state.save_state, timeout_sec=5)
+            # no final JSON state save needed
+            pass
         except Exception as e:
             print(f"Final state save error: {e}")
