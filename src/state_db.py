@@ -1,6 +1,6 @@
-# filepath: c:\Users\Arne\Documents\GitHub\swapService\src\state_db.py
 import sqlite3
 import os
+from typing import List, Optional, Tuple
 from typing import List, Optional, Tuple
 
 DB_PATH = os.getenv("STATE_DB_PATH", "swap_service.db")
@@ -9,6 +9,8 @@ def init_db():
     """Initialize DB tables if not exist."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # Core tables
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_sigs (
             sig TEXT PRIMARY KEY,
@@ -38,6 +40,8 @@ def init_db():
             from_address TEXT,
             amount_usdc_units INTEGER,
             memo TEXT,
+            quarantine_sig TEXT,
+            quarantined_units INTEGER,
             status TEXT
         )
     """)
@@ -369,29 +373,31 @@ def is_refunded_sig(sig: str) -> bool:
     return count > 0
 
 ## Quarantined sigs
-
 def mark_quarantined_sig(
     sig: str,
     timestamp: int,
     from_address: str,
     amount_usdc_units: int,
     memo: str | None,
-    quarantine_sig: str | None = None,  
-    quarantined_units: int | None = None,  
+    quarantine_sig: str | None = None,
+    quarantined_units: int | None = None,
     status: str | None = None,
 ):
     """Insert/update quarantined signature.
 
-    Table schema only has: sig, timestamp, from_address, amount_usdc_units, memo, status.
-    Extra legacy fields (quarantine_sig, quarantined_units) are ignored.
+    Schema includes quarantine_sig & quarantined_units so we persist them for later reconciliation / auditing.
     """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT OR REPLACE INTO quarantined_sigs (sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status))
+        """,
+        (sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status),
+    )
     conn.commit()
+    conn.close()
     conn.close()
 
 def is_quarantined_sig(sig: str) -> bool:
@@ -442,30 +448,62 @@ def is_unprocessed_txid(txid: str) -> bool:
 
 
 ## Processed txids
-
-def mark_processed_txid(txid: str, sig: str):
+def mark_processed_txid(
+    txid: str,
+    timestamp: int,
+    amount_usdd: float,
+    from_address: str,
+    to_address: str,
+    owner: str,
+    sig: str,
+    status: str | None = None,
+):
+    """Insert/update processed txid. Status optional (e.g. 'credited', 'skipped')."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO processed_txids (txid, sig)
-        VALUES (?, ?)
-    """, (txid, sig))
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO processed_txids (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status),
+    )
     conn.commit()
+    conn.close()
     conn.close()
 
 
 
 
 ## Refunded txids
+def mark_refunded_txid(
+    txid: str,
+    sig: str | None = None,
+    timestamp: int | None = None,
+    amount_usdd: float | None = None,
+    from_address: str | None = None,
+    to_address: str | None = None,
+    owner_from_address: str | None = None,
+    confirmations_credit: int | None = None,
+    status: str | None = None,
+):
+    """Insert/update refunded txid.
 
-def mark_refunded_txid(txid: str, sig: str):
+    Stores refund transfer signature in refunded_txids.sig (added via migration if missing).
+    Unspecified fields remain NULL allowing partial population as info becomes available.
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO refunded_txids (txid, sig)
-        VALUES (?, ?)
-    """, (txid, sig))
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO refunded_txids (
+            txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, sig
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, sig),
+    )
     conn.commit()
+    conn.close()
     conn.close()
 
 def is_refunded_txid(txid: str) -> bool:
