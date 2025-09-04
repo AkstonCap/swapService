@@ -48,8 +48,9 @@ def poll_solana_deposits():
         client = Client(getattr(config, "RPC_URL", None))
        
         usdc_deposits = solana_client.fetch_filtered_token_account_transaction_history(
-            config.USDC_MINT, wline_sol, config.MIN_DEPOSIT_USDC_UNITS, 10.0
+            config.VAULT_USDC_ACCOUNT, wline_sol, config.MIN_DEPOSIT_USDC_UNITS, 10.0
             )
+        
         unprocessed_deposits_added = solana_client.process_filtered_deposits(usdc_deposits, True)
         print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
 
