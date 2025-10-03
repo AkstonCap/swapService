@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from . import config, state, solana_client, nexus_client, fees
+from . import config, state_compat as state, solana_client, nexus_client, fees
 import time
 
 # Allowed lifecycle comments for unprocessed txids
