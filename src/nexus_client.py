@@ -206,10 +206,10 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     """Refund USDD by transferring from treasury to the recipient (amount in base units)."""
     # Check if this refund was already processed by checking for txid in reason
-    from . import state
+    from . import state_db
     if "txid:" in reason:
         potential_txid = reason.split("txid:")[-1].strip().split()[0]
-        if potential_txid in state.processed_nexus_txs:
+        if state_db.is_processed_txid(potential_txid):
             return True  # Already refunded this transaction
     
     ref = reason if len(reason) <= 120 else reason[:117] + "..."
