@@ -13,7 +13,7 @@ from solders.transaction import Transaction, VersionedTransaction
 from solders.message import Message
 from struct import pack
 import threading, queue
-from . import state_db, nexus_client, state
+from . import state_db, nexus_client
 import time
 
 from . import config
@@ -798,7 +798,7 @@ def check_timestamp_unpr_sigs() -> int | None:
     new_waterline = oldest_timestamp - 1
     
     # Propose the new waterline
-    state.propose_solana_waterline(new_waterline)
+    state_db.propose_solana_waterline(new_waterline)
     print(f"Proposed new waterline: {new_waterline} (based on oldest unprocessed sig timestamp: {oldest_timestamp})")
     
     return new_waterline
@@ -914,18 +914,17 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
 def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
     """Send USDC base units directly to an existing USDC token account address."""
     # Idempotency short‑circuit for memo formats we recognize
-    from . import state
     if memo:
         # Legacy numeric reference
         if memo.isdigit():
             ref_key = f"nexus_ref_{memo}"
-            if ref_key in state.processed_nexus_txs:
+            if state_db.is_processed_txid(ref_key):
                 return True, None
         # New structured memo nexus_txid:<txid>
         elif memo.startswith("nexus_txid:"):
             txid_part = memo.split(":", 1)[1]
             proc_key = f"nexus_txid:{txid_part}"
-            if proc_key in state.processed_nexus_txs:
+            if state_db.is_processed_txid(proc_key):
                 return True, None
     
     try:
@@ -958,10 +957,10 @@ def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_bas
         try:
             if memo:
                 if memo.isdigit():
-                    state.mark_nexus_processed(f"nexus_ref_{memo}", reason="usdc_sent")
+                    state_db.mark_processed_txid(f"nexus_ref_{memo}", timestamp=int(__import__('time').time()), amount_usdd=0, from_address="", to_address="", owner="", sig="", status="usdc_sent")
                 elif memo.startswith("nexus_txid:"):
                     txid_part = memo.split(":", 1)[1]
-                    state.mark_nexus_processed(f"nexus_txid:{txid_part}", reason="usdc_sent")
+                    state_db.mark_processed_txid(f"nexus_txid:{txid_part}", timestamp=int(__import__('time').time()), amount_usdd=0, from_address="", to_address="", owner="", sig="", status="usdc_sent")
         except Exception:
             pass
         
@@ -1208,10 +1207,9 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
     Adds memo refundSig:<deposit_sig> if deposit_sig provided for idempotent replay detection.
     """
     # Check if this refund was already processed by checking the reason for signature context
-    from . import state
     if ":" in reason and len(reason.split(":")) >= 2:
         potential_sig = reason.split(":")[-1]
-        if len(potential_sig) > 40 and state.is_refunded(potential_sig):
+        if len(potential_sig) > 40 and state_db.is_refunded_sig(potential_sig):
             return True  # Already refunded this signature
     
     try:
