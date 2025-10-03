@@ -1,5 +1,5 @@
 from decimal import Decimal
-from . import config, state, nexus_client, solana_client, fees
+from . import config, state_db, nexus_client, solana_client, fees
 
 # Lightweight structured logging for deposit lifecycle only
 def _log(event: str, **fields):
@@ -32,15 +32,15 @@ def poll_solana_deposits():
         
         poll_start = _time.time()
         current_bal = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
-        last_bal = state.load_last_vault_balance()
+        last_bal = state_db.load_last_vault_balance()
         delta = current_bal - last_bal
         
         # Pre-balance micro batch skip
         if delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0):
             # Advance waterline opportunistically using recent signatures
-            state.propose_solana_waterline(poll_start)                    
-            state.save_last_vault_balance(current_bal)
-            nexus_client.update_heartbeat_asset(poll_start, None, poll_start)
+            state_db.propose_solana_waterline(int(poll_start))                    
+            state_db.save_last_vault_balance(current_bal)
+            nexus_client.update_heartbeat_asset(int(poll_start), None, int(poll_start))
             _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
             # Still process existing unprocessed entries before returning
             return
