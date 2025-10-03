@@ -1,7 +1,8 @@
 import json
+import time
 import threading
 from typing import Dict, Any
-from . import config, state
+from . import config, state_db
 
 _fees_lock = threading.Lock()
 FEE_EVENTS_FILE = getattr(config, "FEE_EVENTS_FILE", "fee_events.jsonl")
@@ -38,7 +39,7 @@ def add_usdc_fee(amount_base_units: int, *, sig: str | None = None, kind: str | 
         _save()
         try:
             evt: Dict[str, Any] = {
-                "ts": int(state._now()),  # type: ignore
+                "ts": int(time.time()),
                 "sig": sig,
                 "amount": amount_base_units,
                 "kind": kind or "generic"
