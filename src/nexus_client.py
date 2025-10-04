@@ -732,6 +732,102 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
     except Exception as e:
         print("Error getting heartbeat asset:", e)
         return None
+
+
+def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: int = 50) -> list[dict]:
+    """Fetch all USDD credits to treasury since given timestamp.
+    
+    Args:
+        treasury_addr: Nexus treasury account address
+        since_timestamp: Unix timestamp to start from
+        max_pages: Maximum pages to fetch (default 50)
+    
+    Returns:
+        List of transaction dicts with CREDIT contracts to treasury
+    """
+    results = []
+    limit = 100
+    
+    # Build base command
+    base_cmd = [config.NEXUS_CLI]
+    projection = (
+        "register/transactions/finance:token/"
+        "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
+    )
+    base_cmd.append(projection)
+    base_cmd.append("name=USDD")
+    base_cmd.append("sort=timestamp")
+    base_cmd.append("order=desc")  # Newest first
+    
+    # Use WHERE filter if available (may reduce bandwidth)
+    min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
+    try:
+        base_cmd.append(f"where='contracts.amount>={min_credit_threshold}'")
+    except Exception:
+        pass
+    
+    for page in range(max_pages):
+        cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
+        try:
+            code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12))
+            if code != 0:
+                print(f"Nexus: fetch deposits page {page} error:", err or out)
+                break
+            
+            txs = _parse_json_lenient(out)
+            if not isinstance(txs, list):
+                txs = [txs] if txs else []
+            
+            if not txs:
+                break  # No more results
+            
+            page_has_old_txs = False
+            for tx in txs:
+                if not isinstance(tx, dict):
+                    continue
+                
+                ts = int(tx.get("timestamp") or 0)
+                
+                # Stop if we've gone past the waterline
+                if ts < since_timestamp:
+                    page_has_old_txs = True
+                    continue
+                
+                # Check if this tx has CREDIT to treasury
+                contracts = tx.get("contracts") or []
+                has_credit_to_treasury = False
+                for c in contracts:
+                    if not isinstance(c, dict):
+                        continue
+                    if str(c.get("OP") or "").upper() != "CREDIT":
+                        continue
+                    
+                    # Extract 'to' address
+                    to = c.get("to")
+                    to_addr = ""
+                    if isinstance(to, dict):
+                        to_addr = str(to.get("address") or to.get("name") or "")
+                    elif isinstance(to, str):
+                        to_addr = to
+                    
+                    if to_addr == treasury_addr:
+                        has_credit_to_treasury = True
+                        break
+                
+                if has_credit_to_treasury:
+                    results.append(tx)
+            
+            # Stop conditions
+            if page_has_old_txs:
+                break  # Reached below waterline
+            if len(txs) < limit:
+                break  # No more pages
+        
+        except Exception as e:
+            print(f"Error fetching deposits page {page}:", e)
+            break
+    
+    return results
     
 
 ## Reference integer fetching
