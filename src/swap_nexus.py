@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from . import config, state_compat as state, solana_client, nexus_client, fees
+from . import config, state_db, solana_client, nexus_client, fees
 import time
 
 # Allowed lifecycle comments for unprocessed txids
@@ -75,20 +75,21 @@ def process_unprocessed_txids():
     - Check confirmations and finalize
     - Handle refunds/quarantine
     """
-    import time
     from solana.rpc.api import Client as SolClient
     
     # Time budget for processing
     PROCESS_BUDGET_SEC = getattr(config, "UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC", 30)
     process_start = time.time()
     
-    unprocessed_path = "unprocessed_txids.json"
-    processed_path = "processed_txids.json"
-    
     try:
-        unprocessed = state.read_jsonl(unprocessed_path)
-        processed = state.read_jsonl(processed_path)
-        refunded_txids = {r.get("txid") for r in processed if (r.get("comment") == "refunded")}
+        unprocessed = state_db.get_unprocessed_txids_as_dicts()
+        refunded_txids = set()
+        # Get refunded txids from database
+        conn = state_db.sqlite3.connect(state_db.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT txid FROM refunded_txids")
+        refunded_txids = {row[0] for row in cursor.fetchall()}
+        conn.close()
         
         _log("USDD_PROCESS_START", count=len(unprocessed), budget=PROCESS_BUDGET_SEC)
         
@@ -114,13 +115,11 @@ def process_unprocessed_txids():
             asset_owner = (asset or {}).get("owner")
             
             if recv and asset_owner and str(asset_owner) == str(owner) and solana_client.is_valid_usdc_token_account(recv):
-                def _pred(x):
-                    return x.get("txid") == txid
-                def _upd(x):
-                    x["receival_account"] = recv
-                    x["comment"] = USDD_STATUS_READY
-                    return x
-                state.update_jsonl_row(unprocessed_path, _pred, _upd)
+                state_db.update_unprocessed_txid(
+                    txid=txid,
+                    receival_account=recv,
+                    status=USDD_STATUS_READY
+                )
                 r["receival_account"] = recv
                 r["comment"] = USDD_STATUS_READY
                 _log("USDD_READY", txid=txid, receival=recv)
@@ -133,31 +132,32 @@ def process_unprocessed_txids():
                 sender = r.get("from")
                 if sender:
                     refund_key = f"usdd_refund:{txid}"
-                    if state.should_attempt(refund_key):
-                        state.record_attempt(refund_key)
+                    if state_db.should_attempt(refund_key):
+                        state_db.record_attempt(refund_key)
                         if nexus_client.refund_usdd(sender, amt_str, "invalid receival_account"):
-                            row = dict(r)
-                            row["comment"] = USDD_STATUS_REFUNDED
-                            state.append_jsonl(processed_path, row)
-                            unprocessed = [x for x in unprocessed if x.get("txid") != txid]
-                            state.write_jsonl(unprocessed_path, unprocessed)
+                            # Mark as refunded
+                            state_db.mark_refunded_txid(
+                                txid=txid,
+                                timestamp=r.get("ts"),
+                                amount_usdd=float(r.get("amount_usdd") or 0),
+                                from_address=sender,
+                                to_address=r.get("to"),
+                                owner_from_address=r.get("owner"),
+                                confirmations_credit=r.get("confirmations"),
+                                status=USDD_STATUS_REFUNDED
+                            )
+                            # Remove from unprocessed
+                            state_db.remove_unprocessed_txid(txid)
                         else:
-                            attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                            attempts = state_db.get_attempt_count(refund_key)
                             if attempts >= config.MAX_ACTION_ATTEMPTS:
-                                row = dict(r)
-                                row["comment"] = USDD_STATUS_QUARANTINED
-                                state.append_jsonl(processed_path, row)
+                                # Quarantine
+                                state_db.mark_quarantined_txid(txid=txid, sig="")
+                                state_db.remove_unprocessed_txid(txid)
                                 _log("USDD_REFUND_QUARANTINED", txid=txid, reason="invalid_receival_account")
-                                unprocessed = [x for x in unprocessed if x.get("txid") != txid]
-                                state.write_jsonl(unprocessed_path, unprocessed)
                             else:
-                                def _pred_rp(x):
-                                    return x.get("txid") == txid
-                                def _upd_rp(x):
-                                    if x.get("comment") not in (USDD_STATUS_REFUNDED, USDD_STATUS_QUARANTINED):
-                                        x["comment"] = USDD_STATUS_REFUND_PENDING
-                                    return x
-                                state.update_jsonl_row(unprocessed_path, _pred_rp, _upd_rp)
+                                # Mark as refund pending
+                                state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
             else:
                 # No receival asset yet; if age exceeds timeout attempt refund
                 ts_row = int(r.get("ts") or 0)
@@ -167,35 +167,35 @@ def process_unprocessed_txids():
                         amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
                         amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
                         refund_key = f"usdd_refund_unresolved:{txid}"
-                        if state.should_attempt(refund_key):
-                            state.record_attempt(refund_key)
+                        if state_db.should_attempt(refund_key):
+                            state_db.record_attempt(refund_key)
                             if nexus_client.refund_usdd(sender, amt_str, "unresolved receival_account"):
-                                row = dict(r)
-                                row["comment"] = USDD_STATUS_REFUNDED
-                                state.append_jsonl(processed_path, row)
-                                unprocessed = [x for x in unprocessed if x.get("txid") != txid]
-                                state.write_jsonl(unprocessed_path, unprocessed)
+                                # Mark as refunded
+                                state_db.mark_refunded_txid(
+                                    txid=txid,
+                                    timestamp=r.get("ts"),
+                                    amount_usdd=float(r.get("amount_usdd") or 0),
+                                    from_address=sender,
+                                    to_address=r.get("to"),
+                                    owner_from_address=r.get("owner"),
+                                    confirmations_credit=r.get("confirmations"),
+                                    status=USDD_STATUS_REFUNDED
+                                )
+                                state_db.remove_unprocessed_txid(txid)
                             else:
-                                attempts = int((state.attempt_state.get(refund_key) or {}).get("attempts", 1))
+                                attempts = state_db.get_attempt_count(refund_key)
                                 if attempts >= config.MAX_ACTION_ATTEMPTS:
-                                    row = dict(r)
-                                    row["comment"] = USDD_STATUS_QUARANTINED
-                                    state.append_jsonl(processed_path, row)
+                                    # Quarantine
+                                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                                    state_db.remove_unprocessed_txid(txid)
                                     _log("USDD_REFUND_QUARANTINED", txid=txid, reason="unresolved_timeout")
-                                    unprocessed = [x for x in unprocessed if x.get("txid") != txid]
-                                    state.write_jsonl(unprocessed_path, unprocessed)
                                 else:
-                                    def _pred_rp3(x):
-                                        return x.get("txid") == txid
-                                    def _upd_rp3(x):
-                                        if x.get("comment") not in (USDD_STATUS_REFUNDED, USDD_STATUS_QUARANTINED, USDD_STATUS_TRADE_BAL_CHECK, USDD_STATUS_COLLECTING_REFUND):
-                                            x["comment"] = USDD_STATUS_TRADE_BAL_CHECK
-                                        return x
-                                    state.update_jsonl_row(unprocessed_path, _pred_rp3, _upd_rp3)
+                                    # Mark for trade balance check
+                                    state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_TRADE_BAL_CHECK)
 
         # Refresh unprocessed list for next priorities
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
-            unprocessed = state.read_jsonl(unprocessed_path)
+            unprocessed = state_db.get_unprocessed_txids_as_dicts()
             
             # Priority 2: Send USDC for ready entries
             for r in list(unprocessed):
@@ -209,16 +209,13 @@ def process_unprocessed_txids():
                         memo_ref = str(r.get("reference"))
                         found_sig = solana_client.find_signature_with_memo(memo_ref)
                         if found_sig:
-                            def _pred_found(x):
-                                return x.get("txid") == r.get("txid") and x.get("comment") == USDD_STATUS_SENDING
-                            def _upd_found(x):
-                                x["sig"] = found_sig
-                                x["comment"] = USDD_STATUS_AWAITING
-                                return x
-                            if state.update_jsonl_row(unprocessed_path, _pred_found, _upd_found):
-                                r["sig"] = found_sig
-                                r["comment"] = USDD_STATUS_AWAITING
-                                _log("USDD_RECOVERED_SIG", txid=r.get("txid"), sig=found_sig, ref=memo_ref)
+                            state_db.update_unprocessed_txid(
+                                txid=r.get("txid"),
+                                status=USDD_STATUS_AWAITING
+                            )
+                            r["sig"] = found_sig
+                            r["comment"] = USDD_STATUS_AWAITING
+                            _log("USDD_RECOVERED_SIG", txid=r.get("txid"), sig=found_sig, ref=memo_ref)
                     except Exception:
                         pass
                         
@@ -233,18 +230,18 @@ def process_unprocessed_txids():
         # Update waterline after processing
         try:
             safety = int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0))
-            active_rows = state.read_jsonl(unprocessed_path)
+            active_rows = state_db.get_unprocessed_txids_as_dicts()
             if active_rows:
                 ts_candidates = [int(x.get("ts") or 0) for x in active_rows if int(x.get("ts") or 0) > 0]
                 if ts_candidates:
                     min_ts = min(ts_candidates)
                     wl = max(0, min_ts - safety)
-                    state.propose_nexus_waterline(int(wl))
+                    state_db.propose_nexus_waterline(int(wl))
             else:
                 # No unprocessed txids: advance waterline to current time minus buffer
                 current_ts = int(time.time())
                 waterline_ts = max(0, current_ts - safety)
-                state.propose_nexus_waterline(waterline_ts)
+                state_db.propose_nexus_waterline(waterline_ts)
                 _log("USDD_WATERLINE_ADVANCED", new_ts=waterline_ts, reason="no_unprocessed_txids")
         except Exception:
             pass
@@ -254,8 +251,6 @@ def process_unprocessed_txids():
         
     except Exception as e:
         _log("USDD_PROCESS_ERROR", error=str(e))
-    finally:
-        state.save_state()
 
 
 def poll_nexus_usdd_deposits():
@@ -263,16 +258,9 @@ def poll_nexus_usdd_deposits():
     
     Steps 1-2 from spec:
     - Fetch recent USDD transactions 
-    - Queue new credits >= threshold to unprocessed_txids.json
+    - Queue new credits >= threshold to unprocessed_txids database table
     """
-    # [Keep only the transaction fetching and queuing logic here]
-    # [Remove Steps 3-5 processing logic - now in process_unprocessed_txids()]
-    
-    import subprocess, time
-    from solana.rpc.api import Client as SolClient
-
-    unprocessed_path = "unprocessed_txids.json"
-    processed_path = "processed_txids.json"
+    import subprocess
 
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
     # Build base command. Use register/transactions/finance:token to get both debits and credits.
@@ -307,12 +295,20 @@ def poll_nexus_usdd_deposits():
     # Anti-DoS: Limit processing per loop iteration
     MAX_PROCESS_PER_LOOP = getattr(config, "MAX_CREDITS_PER_LOOP", 100)
 
-    # Load current sets
-    unprocessed = state.read_jsonl(unprocessed_path)
-    processed = state.read_jsonl(processed_path)
-    processed_txids = {r.get("txid") for r in processed}
-    refunded_txids = {r.get("txid") for r in processed if (r.get("comment") == "refunded")}
-    unprocessed_txids = {r.get("txid") for r in unprocessed}
+    # Load current sets from database
+    processed_txids = set()
+    refunded_txids = set()
+    unprocessed_txids = set()
+    
+    conn = state_db.sqlite3.connect(state_db.DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT txid FROM processed_txids")
+    processed_txids = {row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT txid FROM refunded_txids")
+    refunded_txids = {row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT txid FROM unprocessed_txids")
+    unprocessed_txids = {row[0] for row in cursor.fetchall()}
+    conn.close()
 
     wl_cutoff = 0
     if getattr(config, "HEARTBEAT_WATERLINE_ENABLED", False):
@@ -379,13 +375,10 @@ def poll_nexus_usdd_deposits():
                     continue
                 # If already queued as pending, refresh confirmations
                 if txid in unprocessed_txids:
-                    for existing in unprocessed:
-                        if existing.get("txid") == txid:
-                            if existing.get("comment") == USDD_STATUS_PENDING:
-                                existing["confirmations"] = conf
-                                if conf > 1:
-                                    _log("USDD_CONF_THRESHOLD", txid=txid, confirmations=conf)
-                            break
+                    if conf > 1:
+                        state_db.update_unprocessed_txid(txid=txid, confirmations_credit=conf)
+                        _log("USDD_CONF_THRESHOLD", txid=txid, confirmations=conf)
+                    continue
                 contracts = tx.get("contracts") or []
                 for c in contracts:
                     if not isinstance(c, dict):
@@ -422,15 +415,18 @@ def poll_nexus_usdd_deposits():
                     dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
                     dyn_fee_dec = (amount_dec * Decimal(max(0, dyn_bps))) / Decimal(10000)
                     if amount_dec <= (flat_usdd_dec + dyn_fee_dec):
-                        row = {
-                            "txid": txid,
-                            "ts": ts,
-                            "from": sender,
-                            "owner": (nexus_client.get_account_info(sender) or {}).get("owner"),
-                            "amount_usdd": str(amount_dec),
-                            "comment": USDD_STATUS_FEES,
-                        }
-                        state.append_jsonl(processed_path, row)
+                        # Add to processed as fees
+                        owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        state_db.mark_processed_txid(
+                            txid=txid,
+                            timestamp=ts,
+                            amount_usdd=float(amount_dec),
+                            from_address=sender,
+                            to_address=to_addr,
+                            owner=owner or "",
+                            sig="",
+                            status=USDD_STATUS_FEES
+                        )
                         processed_txids.add(txid)
                         processed_count += 1
                         continue
@@ -438,17 +434,16 @@ def poll_nexus_usdd_deposits():
                         continue
                     # Owner lookup only for non-micro credits
                     owner = (nexus_client.get_account_info(sender) or {}).get("owner")
-                    row = {
-                        "txid": txid,
-                        "ts": ts,
-                        "from": sender,
-                        "owner": owner,
-                        "amount_usdd": str(amount_dec),
-                        "comment": USDD_STATUS_PENDING,
-                        "confirmations": conf,
-                    }
-                    state.append_jsonl(unprocessed_path, row)
-                    unprocessed.append(row)
+                    state_db.add_unprocessed_txid(
+                        txid=txid,
+                        timestamp=ts,
+                        amount_usdd=float(amount_dec),
+                        from_address=sender,
+                        to_address=to_addr,
+                        owner_from_address=owner,
+                        confirmations_credit=conf,
+                        status=USDD_STATUS_PENDING
+                    )
                     unprocessed_txids.add(txid)
                     processed_count += 1
                     _log("USDD_QUEUED", txid=txid, amount=str(amount_dec))
@@ -468,31 +463,28 @@ def poll_nexus_usdd_deposits():
         # Step 6: waterline proposal (only advance when safe)
         try:
             safety = int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0))
-            rows = state.read_jsonl(unprocessed_path)
+            rows = state_db.get_unprocessed_txids_as_dicts()
             if rows:
                 ts_candidates = [int(x.get("ts") or 0) for x in rows if int(x.get("ts") or 0) > 0]
                 if ts_candidates:
                     min_ts = min(ts_candidates)
                     wl = max(0, min_ts - safety)
-                    state.propose_nexus_waterline(int(wl))
+                    state_db.propose_nexus_waterline(int(wl))
             else:
                 if page_ts_candidates and not backlog_truncated:
                     min_page_ts = min(int(t) for t in page_ts_candidates if int(t) > 0)
                     wl = max(0, min_page_ts - safety)
-                    state.propose_nexus_waterline(int(wl))
+                    state_db.propose_nexus_waterline(int(wl))
                 elif backlog_truncated:
                     _log("USDD_WATERLINE_HOLD", reason="pagination_truncated")
                 else:
                     # No unprocessed txids and no page data: advance waterline to current time minus buffer
                     # This prevents unnecessary re-scanning of old transactions
-                    import time
                     current_ts = int(time.time())
                     waterline_ts = max(0, current_ts - safety)
-                    state.propose_nexus_waterline(waterline_ts)
+                    state_db.propose_nexus_waterline(waterline_ts)
                     _log("USDD_WATERLINE_ADVANCED", new_ts=waterline_ts, reason="no_unprocessed_txids")
         except Exception:
             pass
     except Exception as e:
         print(f"Error polling USDD deposits: {e}")
-    finally:
-        state.save_state()
