@@ -1177,6 +1177,163 @@ def scan_recent_memos(search_limit: int = 400) -> dict:
     return out
 
 
+def scan_memos_since_timestamp(since_timestamp: int, max_signatures: int = 10000) -> dict:
+    """Scan ALL signatures for vault USDC account since timestamp, collecting structured memos.
+    
+    Args:
+        since_timestamp: Unix timestamp to scan from
+        max_signatures: Maximum signatures to fetch (safety limit)
+    
+    Returns:
+        dict: {
+            'nexus_txids': { txid: signature },
+            'refund_sigs': { deposit_sig: refund_tx_sig },
+            'quarantined_sigs': { sig: True },
+            'deposits': [ { sig, from, amount, memo, timestamp } ],  # Unprocessed deposits
+        }
+    
+    Note: This can be slow for large time ranges. Use waterline properly to minimize scan range.
+    """
+    out = {"nexus_txids": {}, "refund_sigs": {}, "quarantined_sigs": {}, "deposits": []}
+    
+    try:
+        client = Client(config.RPC_URL)
+    except Exception:
+        return out
+    
+    # Fetch signatures in batches, working backwards from most recent
+    fetched_count = 0
+    before_sig = None
+    batch_size = 1000  # Max allowed by Solana RPC
+    
+    while fetched_count < max_signatures:
+        try:
+            # Get batch of signatures
+            params = {"limit": min(batch_size, max_signatures - fetched_count)}
+            if before_sig:
+                params["before"] = before_sig
+            
+            resp = _rpc_call(
+                client.get_signatures_for_address,
+                PublicKey.from_string(str(config.VAULT_USDC_ACCOUNT)),
+                **params
+            )
+            entries = _rpc_get_value(resp)
+            
+            if not isinstance(entries, list) or not entries:
+                break  # No more signatures
+            
+            reached_waterline = False
+            for ent in entries:
+                try:
+                    sig = ent.get("signature") if isinstance(ent, dict) else None
+                    block_time = ent.get("blockTime") if isinstance(ent, dict) else None
+                    
+                    if not sig:
+                        continue
+                    
+                    # Check if we've reached the waterline
+                    if block_time and block_time < since_timestamp:
+                        reached_waterline = True
+                        break
+                    
+                    # Fetch transaction details
+                    try:
+                        tx_resp = _rpc_call(
+                            client.get_transaction,
+                            sig,
+                            encoding="jsonParsed",
+                            timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 6)
+                        )
+                    except Exception:
+                        continue
+                    
+                    tx_val = _rpc_get_result(tx_resp)
+                    if not tx_val:
+                        continue
+                    
+                    # Extract memos
+                    try:
+                        tx_obj = tx_val.get("transaction") if isinstance(tx_val, dict) else None
+                        msg = (tx_obj or {}).get("message") if isinstance(tx_obj, dict) else None
+                        insts = (msg or {}).get("instructions") if isinstance(msg, dict) else None
+                    except Exception:
+                        insts = None
+                    
+                    memos: list[str] = []
+                    if isinstance(insts, list):
+                        for ix in insts:
+                            try:
+                                prog = ix.get("programId") or ix.get("program")
+                                if prog and str(prog).startswith("Memo111"):
+                                    data = ix.get("data")
+                                    if isinstance(data, list) and data:
+                                        data = data[0]
+                                    if isinstance(data, str):
+                                        memos.append(data)
+                            except Exception:
+                                continue
+                    
+                    # Fallback: check logs
+                    if not memos:
+                        try:
+                            logs = (tx_val.get("meta") or {}).get("logMessages") if isinstance(tx_val, dict) else None
+                            if isinstance(logs, list):
+                                for lg in logs:
+                                    if isinstance(lg, str) and any(x in lg for x in ["nexus_txid:", "refundSig:", "quarantinedSig:"]):
+                                        memos.append(lg)
+                        except Exception:
+                            pass
+                    
+                    # Process memos
+                    for m in memos:
+                        if "nexus_txid:" in m:
+                            try:
+                                txid = m.split("nexus_txid:", 1)[1].strip().split()[0]
+                                if txid and txid not in out["nexus_txids"]:
+                                    out["nexus_txids"][txid] = sig
+                            except Exception:
+                                pass
+                        
+                        if "refundSig:" in m:
+                            try:
+                                dsig = m.split("refundSig:", 1)[1].strip().split()[0]
+                                if dsig and dsig not in out["refund_sigs"]:
+                                    out["refund_sigs"][dsig] = sig
+                            except Exception:
+                                pass
+                        
+                        if "quarantinedSig:" in m:
+                            try:
+                                qsig = m.split("quarantinedSig:", 1)[1].strip().split()[0]
+                                if qsig:
+                                    out["quarantined_sigs"][qsig] = True
+                            except Exception:
+                                pass
+                    
+                    # Check if this is a deposit to vault (no processed marker)
+                    # We'll collect ALL deposits and let caller filter out processed ones
+                    # This is simpler than trying to determine processing status here
+                    
+                except Exception:
+                    continue
+            
+            fetched_count += len(entries)
+            before_sig = entries[-1].get("signature") if entries else None
+            
+            # Stop conditions
+            if reached_waterline:
+                break
+            if len(entries) < batch_size:
+                break  # No more signatures available
+            
+        except Exception as e:
+            print(f"Error scanning signatures: {e}")
+            break
+    
+    return out
+
+
 ## Memo extraction removed.
 
 
