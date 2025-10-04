@@ -1,18 +1,18 @@
 """Startup recovery & reconstruction utilities.
 
 Responsibilities:
-1. Seed reference counter if missing by scanning existing counter file or highest reference
-   appearing in unprocessed / processed swap logs OR last reference in reference file.
+1. Seed reference counter if missing by scanning database for highest reference
+   appearing in swap records OR last reference in nexus system.
 2. Reconstruct processed_nexus_txs markers for USDD->USDC sends using on-chain memos nexus_txid:<txid>.
 3. Reconstruct refunded_sigs for USDC refunds via refundSig:<deposit_sig> memos (best effort).
 4. Provide a summary so caller can log actions taken.
 
 Design notes:
- - We intentionally do NOT mutate historical JSONL lines except to append missing processed markers;
+ - We intentionally do NOT mutate historical database records except to add missing processed markers;
    reconstruction is additive and idempotent.
  - We cap Solana scan to a configurable SEARCH_LIMIT to avoid long startup delays.
- - If reference counter file already exists we leave it untouched.
- - Reference seeding heuristic: choose max(reference found in any row/reference field) + 1.
+ - If reference counter already exists in nexus system we leave it untouched.
+ - Reference seeding heuristic: choose max(reference found in database) + 1.
 """
 from __future__ import annotations
 import json, os
