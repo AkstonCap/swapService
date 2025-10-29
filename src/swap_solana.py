@@ -47,9 +47,17 @@ def poll_solana_deposits():
         
         client = Client(getattr(config, "RPC_URL", None))
        
-        usdc_deposits = solana_client.fetch_filtered_token_account_transaction_history(
-            config.VAULT_USDC_ACCOUNT, wline_sol, config.MIN_DEPOSIT_USDC_UNITS, 10.0
-            )
+        #usdc_deposits = solana_client.fetch_filtered_token_account_transaction_history(
+        #    config.VAULT_USDC_ACCOUNT, wline_sol, config.MIN_DEPOSIT_USDC_UNITS, 10.0
+        #    )
+        
+        # Prefer Helius enriched RPC to batch-fetch txs + memos in 1–2 calls; fallback to existing scanner.
+        usdc_deposits = solana_client.fetch_incoming_usdc_deposits_via_helius(
+            str(config.VAULT_USDC_ACCOUNT),
+            since_ts=int(wline_sol),
+            min_units=getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0),
+            limit=getattr(config, "POLL_HELIUS_LIMIT", 200),
+        )
         
         unprocessed_deposits_added = solana_client.process_filtered_deposits(usdc_deposits, True)
         print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")

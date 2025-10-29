@@ -3,6 +3,7 @@ import json
 import base64
 from time import time
 from typing import Optional
+import os
 import requests
 from solana.rpc.api import Client
 from solders.pubkey import Pubkey as PublicKey
@@ -25,6 +26,243 @@ last_sent_sig: str | None = None
 TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
+
+# --- Optional Helius JSON-RPC helpers -----------------------------------------------------------
+def _helius_rpc_url() -> Optional[str]:
+    """Build the Helius RPC URL from config or environment.
+    Priority: config.HELIUS_RPC_URL -> env HELIUS_RPC_URL -> https://rpc.helius.xyz/?api-key=KEY
+    """
+    try:
+        url = getattr(config, "HELIUS_RPC_URL", None) or os.getenv("HELIUS_RPC_URL")
+        if url:
+            return url
+    except Exception:
+        pass
+    try:
+        key = getattr(config, "HELIUS_API_KEY", None) or os.getenv("HELIUS_API_KEY")
+        if key:
+            return f"https://rpc.helius.xyz/?api-key={key}"
+    except Exception:
+        pass
+    return None
+
+
+def _helius_rpc_call(method: str, params=None, timeout_sec: Optional[float] = None):
+    """Call a Helius JSON-RPC method and return .result.
+    Raises on HTTP/RPC errors. Returns the `result` field when available, else the whole JSON.
+    """
+    url = _helius_rpc_url()
+    if not url:
+        raise RuntimeError("Helius RPC not configured: set HELIUS_RPC_URL or HELIUS_API_KEY")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "swapService",
+        "method": method,
+        "params": params if params is not None else [],
+    }
+    to = timeout_sec if timeout_sec is not None else getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8)
+    resp = requests.post(url, json=payload, timeout=to)
+    resp.raise_for_status()
+    js = resp.json()
+    if isinstance(js, dict) and js.get("error"):
+        raise RuntimeError(f"Helius RPC error: {js['error']}")
+    if isinstance(js, dict) and "result" in js:
+        return js["result"]
+    return js
+
+
+def helius_get_transactions_for_address(
+    address: str,
+    *,
+    limit: int = 100,
+    before: Optional[str] = None,
+    until: Optional[str] = None,
+    commitment: str = "confirmed",
+    encoding: Optional[str] = None,
+) -> list:
+    """Fetch transactions for an address via Helius `getTransactionsForAddress`.
+
+    Returns a list of enriched transaction objects (shape defined by Helius). If the method
+    is unavailable or fails, callers can catch and fallback to core RPC.
+    """
+    lim = max(1, min(1000, int(limit)))
+    opts: dict = {"limit": lim, "commitment": commitment}
+    if before:
+        opts["before"] = before
+    if until:
+        opts["until"] = until
+    if encoding:
+        opts["encoding"] = encoding
+    # Helius expects params: [address, options]
+    return _helius_rpc_call("getTransactionsForAddress", [address, opts]) or []
+
+
+def core_get_transactions_for_address(
+    address: str,
+    *,
+    limit: int = 100,
+    before: Optional[str] = None,
+    until: Optional[str] = None,
+    commitment: str = "confirmed",
+) -> list:
+    """Fallback using core RPC: getSignaturesForAddress + getTransaction (jsonParsed).
+    Returns a list of transaction JSONs similar to getTransaction results.
+    """
+    client = Client(config.RPC_URL)
+    lim = max(1, min(1000, int(limit)))
+    sig_args = {"limit": lim}
+    if before:
+        sig_args["before"] = before
+    if until:
+        sig_args["until"] = until
+    # Fetch signatures
+    sig_resp = _rpc_call(
+        client.get_signatures_for_address,
+        PublicKey.from_string(address),
+        **sig_args,
+        timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
+    )
+    sig_entries = _rpc_get_result(sig_resp) or []
+    if not isinstance(sig_entries, list):
+        return []
+    sigs = [e.get("signature") for e in sig_entries if isinstance(e, dict) and e.get("signature")]
+    out: list = []
+    for sig in sigs:
+        try:
+            tx_resp = _rpc_call(
+                client.get_transaction,
+                sig,
+                encoding="jsonParsed",
+                timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
+            )
+            tx = _rpc_get_result(tx_resp)
+            if tx:
+                out.append(tx)
+        except Exception:
+            continue
+    return out
+
+
+def get_transactions_for_address(
+    address: str,
+    *,
+    limit: int = 100,
+    before: Optional[str] = None,
+    until: Optional[str] = None,
+    commitment: str = "confirmed",
+    prefer: str = "helius",
+) -> list:
+    """Unified helper: try Helius RPC first (if configured), else fallback to core RPC.
+    prefer: "helius" | "core"
+    """
+    if prefer == "helius":
+        try:
+            return helius_get_transactions_for_address(
+                address,
+                limit=limit,
+                before=before,
+                until=until,
+                commitment=commitment,
+            )
+        except Exception:
+            # Fallback to core
+            pass
+    return core_get_transactions_for_address(
+        address,
+        limit=limit,
+        before=before,
+        until=until,
+        commitment=commitment,
+    )
+
+
+def fetch_incoming_usdc_deposits_via_helius(
+    token_account_addr: str,
+    since_ts: int,
+    min_units: int = 0,
+    limit: int = 200,
+) -> list[tuple[str, int, str | None, str | None, int]]:
+    """
+    Fetch recent incoming USDC transfers to token_account_addr with memos using Helius RPC.
+    Returns a list of tuples: (signature, timestamp, memo, from_address, amount_usdc_units).
+    """
+    try:
+        # Page through Helius enriched transactions touching the token account.
+        collected: list[tuple[str, int, str | None, str | None, int]] = []
+        page_size = max(1, min(1000, limit))
+        before: str | None = None
+        usdc_mint = str(getattr(config, "USDC_MINT"))
+
+        while len(collected) < limit:
+            txs = helius_get_transactions_for_address(
+                str(token_account_addr),
+                limit=page_size,
+                before=before,
+                commitment="confirmed",
+                encoding=None,
+            ) or []
+            if not txs:
+                break
+
+            for tx in txs:
+                # Timestamp (Helius uses 'timestamp'); fall back to 'blockTime'
+                ts = int(tx.get("timestamp") or tx.get("blockTime") or 0)
+                if ts and ts <= int(since_ts):
+                    # Older than our waterline; stop scanning further pages.
+                    txs = []
+                    break
+
+                # Find incoming USDC transfer to our ATA
+                for t in (tx.get("tokenTransfers") or []):
+                    if str(t.get("toTokenAccount")) != str(token_account_addr):
+                        continue
+                    if str(t.get("mint")) != usdc_mint:
+                        continue
+
+                    # Amount in base units (tokenAmount is base units in enriched)
+                    amt_str = str(t.get("tokenAmount") or "0")
+                    try:
+                        amount_units = int(amt_str)
+                    except Exception:
+                        # Fallback if tokenAmount was UI; convert with decimals if present
+                        from decimal import Decimal, ROUND_DOWN
+                        decimals = int(t.get("decimals") or 6)
+                        amount_units = int((Decimal(amt_str) * (Decimal(10) ** decimals)).to_integral_value(rounding=ROUND_DOWN))
+
+                    if amount_units < int(min_units):
+                        continue
+
+                    # Memo from enriched 'memos', else scan instructions (rare fallback)
+                    memo = None
+                    memos = tx.get("memos") or []
+                    if memos:
+                        memo = memos[0]
+                    else:
+                        for ix in (tx.get("instructions") or []):
+                            if str(ix.get("programId")) == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr":
+                                data = ix.get("data")
+                                if isinstance(data, str) and data:
+                                    memo = data
+                                    break
+
+                    sig = tx.get("signature") or None
+                    from_addr = t.get("fromUserAccount") or t.get("fromTokenAccount") or None
+                    if sig and ts:
+                        collected.append((sig, ts, memo, from_addr, amount_units))
+                    break  # one incoming transfer per tx to our ATA is typical
+
+            # Prepare pagination
+            last_sig = txs[-1].get("signature") if txs else None
+            if not last_sig or len(txs) < page_size:
+                break
+            before = last_sig
+
+        # Oldest-first ordering to match DB processing semantics
+        collected.sort(key=lambda r: r[1])
+        return collected
+    except Exception:
+        return []
+    
 
 def fetch_filtered_token_account_transaction_history(token_account_addr: str, wline: int, amount: int, timeout: float = 10.0) -> list:
     """Fetch the transaction history of a Solana token account.
