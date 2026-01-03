@@ -176,7 +176,7 @@ def get_transaction_confirmations(txid: str) -> int | None:
 def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
 
     sigs = state_db.filter_unprocessed_sigs({
-        'status': 'debited, awaiting_confirmation',
+        'status': 'debited, awaiting confirmation',
         'limit': 1000
     })
     if not sigs:
@@ -186,15 +186,24 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     time_start = time.monotonic()
     current_time = time_start
 
-    for sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, status, reference in sigs:
+    # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
+    for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         
         confirmations = get_transaction_confirmations(txid)
-        if confirmations is not None and confirmations < min_confirmations:
+        if confirmations is None:
+            continue  # Transaction not found yet
+        if confirmations < min_confirmations:
             continue
-        elif confirmations >= min_confirmations:
-            state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, "debit_confirmed", reference)
-            state_db.remove_unprocessed_sig(sig)
-            processed_count += 1
+        
+        # Recalculate USDD amount from USDC (same fee logic as debit)
+        amount_usdd_debited = get_usdd_send_amount(amount_usdc_units or 0)
+        
+        # Get reference from latest if needed (or pass None since it's optional)
+        reference = state_db.get_latest_reference()
+        
+        state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, "debit_confirmed", reference)
+        state_db.remove_unprocessed_sig(sig)
+        processed_count += 1
         
         current_time = time.monotonic()
         if current_time - time_start > timeout:

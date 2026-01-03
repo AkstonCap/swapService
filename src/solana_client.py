@@ -183,11 +183,42 @@ def fetch_incoming_usdc_deposits_via_helius(
     limit: int = 200,
 ) -> list[tuple[str, int, str | None, str | None, int]]:
     """
-    Fetch recent incoming USDC transfers to token_account_addr with memos using Helius RPC.
+    Fetch recent incoming USDC transfers to token_account_addr with memos.
+    
+    Performance comparison:
+    - Helius: 1-2 API calls (enriched data with parsed tokenTransfers + memos)
+    - Core RPC: N+1 calls (1 getSignaturesForAddress + N getTransaction calls)
+    
+    For 100 deposits, Helius is ~50-100x faster (1 call vs 101 calls).
+    
     Returns a list of tuples: (signature, timestamp, memo, from_address, amount_usdc_units).
+    Falls back to core RPC if Helius is not configured or fails.
     """
+    # Try Helius first (fast path: 1-2 API calls for enriched data)
+    helius_result = _fetch_deposits_helius(token_account_addr, since_ts, min_units, limit)
+    if helius_result is not None:
+        return helius_result
+    
+    # Fallback to core RPC (slow path: N+1 API calls)
+    print("[HELIUS_FALLBACK] Helius unavailable, using core RPC (slower)")
+    return _fetch_deposits_core_rpc(token_account_addr, since_ts, min_units, limit)
+
+
+def _fetch_deposits_helius(
+    token_account_addr: str,
+    since_ts: int,
+    min_units: int,
+    limit: int,
+) -> list[tuple[str, int, str | None, str | None, int]] | None:
+    """
+    Internal: Fetch deposits using Helius enriched RPC.
+    Returns None if Helius is not configured or fails (signals fallback needed).
+    """
+    # Check if Helius is configured
+    if not _helius_rpc_url():
+        return None
+    
     try:
-        # Page through Helius enriched transactions touching the token account.
         collected: list[tuple[str, int, str | None, str | None, int]] = []
         page_size = max(1, min(1000, limit))
         before: str | None = None
@@ -260,7 +291,127 @@ def fetch_incoming_usdc_deposits_via_helius(
         # Oldest-first ordering to match DB processing semantics
         collected.sort(key=lambda r: r[1])
         return collected
-    except Exception:
+    except Exception as e:
+        print(f"[HELIUS_ERROR] {e}")
+        return None  # Signal fallback needed
+
+
+def _fetch_deposits_core_rpc(
+    token_account_addr: str,
+    since_ts: int,
+    min_units: int,
+    limit: int,
+) -> list[tuple[str, int, str | None, str | None, int]]:
+    """
+    Internal: Fetch deposits using core Solana RPC (N+1 queries fallback).
+    Slower but works without Helius API key.
+    """
+    try:
+        client = Client(config.RPC_URL)
+        collected: list[tuple[str, int, str | None, str | None, int]] = []
+        usdc_mint = str(getattr(config, "USDC_MINT"))
+        
+        # Step 1: Get signatures (1 API call)
+        sig_resp = _rpc_call(
+            client.get_signatures_for_address,
+            PublicKey.from_string(token_account_addr),
+            limit=min(1000, limit * 2),  # Fetch extra since some may be filtered
+            timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
+        )
+        sig_entries = _rpc_get_value(sig_resp) or []
+        if not isinstance(sig_entries, list):
+            return []
+        
+        # Step 2: For each signature, fetch full transaction (N API calls)
+        for entry in sig_entries:
+            if len(collected) >= limit:
+                break
+                
+            if not isinstance(entry, dict):
+                continue
+            
+            block_time = entry.get("blockTime")
+            if block_time is None or block_time <= since_ts:
+                continue  # Skip old transactions
+            
+            sig = entry.get("signature")
+            if not sig:
+                continue
+            
+            try:
+                tx_resp = _rpc_call(
+                    client.get_transaction,
+                    sig,
+                    encoding="jsonParsed",
+                    timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 12),
+                )
+                tx_data = _rpc_get_result(tx_resp)
+                if not tx_data or not isinstance(tx_data, dict):
+                    continue
+                
+                # Parse transaction for USDC transfer and memo
+                meta = tx_data.get("meta", {})
+                pre_balances = meta.get("preTokenBalances", [])
+                post_balances = meta.get("postTokenBalances", [])
+                
+                # Calculate vault delta
+                vault_delta = 0
+                from_addr = None
+                for post in post_balances:
+                    if not isinstance(post, dict):
+                        continue
+                    if post.get("mint") == usdc_mint and post.get("owner") == str(config.SOL_MAIN_ACCOUNT):
+                        post_amount = int(post.get("uiTokenAmount", {}).get("amount", "0"))
+                        for pre in pre_balances:
+                            if (isinstance(pre, dict) and
+                                pre.get("accountIndex") == post.get("accountIndex") and
+                                pre.get("mint") == post.get("mint")):
+                                pre_amount = int(pre.get("uiTokenAmount", {}).get("amount", "0"))
+                                vault_delta = post_amount - pre_amount
+                                break
+                        break
+                
+                if vault_delta < min_units:
+                    continue
+                
+                # Extract sender from preTokenBalances (account that decreased)
+                for pre in pre_balances:
+                    if isinstance(pre, dict) and pre.get("mint") == usdc_mint:
+                        pre_amt = int(pre.get("uiTokenAmount", {}).get("amount", "0"))
+                        for post in post_balances:
+                            if (isinstance(post, dict) and 
+                                post.get("accountIndex") == pre.get("accountIndex")):
+                                post_amt = int(post.get("uiTokenAmount", {}).get("amount", "0"))
+                                if post_amt < pre_amt:  # This account sent tokens
+                                    from_addr = pre.get("owner")
+                                    break
+                        if from_addr:
+                            break
+                
+                # Extract memo from instructions
+                memo = None
+                tx_obj = tx_data.get("transaction", {})
+                msg = tx_obj.get("message", {})
+                insts = msg.get("instructions", [])
+                for ix in insts:
+                    prog = ix.get("program")
+                    if prog and str(prog) == "spl-memo":
+                        memo = ix.get("parsed", {})
+                        if isinstance(memo, str):
+                            break
+                        memo = None
+                
+                collected.append((sig, block_time, memo, from_addr, vault_delta))
+                
+            except Exception:
+                continue
+        
+        # Oldest-first ordering
+        collected.sort(key=lambda r: r[1])
+        return collected
+        
+    except Exception as e:
+        print(f"[CORE_RPC_ERROR] {e}")
         return []
     
 
@@ -462,7 +613,8 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
     processing_secs = 0
     timestamp_start = time.monotonic()
     current_timestamp = time.monotonic()
-    for sig, timestamp, memo, from_address, amount_usdc in unprocessed[:limit]:
+    # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
+    for sig, timestamp, memo, from_address, amount_usdc, status, txid in unprocessed[:limit]:
         processing_secs = current_timestamp - timestamp_start
         if processing_secs >= timeout:
             break
@@ -604,7 +756,8 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
     timestamp_start = time.monotonic()
     current_timestamp = time.monotonic()
     
-    for sig, timestamp, from_address, memo, amount_usdc_units in unprocessed[:limit]:
+    # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
+    for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in unprocessed[:limit]:
         
         processing_secs = current_timestamp - timestamp_start
         if processing_secs >= timeout:
@@ -672,7 +825,8 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
     timestamp_start = time.monotonic()
     current_timestamp = time.monotonic()
     
-    for sig, timestamp, from_address, memo, amount_usdc_units in unprocessed[:limit]:
+    # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
+    for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in unprocessed[:limit]:
         
         processing_secs = current_timestamp - timestamp_start
         if processing_secs >= timeout:
@@ -758,10 +912,10 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
         return False, None
 
 
-def check_sig_confirmations(min_confirmations: int, timeout: float) -> bool:
+def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
     
     sigs = state_db.filter_unprocessed_sigs({
-        'status': 'refund sent, awaiting_confirmation',
+        'status': 'refund sent, awaiting confirmation',
         'limit': 1000
     })
     if not sigs:
@@ -772,7 +926,8 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> bool:
     current_time = time_start
     client = Client(config.RPC_URL)
 
-    for sig, timestamp, amount_usdc_units, from_address, memo in sigs:
+    # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
+    for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         # Timeout check
         current_time = time.monotonic()
         if current_time - time_start > timeout:

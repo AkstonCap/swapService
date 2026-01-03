@@ -218,14 +218,127 @@ def process_unprocessed_txids():
                             _log("USDD_RECOVERED_SIG", txid=r.get("txid"), sig=found_sig, ref=memo_ref)
                     except Exception:
                         pass
-                        
-                # [Continue with existing USDC sending logic...]
-                # [This is getting long - the pattern is clear]
                 
-        # Priority 3: Check confirmations
+                # Skip if not ready for sending
+                if r.get("comment") != USDD_STATUS_READY:
+                    continue
+                
+                txid = r.get("txid")
+                recv_account = r.get("receival_account")
+                
+                if not recv_account:
+                    continue  # Will be resolved in Priority 1 next cycle
+                
+                # Calculate net USDC amount after fees
+                amt_usdd = _parse_decimal_amount(r.get("amount_usdd"))
+                flat_fee = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDC", "0.1"))
+                dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 10))
+                dyn_fee = (amt_usdd * Decimal(dyn_bps)) / Decimal(10000)
+                net_usdd = amt_usdd - flat_fee - dyn_fee
+                
+                if net_usdd <= 0:
+                    # Mark as fee-only processed
+                    state_db.mark_processed_txid(
+                        txid=txid,
+                        timestamp=r.get("ts"),
+                        amount_usdd=float(amt_usdd),
+                        from_address=r.get("from"),
+                        to_address=r.get("to"),
+                        owner=r.get("owner") or "",
+                        sig="",
+                        status=USDD_STATUS_FEES
+                    )
+                    state_db.remove_unprocessed_txid(txid)
+                    _log("USDD_FEE_ONLY", txid=txid, amount_usdd=str(amt_usdd))
+                    continue
+                
+                # Convert USDD to USDC base units (accounting for decimal differences)
+                usdc_decimals = int(getattr(config, "USDC_DECIMALS", 6))
+                usdd_decimals = int(getattr(config, "USDD_DECIMALS", 6))
+                # net_usdd is already in token units (not base units), convert to USDC base units
+                net_usdc_units = int((net_usdd * (Decimal(10) ** usdc_decimals)).to_integral_value(rounding=ROUND_DOWN))
+                
+                if net_usdc_units <= 0:
+                    continue
+                
+                # Mark as sending before attempting
+                state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_SENDING)
+                
+                # Attempt to send USDC
+                send_key = f"usdc_send:{txid}"
+                if not state_db.should_attempt(send_key):
+                    # Max attempts exceeded -> refund path
+                    state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
+                    _log("USDD_SEND_MAX_ATTEMPTS", txid=txid)
+                    continue
+                
+                state_db.record_attempt(send_key)
+                
+                try:
+                    # Send USDC with memo referencing the Nexus txid
+                    memo = f"nexus_txid:{txid}"
+                    ok, sig = solana_client.send_usdc_to_token_account_with_sig(recv_account, net_usdc_units, memo)
+                    
+                    if ok and sig:
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_AWAITING)
+                        _log("USDD_USDC_SENT", txid=txid, sig=sig, amount=net_usdc_units)
+                    elif ok and not sig:
+                        # Idempotency - already sent
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_AWAITING)
+                        _log("USDD_USDC_ALREADY_SENT", txid=txid)
+                    else:
+                        # Send failed, leave in SENDING for retry
+                        attempts = state_db.get_attempt_count(send_key)
+                        max_attempts = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
+                        if attempts >= max_attempts:
+                            state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
+                            _log("USDD_SEND_FAILED_MAX", txid=txid, attempts=attempts)
+                        else:
+                            _log("USDD_SEND_FAILED", txid=txid, attempts=attempts)
+                except Exception as e:
+                    _log("USDD_SEND_ERROR", txid=txid, error=str(e))
+                
+        # Priority 3: Check confirmations for USDC sends awaiting confirmation
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
-            # [Confirmation checking logic...]
-            pass
+            unprocessed = state_db.get_unprocessed_txids_as_dicts()
+            for r in list(unprocessed):
+                if time.time() - process_start > PROCESS_BUDGET_SEC:
+                    break
+                    
+                if r.get("comment") != USDD_STATUS_AWAITING:
+                    continue
+                
+                txid = r.get("txid")
+                
+                # Check if the USDC send was confirmed by looking for the memo on-chain
+                try:
+                    memo = f"nexus_txid:{txid}"
+                    found_sig = solana_client.find_signature_with_memo(memo)
+                    if found_sig:
+                        # USDC send confirmed - mark as processed
+                        amt_usdd = _parse_decimal_amount(r.get("amount_usdd"))
+                        state_db.mark_processed_txid(
+                            txid=txid,
+                            timestamp=r.get("ts"),
+                            amount_usdd=float(amt_usdd),
+                            from_address=r.get("from"),
+                            to_address=r.get("to"),
+                            owner=r.get("owner") or "",
+                            sig=found_sig,
+                            status=USDD_STATUS_PROCESSED
+                        )
+                        state_db.remove_unprocessed_txid(txid)
+                        _log("USDD_USDC_CONFIRMED", txid=txid, sig=found_sig)
+                    else:
+                        # Check for timeout
+                        ts = int(r.get("ts") or 0)
+                        confirm_timeout = int(getattr(config, "USDC_CONFIRM_TIMEOUT_SEC", 600))
+                        if ts and (time.time() - ts) > confirm_timeout:
+                            # Timeout waiting for confirmation - move to refund pending
+                            state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
+                            _log("USDD_CONFIRM_TIMEOUT", txid=txid, age=int(time.time() - ts))
+                except Exception as e:
+                    _log("USDD_CONFIRM_CHECK_ERROR", txid=txid, error=str(e))
             
         # Update waterline after processing
         try:
