@@ -48,10 +48,42 @@ def _run_with_watchdog(func, label, budget_sec):
     
     if thread.is_alive():
         print(f"[watchdog] {label} exceeded {budget_sec}s budget; skipping remainder this cycle")
-        print()
-    if "error" in exc_result:
-        print(f"[loop] {label} error: {exc_result['error']}")
-        print()
+
+
+def _process_stale_deposits():
+    """Process stale deposits that exceed STALE_DEPOSIT_QUARANTINE_SEC.
+    
+    FIX: This config variable was defined but never used. Now deposits
+    stuck in unprocessable states for too long are moved to quarantine.
+    """
+    try:
+        stale_threshold_sec = int(getattr(config, 'STALE_DEPOSIT_QUARANTINE_SEC', 86400))  # 24h default
+        now = int(time.time())
+        
+        # Get all unprocessed signatures
+        unproc_rows = state_db.get_unprocessed_sigs()
+        
+        stale_statuses = {'memo unresolved', 'ready for processing', None}
+        quarantined_count = 0
+        
+        for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in unproc_rows:
+            if not timestamp:
+                continue
+                
+            age_sec = now - int(timestamp)
+            
+            # Check if this deposit is stale and in a non-terminal state
+            if age_sec > stale_threshold_sec and status in stale_statuses:
+                # Mark for quarantine - the quarantine handler will process it
+                state_db.update_unprocessed_sig_status(sig, "to be quarantined")
+                quarantined_count += 1
+                print(f"[stale_deposit] sig={sig} age={age_sec}s > {stale_threshold_sec}s status={status} - marking for quarantine")
+        
+        if quarantined_count > 0:
+            print(f"[stale_deposit] Marked {quarantined_count} stale deposits for quarantine")
+            
+    except Exception as e:
+        print(f"[stale_deposit] error: {e}")
 
 
 #print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
@@ -63,8 +95,8 @@ def run():
     print(f"   USDC Vault: {config.VAULT_USDC_ACCOUNT}")
     print(f"   USDD Treasury: {config.NEXUS_USDD_TREASURY_ACCOUNT}")
     print("   Monitoring:")
-    print("   - USDC → USDD: Solana deposits mapped via Nexus asset (distordiaSwap)")
-    print("   - USDD → USDC: USDD deposits mapped to Solana recipients (internal state/idempotency)\n")
+    print("   - USDC → USDD: Solana deposits with memo nexus:<USDD_ACCOUNT>")
+    print("   - USDD → USDC: USDD deposits mapped via distordiaBridge asset (txid_toService + receival_account)\n")
 
     # Startup balances summary (USDC vault + USDD circulating supply) with timeout protection
     try:
@@ -220,8 +252,8 @@ def run():
             
             if _stop_event.is_set():
                 break
-            # Process unprocessed entries independently of signature polling
-            #_run_with_watchdog(process_unprocessed_entries, "unprocessed", UNPROCESSED_BUDGET)
+            # Process stale deposits that need quarantine (FIX: STALE_DEPOSIT_QUARANTINE_SEC now used)
+            _run_with_watchdog(_process_stale_deposits, "stale_deposits", 5)
             
             if _stop_event.is_set():
                 break
@@ -241,8 +273,23 @@ def run():
             except Exception as e:
                 print(f"[state_save] error: {e}")
 
-            # Remove waterline proposal apply & prune (DB variant would go here if implemented)
-            # ...existing code...
+            # Apply waterline proposals to heartbeat asset (FIX: was commented out)
+            try:
+                sol_wl, nxs_wl = state_db.get_and_clear_proposed_waterlines()
+                if sol_wl or nxs_wl:
+                    current_ts = int(time.time())
+                    nexus_client.update_heartbeat_asset(current_ts, nxs_wl, sol_wl)
+                    print(f"[waterline] Applied proposals: solana={sol_wl} nexus={nxs_wl}")
+            except Exception as e:
+                print(f"[waterline] apply error: {e}")
+            
+            # Cleanup expired reservations periodically
+            try:
+                deleted = state_db.cleanup_expired_reservations(ttl_sec=300)
+                if deleted > 0:
+                    print(f"[cleanup] Expired {deleted} reservations")
+            except Exception:
+                pass
     except KeyboardInterrupt:
         print()
         print("Shutting down…")

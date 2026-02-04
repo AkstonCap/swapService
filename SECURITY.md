@@ -18,14 +18,15 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 ## File Permissions
 - Restrict directory to service user.
 - `vault-keypair.json` and any additional key files: mode 600.
-- JSONL state files: writable only by service user (avoid accidental edits).
+- State database (`swap_service.db`): writable only by service user (avoid accidental edits).
 
 ## State Integrity
-- Append‑only design: do not truncate processed files; rotate by copying & compressing only when service stopped.
+- SQLite database with WAL mode provides crash-safe persistence.
+- Do not manually edit the database unless fully aware of consequences (risk: double payout). Instead, use quarantine tables and reconcile manually.
 - Maintain checksum (optional) of state directory for tamper detection.
 
 ## Idempotency Controls
-- Solana: on‑chain memo includes Nexus address; processed signatures file prevents replay on restart.
+- Solana: on‑chain memo includes Nexus address; `processed_sigs` database table prevents replay on restart.
 - Nexus: credit txid + owner + asset mapping triple must align; mismatched owner mapping is ignored.
 - Do not manually edit processed markers unless fully aware of consequences (risk: double payout). Instead, quarantine and reconcile manually.
 
@@ -70,7 +71,6 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Containerize with read‑only root fs, bind‑mount writable state dir only.
 - Add integrity hash of config at startup; alert on drift.
 - Consider WebSocket subscription to reduce polling attack surface.
-- Migrate state from flat files to SQLite with WAL + integrity checks for higher volumes.
 
 ## Threat Model Snapshot
 | Threat | Mitigation |

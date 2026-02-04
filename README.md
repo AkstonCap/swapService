@@ -37,7 +37,41 @@ Optionally use the local solana CLI:
 
 ### USDD->USDC (Asset‑Mapped Receival Account)
 
+> 📖 **Full specification:** See [ASSET_STANDARD.md](ASSET_STANDARD.md) for complete asset format details and examples.
+
 Publish (or update) a Nexus Asset **you own** that maps the USDD transfer txid to your Solana receival address. The service matches on two fields: `txid_toService` (the USDD credit transaction hash) AND `owner` (the signature chain that sent the USDD). When it finds an asset row containing a `receival_account`, it sends USDC there.
+
+**Quick Start (3 commands):**
+
+1) **Create asset** (one-time setup):
+```bash
+nexus assets/create/asset name=distordiaBridge format=basic \
+    txid_toService="" \
+    receival_account=<YOUR_SOLANA_USDC_ATA> \
+    pin=<PIN>
+```
+
+2) **Send USDD** to treasury and capture txid:
+```bash
+nexus finance/debit/token from=USDD to=<TREASURY_ACCOUNT> amount=10.5 pin=<PIN>
+# Response includes "txid": "01b88ff8..."
+```
+
+3) **Update asset** with txid:
+```bash
+nexus assets/update/asset name=distordiaBridge format=basic \
+    txid_toService=01b88ff8... \
+    pin=<PIN>
+```
+
+Done! The service will detect your credit, verify the asset owner matches, and send USDC to your `receival_account`.
+
+**Key Points:**
+- Asset owner must match the sender's `owner` field of the USDD credit (security check)
+- The same asset is reused for multiple swaps—just update `txid_toService` each time
+- Your Solana wallet must already have a USDC ATA (most wallets auto-create on first receive)
+- Minimum: `0.100101 USDD`. Smaller amounts are treated as fees
+- If no asset mapping within `REFUND_TIMEOUT_SEC` (default 1 hour) → USDD is refunded
 
 High‑level flow:
 1. You send USDD to the service treasury.
@@ -186,7 +220,7 @@ Policy notes on USDD → USDC:
  - If all refund attempts fail:
    - USDC→USDD path: the remaining refundable amount (after the last attempt's flat fee) is moved from the vault USDC token account to a self-owned quarantine USDC token account.
    - USDD→USDC path: the remaining refundable USDD is moved from the treasury to a self-owned Nexus USDD quarantine account.
-   - In both cases, a JSON line is written to `FAILED_REFUNDS_FILE` for manual inspection.
+   - In both cases, the event is recorded in the `quarantined_sigs` or `quarantined_txids` database table for manual inspection.
 
 ## Optional Public Heartbeat (Free, On-Chain)
 The service can update a Nexus Asset’s mutable field `last_poll_timestamp` after each poll cycle. Anyone can read this on-chain to determine whether the service is online.
@@ -290,14 +324,11 @@ NEXUS_USDD_QUARANTINE_ACCOUNT=<YOUR_USDD_QUARANTINE_ACCOUNT_ADDRESS>
 # Quarantine and failed refunds
 # Self-owned USDC token account used to quarantine amounts from failed refunds so they don't affect backing ratio
 USDC_QUARANTINE_ACCOUNT=<YOUR_USDC_TOKEN_ACCOUNT_FOR_QUARANTINE>
-# JSON Lines file capturing failed refund events for manual review
-FAILED_REFUNDS_FILE=failed_refunds.jsonl
 
 # Polling & State
 POLL_INTERVAL=10
-PROCESSED_SIG_FILE=processed_sigs.json
-PROCESSED_NEXUS_FILE=processed_nexus_txs.json
-ATTEMPT_STATE_FILE=attempt_state.json
+# All state is stored in SQLite database (swap_service.db)
+STATE_DB_PATH=swap_service.db
 MAX_ACTION_ATTEMPTS=3
 ACTION_RETRY_COOLDOWN_SEC=300
 
@@ -507,12 +538,7 @@ How to create your USDC ATA (user-side):
 | NEXUS_CLI_PATH | Path to Nexus CLI | ❌ | ./nexus |
 | NEXUS_RPC_HOST | Nexus RPC host (if applicable) | ❌ | http://127.0.0.1:8399 |
 | POLL_INTERVAL | Poll interval (seconds) | ❌ | 10 |
-| PROCESSED_SIG_FILE | Processed Solana signatures file | ❌ | processed_sigs.json |
-| PROCESSED_NEXUS_FILE | Processed Nexus txs file | ❌ | processed_nexus_txs.json |
-| ATTEMPT_STATE_FILE | Attempts / cooldown tracking | ❌ | attempt_state.json |
-| FAILED_REFUNDS_FILE | JSONL failed refund events | ❌ | failed_refunds.jsonl |
-| REFUNDED_SIGS_FILE | JSONL refunded signature log | ❌ | refunded_sigs.jsonl |
-| UNPROCESSED_SIGS_FILE | Pending Solana deposits file | ❌ | unprocessed_sigs.json |
+| STATE_DB_PATH | SQLite database path | ❌ | swap_service.db |
 | MAX_ACTION_ATTEMPTS | Max attempts per action | ❌ | 3 |
 | ACTION_RETRY_COOLDOWN_SEC | Cooldown between attempts | ❌ | 300 |
 | REFUND_TIMEOUT_SEC | Age before attempting forced refund | ❌ | 3600 |
@@ -556,15 +582,15 @@ How to create your USDC ATA (user-side):
 | HEARTBEAT_WATERLINE_SAFETY_SEC | Seconds subtracted from waterline when filtering | ❌ | 120 |
 
 Idempotency:
-- USDC → USDD: The service looks up a Nexus asset mapping (distordiaSwap) by `swap_to=USDD` and `tx_sent=<solana_signature>` to determine the recipient. It then guards against duplicates by scanning recent treasury debits for an identical amount to that recipient. Nexus "reference" is numeric (uint64) and is set to 0 by default.
-- USDD → USDC: Avoid relying on memos for deduplication; instead scan recent vault transfers and internal state to prevent duplicates.
+- USDC → USDD: The service parses the memo `nexus:<NEXUS_ADDRESS>` from Solana deposits and validates the Nexus USDD account exists. It guards against duplicates using processed signature markers and Nexus debit reference numbers.
+- USDD → USDC: The service queries user-owned `distordiaBridge` assets by `txid_toService` + `owner` to find the `receival_account`. See [ASSET_STANDARD.md](ASSET_STANDARD.md) for the full asset specification. Duplicates are prevented via processed txid markers and on-chain memo scanning.
 
 ## Security Notes
 - Keep secrets out of git: ensure `.env` and `vault-keypair.json` are ignored and stored securely.
 - Least-privilege vault key: use a dedicated Solana keypair for this service and fund it only with what’s needed (SOL for tx fees; USDC for payouts). Avoid reusing personal keys.
 - RPC integrity: use trusted Solana RPC endpoints (self-hosted or reputable providers). Consider rate limits and lags when setting `POLL_INTERVAL`.
 - Nexus CLI integrity: pin a specific CLI build and verify its checksum when updating. Restrict execute permissions to the service user.
-- State file permissions: `processed_sigs.json`, `processed_nexus_txs.json`, `attempt_state.json`, and `failed_refunds.jsonl` should be writable only by the service user (e.g., `chmod 600` on Linux/macOS).
+- State database permissions: `swap_service.db` should be writable only by the service user (e.g., `chmod 600` on Linux/macOS).
 - Logging hygiene: the service masks the PIN in CLI logs; avoid shell tracing that could echo command arguments.
 - Refund loops: attempts/cooldowns help prevent fee-draining loops. If you reduce cooldowns, monitor logs for repeating failures.
 - Test safely: try on Solana Devnet or a Nexus test environment first; verify both swap directions and refund paths.
@@ -588,7 +614,7 @@ Idempotency:
   python3 -m pip install -r requirements.txt
   ```
   If you must use system Python, append `--break-system-packages` to pip (not recommended).
-- No recipient mapping yet (USDC → USDD): Ensure the distordiaSwap asset is published with fields `swap_to`, `tx_sent`, and `swap_recipient` before or shortly after the USDC transfer. The service will retry until available.
+- No recipient mapping yet (USDD → USDC): Ensure your `distordiaBridge` asset is published with `txid_toService` set to your Nexus debit txid and `receival_account` set to your Solana USDC ATA. See [ASSET_STANDARD.md](ASSET_STANDARD.md) for details.
 - Wrong token or invalid Nexus address: USDC is refunded with a reason memo.
 - Invalid Solana address (USDD → USDC): USDD is refunded to sender with a reason.
 - Heartbeat not updating: Check `HEARTBEAT_ENABLED`, asset address, and that updates are not more frequent than 10s.

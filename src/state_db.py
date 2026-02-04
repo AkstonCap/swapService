@@ -146,6 +146,14 @@ def init_db():
         )
     """)
     
+    # Counters table for atomic sequence generation (e.g., reference numbers)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS counters (
+            name TEXT PRIMARY KEY,
+            value INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    
     # Waterline proposals (ephemeral, cleared after applying to heartbeat)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS waterline_proposals (
@@ -995,8 +1003,9 @@ def update_fee_summary():
 def next_reference() -> int:
     """Get next unique reference number for Nexus debits.
     
-    Increments from the highest reference found in processed_sigs.
-    Thread-safe via SQL transaction.
+    Uses atomic increment in counters table to ensure uniqueness even when
+    multiple debits are processed in the same loop iteration.
+    Falls back to MAX(reference) from processed_sigs on first use.
     
     Returns:
         Next reference number (1-based)
@@ -1004,15 +1013,34 @@ def next_reference() -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Get current max
+    # Try to increment existing counter atomically
     cursor.execute("""
-        SELECT MAX(reference) FROM processed_sigs 
-        WHERE reference IS NOT NULL
+        UPDATE counters SET value = value + 1 WHERE name = 'reference'
     """)
-    row = cursor.fetchone()
-    current_max = row[0] if row and row[0] is not None else 0
     
-    next_ref = current_max + 1
+    if cursor.rowcount == 0:
+        # Counter doesn't exist yet - initialize from processed_sigs or start at 1
+        cursor.execute("""
+            SELECT MAX(reference) FROM processed_sigs WHERE reference IS NOT NULL
+        """)
+        row = cursor.fetchone()
+        current_max = row[0] if row and row[0] is not None else 0
+        next_ref = current_max + 1
+        
+        # Insert initial counter value
+        cursor.execute("""
+            INSERT OR REPLACE INTO counters (name, value) VALUES ('reference', ?)
+        """, (next_ref,))
+        conn.commit()
+        conn.close()
+        return next_ref
+    
+    # Get the updated value
+    cursor.execute("SELECT value FROM counters WHERE name = 'reference'")
+    row = cursor.fetchone()
+    next_ref = row[0] if row else 1
+    
+    conn.commit()
     conn.close()
     return next_ref
 

@@ -37,22 +37,16 @@ Legend:
 | NEXUS_TOKEN_NAME | N | str | USDD | Sanity validation of token name on mint/credit path. |
 | NEXUS_RPC_HOST | N | str | http://127.0.0.1:8399 | Node / gateway host if used. |
 
-## Poll Intervals & State Files
+## Poll Intervals & State
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
 | POLL_INTERVAL | int | 10 | Legacy/global fallback if chain‑specific not set. |
 | SOLANA_POLL_INTERVAL | int | POLL_INTERVAL | Poll cadence (s) for Solana path. Faster (~12–20s) recommended. |
 | NEXUS_POLL_INTERVAL | int | POLL_INTERVAL | Poll cadence (s) for Nexus path. Match/block (~50–60s) to reduce empties. |
-| PROCESSED_SIG_FILE | str | processed_sigs.json | Processed Solana deposit markers. |
-| PROCESSED_NEXUS_FILE | str | processed_nexus_txs.json | Processed Nexus credit markers. |
-| UNPROCESSED_SIGS_FILE | str | unprocessed_sigs.json | Backlog queue (USDC→USDD). |
-| PROCESSED_SWAPS_FILE | str | processed_sigs.json | (Alias / historical) consolidated processed file. |
-| NON_DEPOSITS_FILE | str | non_deposits.json | Captures signatures rejected as non‑deposits. |
-| ATTEMPT_STATE_FILE | str | attempt_state.json | Retry counters & cooldown timestamps. |
-| FAILED_REFUNDS_FILE | str | failed_refunds.jsonl | JSONL lines for operator action. |
-| REFUNDED_SIGS_FILE | str | refunded_sigs.jsonl | Record of successful refunds (audit). |
-| REFERENCE_COUNTER_FILE | str | reference_counter.json | Internal optional reference id counters. |
-| FEES_STATE_FILE | str | fees_state.json | Aggregated fee accounting (optional). |
+| STATE_DB_PATH | str | swap_service.db | SQLite database path for all state persistence. |
+| FEES_STATE_FILE | str | fees_state.json | Legacy USDC fee accumulator file (fees.py). |
+
+> **Note:** Prior JSONL file config vars (`PROCESSED_SIG_FILE`, `UNPROCESSED_SIGS_FILE`, etc.) are deprecated. All state is now stored in the SQLite database at `STATE_DB_PATH`. Fee tracking uses both `fee_entries` table and optional `FEES_STATE_FILE`.
 
 ## Timeouts / Budgets
 | Var | Type | Default | Notes |

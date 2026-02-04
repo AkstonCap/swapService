@@ -649,13 +649,22 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
             # 6. Calculate amount minus fees
             net_amount = nexus_client.get_usdd_send_amount(amount_usdc)
             if net_amount <= 0:
-                state_db.mark_processed_sig(sig, timestamp, f"amount after fees <= 0")
+                # Bug #12 fix: Track the fee (entire deposit amount is kept as fee)
+                state_db.add_fee_entry(
+                    sig=sig,
+                    txid=None,
+                    kind="micro_deposit_fee",
+                    amount_usdc_units=int(amount_usdc),
+                    amount_usdd_units=None
+                )
+                state_db.mark_processed_sig(sig, timestamp, int(amount_usdc), None, 0, "processed, amount after fees <= 0", None)
                 state_db.remove_unprocessed_sig(sig)
                 proc_count_mic += 1
                 continue
 
             # 7. Debit USDD if valid
-            reference = state_db.get_latest_reference() + 1
+            # Bug #9 fix: Use next_reference() which atomically increments to prevent duplicate references
+            reference = state_db.next_reference()
             result = nexus_client.debit_usdd_with_txid(nexus_address, net_amount, reference)
             if result[0]:
                 proc_count_swap += 1
@@ -663,9 +672,16 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 if txid:
                     state_db.update_unprocessed_sig_txid(sig, txid)
                     state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
-                elif not txid:
+                else:
+                    # Debit succeeded but no txid returned - should not happen, mark for refund
                     state_db.update_unprocessed_sig_status(sig, "to be refunded")
                     proc_count_refund += 1
+                    print(f"[DEBIT_NO_TXID] sig={sig} - debit succeeded but no txid, marking for refund")
+            else:
+                # Debit failed - mark for refund to prevent infinite retry loop
+                state_db.update_unprocessed_sig_status(sig, "to be refunded")
+                proc_count_refund += 1
+                print(f"[DEBIT_FAILED] sig={sig} - Nexus debit failed, marking for refund")
         except Exception as e:
             print(f"Error processing deposit {sig}: {e}")
             continue
@@ -776,7 +792,15 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
             # 4. Check refund net amount
             net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND
             if net_amount <= 0:
-                state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, None, 0, f"processed, amount after fees <= 0", None)
+                # Bug #12 fix: Track the fee (entire deposit amount is kept as fee for failed refunds)
+                state_db.add_fee_entry(
+                    sig=sig,
+                    txid=None,
+                    kind="refund_micro_fee",
+                    amount_usdc_units=int(amount_usdc_units),
+                    amount_usdd_units=None
+                )
+                state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, None, 0, "processed, amount after fees <= 0", None)
                 # (sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, status, reference)
                 state_db.remove_unprocessed_sig(sig)
                 continue
@@ -793,8 +817,18 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
             sig_r = send_usdc(from_address, net_amount, memo=f"refund:{sig}")
             if sig_r[0]:
                 processed_count += 1
+                # Bug #12 fix: Track the flat refund fee
+                refund_fee = int(amount_usdc_units) - int(net_amount)
+                if refund_fee > 0:
+                    state_db.add_fee_entry(
+                        sig=sig,
+                        txid=None,
+                        kind="refund_flat_fee",
+                        amount_usdc_units=refund_fee,
+                        amount_usdd_units=None
+                    )
                 state_db.update_unprocessed_sig_status(sig, "refund sent, awaiting confirmation")
-                state_db.mark_refunded_sig(sig, timestamp, from_address, amount_usdc_units, memo, sig_r[1], net_amount, f"awaiting confirmation")
+                state_db.mark_refunded_sig(sig, timestamp, from_address, amount_usdc_units, memo, sig_r[1], net_amount, "awaiting confirmation")
             if not sig_r[0]:
                 state_db.update_unprocessed_sig_status(sig, "to be quarantined")
                 continue
@@ -849,8 +883,20 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantine:{sig}")
             if sig_q[0]:
                 processed_count += 1
-                state_db.mark_quarantined_sig(sig, timestamp, from_address, amount_usdc_units, memo, sig_q[1], net_amount, f"quarantine sent, awaiting confirmation")
-                state_db.remove_unprocessed_sig(sig)
+                # Bug #8 fix: Track the quarantine fee
+                quarantine_fee = int(amount_usdc_units) - int(net_amount)
+                if quarantine_fee > 0:
+                    state_db.add_fee_entry(
+                        sig=sig,
+                        txid=None,
+                        kind="quarantine_flat_fee",
+                        amount_usdc_units=quarantine_fee,
+                        amount_usdd_units=None
+                    )
+                # Bug #8 fix: Update status but DON'T remove from unprocessed yet
+                # Confirmation will be checked by check_quarantine_confirmations()
+                state_db.update_unprocessed_sig_status(sig, "quarantine sent, awaiting confirmation")
+                state_db.mark_quarantined_sig(sig, timestamp, from_address, amount_usdc_units, memo, sig_q[1], net_amount, "awaiting confirmation")
             if not sig_q[0]:
                 state_db.update_unprocessed_sig_status(sig, "quarantine failed")
                 continue
@@ -883,12 +929,24 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
         kp = load_vault_keypair()
         client = Client(config.RPC_URL)
         
+        # Determine the actual destination token account
+        # If destination is a wallet address (not a token account), derive the ATA
+        dest_token_account = destination
+        if not _is_token_account_for_mint(destination, config.USDC_MINT):
+            # Destination is a wallet address - derive its USDC ATA
+            try:
+                owner_pubkey = PublicKey.from_string(destination)
+                dest_token_account = str(get_associated_token_address(owner=owner_pubkey, mint=config.USDC_MINT))
+            except Exception as e:
+                print(f"Error deriving ATA for {destination}: {e}")
+                return False, None
+        
         # Build transfer instruction
         ix = transfer_checked(
             program_id=TOKEN_PROGRAM_ID,
             source=config.VAULT_USDC_ACCOUNT,
             mint=config.USDC_MINT,
-            dest=destination,
+            dest=PublicKey.from_string(dest_token_account),
             owner=kp.pubkey(),
             amount=amount_base_units,
             decimals=config.USDC_DECIMALS,
@@ -913,12 +971,25 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
 
 
 def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
+    """Check confirmation status for USDC refund transactions.
     
-    sigs = state_db.filter_unprocessed_sigs({
-        'status': 'refund sent, awaiting confirmation',
-        'limit': 1000
-    })
-    if not sigs:
+    This function queries refunded_sigs for entries awaiting confirmation,
+    then checks the REFUND signature (not the original deposit signature)
+    for on-chain confirmation status.
+    """
+    # Query refunded_sigs table for entries awaiting confirmation
+    conn = state_db.sqlite3.connect(state_db.DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT sig, timestamp, from_address, amount_usdc_units, memo, refund_sig, refunded_units, status
+        FROM refunded_sigs
+        WHERE status = 'awaiting confirmation'
+        LIMIT 1000
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
         return 0
     
     processed_count = 0
@@ -926,50 +997,129 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
     current_time = time_start
     client = Client(config.RPC_URL)
 
-    # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
-    for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
+    for deposit_sig, timestamp, from_address, amount_usdc_units, memo, refund_sig, refunded_units, status in rows:
         # Timeout check
         current_time = time.monotonic()
         if current_time - time_start > timeout:
             break
         
-        # Get confirmation status for this signature
+        # Skip if no refund signature was recorded
+        if not refund_sig:
+            print(f"[REFUND_CHECK] No refund_sig for deposit {deposit_sig}, skipping")
+            continue
+        
+        # Get confirmation status for the REFUND signature (not the deposit signature)
         try:
-            resp = _rpc_call(client.get_signature_statuses, [sig])
+            resp = _rpc_call(client.get_signature_statuses, [refund_sig])
             val = _rpc_get_value(resp)
             confirmations = None
             if val and isinstance(val, list) and len(val) > 0:
                 status_info = val[0]
                 if isinstance(status_info, dict):
                     confirmations = status_info.get('confirmations')
-                    # If confirmations is None, tx is not yet confirmed; if 0 or more, it's the count
         except Exception as e:
-            print(f"Error checking confirmations for {sig}: {e}")
+            print(f"Error checking confirmations for refund {refund_sig}: {e}")
             continue
         
         if confirmations is not None and confirmations < min_confirmations:
             continue
         elif confirmations is not None and confirmations >= min_confirmations:
-            # Confirmed: update status and mark as refunded
+            # Confirmed: update refunded_sigs status
             try:
-                # Update unprocessed status to confirmed
-                state_db.update_unprocessed_sig_status(sig, "refund_confirmed")
+                # Update refunded_sigs status to confirmed
+                conn = state_db.sqlite3.connect(state_db.DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE refunded_sigs SET status = 'refund_confirmed' WHERE sig = ?
+                """, (deposit_sig,))
+                conn.commit()
+                conn.close()
                 
-                # Mark as refunded (assuming mark_refunded_sig takes: sig, timestamp, from_address, amount_usdc_units, memo, txid, net_amount, status)
-                # Note: net_amount is not directly available here; using amount_usdc_units as approximation or fetch from DB if stored separately
-                net_amount = amount_usdc_units  # Adjust if you store net_amount separately
-                state_db.mark_refunded_sig(sig, timestamp, from_address, amount_usdc_units, memo, None, net_amount, "refund_confirmed")
-                
-                # Remove from unprocessed
-                state_db.remove_unprocessed_sig(sig)
+                # Also remove from unprocessed_sigs if still present
+                state_db.remove_unprocessed_sig(deposit_sig)
                 
                 processed_count += 1
-                print(f"Refund confirmed for sig {sig} with {confirmations} confirmations")
+                print(f"Refund confirmed for deposit {deposit_sig}, refund tx {refund_sig} with {confirmations} confirmations")
             except Exception as e:
-                print(f"Error marking refund confirmed for {sig}: {e}")
+                print(f"Error marking refund confirmed for {deposit_sig}: {e}")
         # If confirmations is None, skip (not confirmed yet)
 
     return processed_count
+
+
+def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> int:
+    """Check confirmation status for USDC quarantine transactions.
+    
+    Bug #8 fix: This function queries quarantined_sigs for entries awaiting confirmation,
+    then checks the QUARANTINE signature for on-chain confirmation status.
+    Only after confirmation is the deposit removed from unprocessed_sigs.
+    """
+    # Query quarantined_sigs table for entries awaiting confirmation
+    conn = state_db.sqlite3.connect(state_db.DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status
+        FROM quarantined_sigs
+        WHERE status = 'awaiting confirmation'
+        LIMIT 1000
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return 0
+    
+    processed_count = 0
+    time_start = time.monotonic()
+    current_time = time_start
+    client = Client(config.RPC_URL)
+
+    for deposit_sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status in rows:
+        # Timeout check
+        current_time = time.monotonic()
+        if current_time - time_start > timeout:
+            break
+        
+        # Skip if no quarantine signature was recorded
+        if not quarantine_sig:
+            print(f"[QUARANTINE_CHECK] No quarantine_sig for deposit {deposit_sig}, skipping")
+            continue
+        
+        # Get confirmation status for the QUARANTINE signature (not the deposit signature)
+        try:
+            resp = _rpc_call(client.get_signature_statuses, [quarantine_sig])
+            val = _rpc_get_value(resp)
+            confirmations = None
+            if val and isinstance(val, list) and len(val) > 0:
+                status_info = val[0]
+                if isinstance(status_info, dict):
+                    confirmations = status_info.get('confirmations')
+        except Exception as e:
+            print(f"Error checking confirmations for quarantine {quarantine_sig}: {e}")
+            continue
+        
+        if confirmations is not None and confirmations < min_confirmations:
+            continue
+        elif confirmations is not None and confirmations >= min_confirmations:
+            # Confirmed: update quarantined_sigs status
+            try:
+                # Update quarantined_sigs status to confirmed
+                conn = state_db.sqlite3.connect(state_db.DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE quarantined_sigs SET status = 'quarantine_confirmed' WHERE sig = ?
+                """, (deposit_sig,))
+                conn.commit()
+                conn.close()
+                
+                # Now safe to remove from unprocessed_sigs
+                state_db.remove_unprocessed_sig(deposit_sig)
+                
+                processed_count += 1
+                print(f"Quarantine confirmed for deposit {deposit_sig}, quarantine tx {quarantine_sig} with {confirmations} confirmations")
+            except Exception as e:
+                print(f"Error marking quarantine confirmed for {deposit_sig}: {e}")
+        # If confirmations is None, skip (not confirmed yet)
 
 
 def _rpc_to_json(resp):

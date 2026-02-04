@@ -132,15 +132,34 @@ def _format_usdd_amount(amount_units: int) -> str:
 
 
 
-def get_usdd_send_amount(amount_usdc: int) -> int:
-    """Calculate the USDD amount to send, accounting for fees."""
+def get_usdd_send_amount(amount_usdc: int) -> float:
+    """Calculate the USDD amount to send, accounting for fees.
+    
+    Args:
+        amount_usdc: Input amount in USDC base units (e.g., 10500000 for 10.5 USDC)
+    
+    Returns:
+        Net USDD in token units (human-readable, e.g., 10.3 for 10.3 USDD).
+        This can be passed directly to Nexus CLI which expects token units.
+    """
     base_amount = amount_usdc / 10**config.USDC_DECIMALS
-    fee = base_amount * config.DYNAMIC_FEE_BPS / 10000 + config.FLAT_FEE_USDD
+    flat_fee = float(config.FLAT_FEE_USDD)  # Convert string to float
+    fee = base_amount * config.DYNAMIC_FEE_BPS / 10000 + flat_fee
     return base_amount - fee
 
 
-def debit_usdd_with_txid(to_addr: str, amount_usdd: int, reference: int) -> tuple[bool, str | None]:
-    """Perform debit (amount in base units) and attempt to parse a txid from output."""
+def debit_usdd_with_txid(to_addr: str, amount_usdd: float, reference: int) -> tuple[bool, str | None]:
+    """Perform USDD debit and attempt to parse a txid from output.
+    
+    Args:
+        to_addr: Destination Nexus USDD account address
+        amount_usdd: Amount in token units (human-readable, e.g., 10.5 for 10.5 USDD).
+                     Nexus CLI expects token units, not base units.
+        reference: Unique reference number for this debit
+    
+    Returns:
+        Tuple of (success, txid_or_None)
+    """
     if not config.NEXUS_PIN:
         return (False, None)
     
@@ -174,7 +193,14 @@ def get_transaction_confirmations(txid: str) -> int | None:
 
 
 def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
-
+    """Check unconfirmed Nexus debits and handle confirmations or timeouts.
+    
+    Critical fix: Added timeout handling for stuck 'debited, awaiting confirmation' entries.
+    If a debit doesn't confirm within USDC_CONFIRM_TIMEOUT_SEC, it's marked for refund.
+    
+    IMPORTANT: Only refund if transaction was NEVER found (confirmations is None).
+    If transaction exists with confirmations > 0, the debit happened - do NOT refund!
+    """
     sigs = state_db.filter_unprocessed_sigs({
         'status': 'debited, awaiting confirmation',
         'limit': 1000
@@ -185,18 +211,50 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     processed_count = 0
     time_start = time.monotonic()
     current_time = time_start
+    confirm_timeout_sec = int(getattr(config, "USDC_CONFIRM_TIMEOUT_SEC", 600))
 
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         
         confirmations = get_transaction_confirmations(txid)
+        
+        # Case 1: Transaction NOT found at all - may have been dropped or failed silently
         if confirmations is None:
-            continue  # Transaction not found yet
-        if confirmations < min_confirmations:
+            # Check if we've waited too long for this debit to appear
+            age_sec = int(time.time()) - int(timestamp or 0)
+            if age_sec > confirm_timeout_sec:
+                # Timeout - mark for refund (transaction never appeared)
+                state_db.update_unprocessed_sig_status(sig, "to be refunded")
+                print(f"[DEBIT_TIMEOUT] sig={sig} txid={txid} age={age_sec}s > {confirm_timeout_sec}s - transaction never found, marking for refund")
+                processed_count += 1
             continue
         
+        # Case 2: Transaction exists but not enough confirmations yet
+        if confirmations < min_confirmations:
+            # IMPORTANT: Do NOT refund! The debit happened, just not fully confirmed yet.
+            # Wait for more confirmations - do not timeout a partially confirmed transaction.
+            continue
+        
+        # Case 3: Transaction fully confirmed
         # Recalculate USDD amount from USDC (same fee logic as debit)
         amount_usdd_debited = get_usdd_send_amount(amount_usdc_units or 0)
+        
+        # Bug #10 fix: Track fees when debit is confirmed
+        # Fee = amount_usdc_units (base units) - amount_usdd_debited (token units) * 10^decimals
+        try:
+            usdc_in_base = int(amount_usdc_units or 0)
+            usdd_out_base = int(amount_usdd_debited * (10 ** config.USDD_DECIMALS))
+            fee_usdc_units = max(0, usdc_in_base - usdd_out_base)
+            if fee_usdc_units > 0:
+                state_db.add_fee_entry(
+                    sig=sig,
+                    txid=txid,
+                    kind="swap_usdc_to_usdd",
+                    amount_usdc_units=fee_usdc_units,
+                    amount_usdd_units=None
+                )
+        except Exception as e:
+            print(f"[FEE_TRACKING] Error recording fee for sig={sig}: {e}")
         
         # Get reference from latest if needed (or pass None since it's optional)
         reference = state_db.get_latest_reference()
@@ -276,41 +334,10 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
     return (True, str(txid) if txid else None)
 
 
-# --- Asset mapping for swaps (distordiaSwap) ---
-def find_distordia_swap_asset_for_tx_sent(swap_to: str, tx_sent: str) -> Optional[Dict[str, Any]]:
-    """Find a distordiaSwap asset mapping an incoming tx/sig to a swap recipient.
-    Expected fields:
-      - distordiaSwap.swap_to
-      - distordiaSwap.tx_sent
-      - distordiaSwap.swap_recipient
-    Returns a flat dict with keys {swap_to, tx_sent, swap_recipient} or None.
-    """
-    try:
-        # Query minimal projection to reduce payload
-        cmd = [
-            config.NEXUS_CLI,
-            "register/list/assets:asset/distordiaSwap.swap_to,distordiaSwap.tx_sent,distordiaSwap.swap_recipient",
-            f"distordiaSwap.swap_to={swap_to}",
-            f"distordiaSwap.tx_sent={tx_sent}",
-            "limit=1",
-        ]
-        code, out, err = _run(cmd, timeout=15)
-        if code != 0:
-            return None
-        data = _parse_json_lenient(out)
-        arr = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-        if not arr:
-            return None
-        a = arr[0] or {}
-        ds = a.get("distordiaSwap") or a
-        return {
-            "swap_to": (ds or {}).get("swap_to"),
-            "tx_sent": (ds or {}).get("tx_sent"),
-            "swap_recipient": (ds or {}).get("swap_recipient"),
-        }
-    except Exception as e:
-        print("find_distordia_swap_asset_for_tx_sent error:", e)
-        return None
+# --- Asset mapping for swaps (distordiaBridge) ---
+# See ASSET_STANDARD.md for full specification.
+# User assets use fields: txid_toService, receival_account
+# Service queries by txid_toService + owner to prevent front-running.
 
 def find_asset_receival_account_by_sig(sig: str) -> Optional[Dict[str, Any]]:
     """Query assets by sig_toService and return a vetted { receival_account, owner }.

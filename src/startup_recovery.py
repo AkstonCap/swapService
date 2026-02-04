@@ -3,7 +3,7 @@
 Responsibilities:
 1. Fetch waterlines from Nexus heartbeat asset
 2. Rebuild database from waterline timestamps (complete server wipeout recovery)
-3. Reconstruct processed_nexus_txs markers for USDD->USDC sends using on-chain memos
+3. Reconstruct processed_txids markers for USDD->USDC sends using on-chain memos
 4. Reconstruct refunded_sigs for USDC refunds via refundSig:<deposit_sig> memos
 5. Seed reference counter if missing
 6. Provide summary of all actions taken

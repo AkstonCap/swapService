@@ -35,32 +35,31 @@ def poll_solana_deposits():
         last_bal = state_db.load_last_vault_balance()
         delta = current_bal - last_bal
         
-        # Pre-balance micro batch skip
-        if delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0):
-            # Advance waterline opportunistically using recent signatures
+        # Pre-balance micro batch skip: only skip NEW deposit fetching, not processing of existing entries
+        skip_new_deposit_fetch = delta < getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0)
+        
+        if skip_new_deposit_fetch:
+            # Advance waterline opportunistically
             state_db.propose_solana_waterline(int(poll_start))                    
             state_db.save_last_vault_balance(current_bal)
             nexus_client.update_heartbeat_asset(int(poll_start), None, int(poll_start))
             _log("USDC_MICRO_BATCH_SKIPPED", delta_units=delta, threshold=getattr(config, 'MIN_DEPOSIT_USDC_UNITS', 0))
-            # Still process existing unprocessed entries before returning
-            return
+            # Bug #11 fix: Do NOT return here - continue to process existing unprocessed entries
+            # Fall through to processing loop below
         
-        client = Client(getattr(config, "RPC_URL", None))
-       
-        #usdc_deposits = solana_client.fetch_filtered_token_account_transaction_history(
-        #    config.VAULT_USDC_ACCOUNT, wline_sol, config.MIN_DEPOSIT_USDC_UNITS, 10.0
-        #    )
-        
-        # Prefer Helius enriched RPC to batch-fetch txs + memos in 1–2 calls; fallback to existing scanner.
-        usdc_deposits = solana_client.fetch_incoming_usdc_deposits_via_helius(
-            str(config.VAULT_USDC_ACCOUNT),
-            since_ts=int(wline_sol),
-            min_units=getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0),
-            limit=getattr(config, "POLL_HELIUS_LIMIT", 200),
-        )
-        
-        unprocessed_deposits_added = solana_client.process_filtered_deposits(usdc_deposits, True)
-        print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
+        # Bug #11 fix: Only fetch new deposits if we haven't skipped due to micro-batch
+        unprocessed_deposits_added = 0
+        if not skip_new_deposit_fetch:
+            # Prefer Helius enriched RPC to batch-fetch txs + memos in 1–2 calls; fallback to existing scanner.
+            usdc_deposits = solana_client.fetch_incoming_usdc_deposits_via_helius(
+                str(config.VAULT_USDC_ACCOUNT),
+                since_ts=int(wline_sol),
+                min_units=getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0),
+                limit=getattr(config, "POLL_HELIUS_LIMIT", 200),
+            )
+            
+            unprocessed_deposits_added = solana_client.process_filtered_deposits(usdc_deposits, True)
+            print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
 
         [proc_count_swap, proc_count_refund, proc_count_quar, proc_count_mic] = solana_client.process_unprocessed_usdc_deposits(1000, 8.0)
         print(f"Debited, awaiting confirmation: {proc_count_swap}, \nTo be refunded: {proc_count_refund}, \nTo be quarantined: {proc_count_quar}, \nMicro-sigs found: {proc_count_mic}\n")
@@ -74,6 +73,10 @@ def poll_solana_deposits():
         confirmed_ref = solana_client.check_sig_confirmations(100, 8.0)
         print(f"Confirmed refunds: {confirmed_ref}\n") if confirmed_ref > 0 else None
 
+        # Bug #8 fix: Check quarantine confirmations (mirrors refund confirmation pattern)
+        confirmed_quar = solana_client.check_quarantine_confirmations(100, 8.0)
+        print(f"Confirmed quarantines: {confirmed_quar}\n") if confirmed_quar > 0 else None
+
         confirmed_debits = nexus_client.check_unconfirmed_debits(10, 8.0)
         print(f"Confirmed debits: {confirmed_debits}\n") if confirmed_debits > 0 else None
 
@@ -81,6 +84,10 @@ def poll_solana_deposits():
         if new_waterline and new_waterline > wline_sol:
             _log("WATERLINE_ADVANCED", old_ts=wline_sol, new_ts=new_waterline, reason="signatures processed")
             nexus_client.update_heartbeat_asset(new_waterline, None, poll_start)
+
+        # Bug #7 fix: Save vault balance after processing to enable micro-batch skip optimization
+        current_bal_after = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
+        state_db.save_last_vault_balance(current_bal_after)
 
     except Exception:
         # Suppress top-level poll errors to keep terminal focused on deposit lifecycle

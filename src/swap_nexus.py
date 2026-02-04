@@ -128,13 +128,13 @@ def process_unprocessed_txids():
             elif recv:
                 # Invalid token account -> refund path
                 amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
+                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
                 sender = r.get("from")
                 if sender:
                     refund_key = f"usdd_refund:{txid}"
                     if state_db.should_attempt(refund_key):
                         state_db.record_attempt(refund_key)
-                        if nexus_client.refund_usdd(sender, amt_str, "invalid receival_account"):
+                        if nexus_client.refund_usdd(sender, amt_units, "invalid receival_account"):
                             # Mark as refunded
                             state_db.mark_refunded_txid(
                                 txid=txid,
@@ -165,11 +165,11 @@ def process_unprocessed_txids():
                     sender = r.get("from")
                     if sender:
                         amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                        amt_str = _format_token_amount(amt_dec, config.USDD_DECIMALS)
+                        amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
                         refund_key = f"usdd_refund_unresolved:{txid}"
                         if state_db.should_attempt(refund_key):
                             state_db.record_attempt(refund_key)
-                            if nexus_client.refund_usdd(sender, amt_str, "unresolved receival_account"):
+                            if nexus_client.refund_usdd(sender, amt_units, "unresolved receival_account"):
                                 # Mark as refunded
                                 state_db.mark_refunded_txid(
                                     txid=txid,
@@ -237,6 +237,17 @@ def process_unprocessed_txids():
                 net_usdd = amt_usdd - flat_fee - dyn_fee
                 
                 if net_usdd <= 0:
+                    # Bug #14 fix: Track the fee (entire USDD amount is kept as fee)
+                    usdd_decimals = int(getattr(config, "USDD_DECIMALS", 6))
+                    total_fee_usdd_units = int((amt_usdd * (Decimal(10) ** usdd_decimals)).to_integral_value(rounding=ROUND_DOWN))
+                    if total_fee_usdd_units > 0:
+                        state_db.add_fee_entry(
+                            sig=None,
+                            txid=txid,
+                            kind="fee_only_usdd_process",
+                            amount_usdc_units=None,
+                            amount_usdd_units=total_fee_usdd_units
+                        )
                     # Mark as fee-only processed
                     state_db.mark_processed_txid(
                         txid=txid,
@@ -280,6 +291,17 @@ def process_unprocessed_txids():
                     ok, sig = solana_client.send_usdc_to_token_account_with_sig(recv_account, net_usdc_units, memo)
                     
                     if ok and sig:
+                        # Bug #13 fix: Track the fee (USDD amount - net USDC equivalent)
+                        total_fee_usdd = flat_fee + dyn_fee
+                        total_fee_usdd_units = int((total_fee_usdd * (Decimal(10) ** usdd_decimals)).to_integral_value(rounding=ROUND_DOWN))
+                        if total_fee_usdd_units > 0:
+                            state_db.add_fee_entry(
+                                sig=None,
+                                txid=txid,
+                                kind="swap_usdd_to_usdc",
+                                amount_usdc_units=None,
+                                amount_usdd_units=total_fee_usdd_units
+                            )
                         state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_AWAITING)
                         _log("USDD_USDC_SENT", txid=txid, sig=sig, amount=net_usdc_units)
                     elif ok and not sig:
@@ -330,15 +352,155 @@ def process_unprocessed_txids():
                         state_db.remove_unprocessed_txid(txid)
                         _log("USDD_USDC_CONFIRMED", txid=txid, sig=found_sig)
                     else:
-                        # Check for timeout
+                        # Check for timeout - but DON'T auto-refund!
+                        # Bug #15 fix: Auto-refunding on confirmation timeout is dangerous
+                        # because the USDC may have actually been sent (memo search failed).
+                        # Mark for manual review instead of triggering automatic refund.
                         ts = int(r.get("ts") or 0)
                         confirm_timeout = int(getattr(config, "USDC_CONFIRM_TIMEOUT_SEC", 600))
                         if ts and (time.time() - ts) > confirm_timeout:
-                            # Timeout waiting for confirmation - move to refund pending
-                            state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
-                            _log("USDD_CONFIRM_TIMEOUT", txid=txid, age=int(time.time() - ts))
+                            # Timeout waiting for confirmation - quarantine for manual review
+                            # DO NOT auto-refund as USDC may have been sent successfully
+                            state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_QUARANTINED)
+                            _log("USDD_CONFIRM_TIMEOUT_QUARANTINE", txid=txid, age=int(time.time() - ts), reason="manual_review_required")
                 except Exception as e:
                     _log("USDD_CONFIRM_CHECK_ERROR", txid=txid, error=str(e))
+        
+        # Priority 4: Process stuck 'trade balance to be checked' entries (FIX for stuck state)
+        if time.time() - process_start <= PROCESS_BUDGET_SEC:
+            unprocessed = state_db.get_unprocessed_txids_as_dicts()
+            for r in list(unprocessed):
+                if time.time() - process_start > PROCESS_BUDGET_SEC:
+                    break
+                    
+                if r.get("comment") != USDD_STATUS_TRADE_BAL_CHECK:
+                    continue
+                
+                txid = r.get("txid")
+                sender = r.get("from")
+                
+                # Retry asset lookup one more time before refunding
+                owner = r.get("owner")
+                if owner:
+                    asset = nexus_client.find_asset_receival_account_by_txid_and_owner(txid, owner)
+                    if asset and asset.get("receival_account"):
+                        # Found mapping! Move back to ready for processing
+                        recv = asset.get("receival_account")
+                        if solana_client.is_valid_usdc_token_account(recv):
+                            state_db.update_unprocessed_txid(
+                                txid=txid,
+                                receival_account=recv,
+                                status=USDD_STATUS_READY
+                            )
+                            _log("USDD_TRADE_BAL_RECOVERED", txid=txid, receival=recv)
+                            continue
+                
+                # No recovery possible - move to collecting refund
+                state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_COLLECTING_REFUND)
+                _log("USDD_TRADE_BAL_TO_REFUND", txid=txid)
+        
+        # Priority 5: Process 'collecting refund' entries (FIX for stuck state)
+        if time.time() - process_start <= PROCESS_BUDGET_SEC:
+            unprocessed = state_db.get_unprocessed_txids_as_dicts()
+            for r in list(unprocessed):
+                if time.time() - process_start > PROCESS_BUDGET_SEC:
+                    break
+                    
+                if r.get("comment") != USDD_STATUS_COLLECTING_REFUND:
+                    continue
+                
+                txid = r.get("txid")
+                sender = r.get("from")
+                
+                if not sender:
+                    # Can't refund without sender address - quarantine
+                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    state_db.remove_unprocessed_txid(txid)
+                    _log("USDD_COLLECT_REFUND_NO_SENDER", txid=txid)
+                    continue
+                
+                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                
+                refund_key = f"usdd_collect_refund:{txid}"
+                if state_db.should_attempt(refund_key):
+                    state_db.record_attempt(refund_key)
+                    if nexus_client.refund_usdd(sender, amt_units, f"collecting_refund_txid:{txid}"):
+                        # Mark as refunded
+                        state_db.mark_refunded_txid(
+                            txid=txid,
+                            timestamp=r.get("ts"),
+                            amount_usdd=float(r.get("amount_usdd") or 0),
+                            from_address=sender,
+                            to_address=r.get("to"),
+                            owner_from_address=r.get("owner"),
+                            confirmations_credit=r.get("confirmations"),
+                            status=USDD_STATUS_REFUNDED
+                        )
+                        state_db.remove_unprocessed_txid(txid)
+                        _log("USDD_COLLECT_REFUND_SUCCESS", txid=txid)
+                    else:
+                        attempts = state_db.get_attempt_count(refund_key)
+                        if attempts >= config.MAX_ACTION_ATTEMPTS:
+                            state_db.mark_quarantined_txid(txid=txid, sig="")
+                            state_db.remove_unprocessed_txid(txid)
+                            _log("USDD_COLLECT_REFUND_QUARANTINED", txid=txid, attempts=attempts)
+                        else:
+                            _log("USDD_COLLECT_REFUND_RETRY", txid=txid, attempts=attempts)
+                else:
+                    # Max attempts exceeded during previous calls
+                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    state_db.remove_unprocessed_txid(txid)
+                    _log("USDD_COLLECT_REFUND_MAX_ATTEMPTS", txid=txid)
+        
+        # Priority 6: Process 'refund pending' entries
+        if time.time() - process_start <= PROCESS_BUDGET_SEC:
+            unprocessed = state_db.get_unprocessed_txids_as_dicts()
+            for r in list(unprocessed):
+                if time.time() - process_start > PROCESS_BUDGET_SEC:
+                    break
+                    
+                if r.get("comment") != USDD_STATUS_REFUND_PENDING:
+                    continue
+                
+                txid = r.get("txid")
+                sender = r.get("from")
+                
+                if not sender:
+                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    state_db.remove_unprocessed_txid(txid)
+                    _log("USDD_REFUND_PENDING_NO_SENDER", txid=txid)
+                    continue
+                
+                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                
+                refund_key = f"usdd_refund_pending:{txid}"
+                if state_db.should_attempt(refund_key):
+                    state_db.record_attempt(refund_key)
+                    if nexus_client.refund_usdd(sender, amt_units, f"refund_pending_txid:{txid}"):
+                        state_db.mark_refunded_txid(
+                            txid=txid,
+                            timestamp=r.get("ts"),
+                            amount_usdd=float(r.get("amount_usdd") or 0),
+                            from_address=sender,
+                            to_address=r.get("to"),
+                            owner_from_address=r.get("owner"),
+                            confirmations_credit=r.get("confirmations"),
+                            status=USDD_STATUS_REFUNDED
+                        )
+                        state_db.remove_unprocessed_txid(txid)
+                        _log("USDD_REFUND_PENDING_SUCCESS", txid=txid)
+                    else:
+                        attempts = state_db.get_attempt_count(refund_key)
+                        if attempts >= config.MAX_ACTION_ATTEMPTS:
+                            state_db.mark_quarantined_txid(txid=txid, sig="")
+                            state_db.remove_unprocessed_txid(txid)
+                            _log("USDD_REFUND_PENDING_QUARANTINED", txid=txid)
+                else:
+                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    state_db.remove_unprocessed_txid(txid)
+                    _log("USDD_REFUND_PENDING_MAX_ATTEMPTS", txid=txid)
             
         # Update waterline after processing
         try:
@@ -426,9 +588,11 @@ def poll_nexus_usdd_deposits():
     wl_cutoff = 0
     if getattr(config, "HEARTBEAT_WATERLINE_ENABLED", False):
         try:
-            from .main import read_heartbeat_waterlines
-            _, wl_nexus = read_heartbeat_waterlines()
-            wl_cutoff = max(0, int(wl_nexus) - int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0)))
+            # Bug #16 fix: Use nexus_client.get_heartbeat_asset() instead of non-existent read_heartbeat_waterlines
+            heartbeat = nexus_client.get_heartbeat_asset()
+            if heartbeat:
+                wl_nexus = heartbeat.get("last_safe_timestamp_nexus") or heartbeat.get("last_safe_timestamp_usdd") or 0
+                wl_cutoff = max(0, int(wl_nexus) - int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0)))
         except Exception:
             wl_cutoff = 0
 
@@ -438,7 +602,6 @@ def poll_nexus_usdd_deposits():
         processed_count = 0
         # Step 1 & 2: fetch treasury credits with pagination
         for page in range(max_pages):
-            cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
                 res = subprocess.run(
@@ -530,6 +693,16 @@ def poll_nexus_usdd_deposits():
                     if amount_dec <= (flat_usdd_dec + dyn_fee_dec):
                         # Add to processed as fees
                         owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        # Bug #14 fix: Track the fee (entire amount is kept as fee)
+                        total_fee_usdd_units = int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                        if total_fee_usdd_units > 0:
+                            state_db.add_fee_entry(
+                                sig=None,
+                                txid=txid,
+                                kind="fee_only_usdd_credit",
+                                amount_usdc_units=None,
+                                amount_usdd_units=total_fee_usdd_units
+                            )
                         state_db.mark_processed_txid(
                             txid=txid,
                             timestamp=ts,

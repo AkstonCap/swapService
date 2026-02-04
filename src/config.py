@@ -47,10 +47,6 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))  # legacy/global fallback
 # Optional chain-specific poll intervals (seconds). Default to POLL_INTERVAL if unset.
 SOLANA_POLL_INTERVAL = int(os.getenv("SOLANA_POLL_INTERVAL", str(POLL_INTERVAL)))
 NEXUS_POLL_INTERVAL = int(os.getenv("NEXUS_POLL_INTERVAL", str(POLL_INTERVAL)))
-PROCESSED_SIG_FILE = os.getenv("PROCESSED_SIG_FILE", "processed_sigs.json")
-PROCESSED_NEXUS_FILE = os.getenv("PROCESSED_NEXUS_FILE", "processed_nexus_txs.json")
-ATTEMPT_STATE_FILE = os.getenv("ATTEMPT_STATE_FILE", "attempt_state.json")
-FAILED_REFUNDS_FILE = os.getenv("FAILED_REFUNDS_FILE", "failed_refunds.jsonl")
 MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
 ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
 
@@ -63,14 +59,9 @@ NEXUS_CLI_TIMEOUT_SEC = int(os.getenv("NEXUS_CLI_TIMEOUT_SEC", "20"))
 NEXUS_POLL_TIME_BUDGET_SEC = int(os.getenv("NEXUS_POLL_TIME_BUDGET_SEC", "15"))
 METRICS_BUDGET_SEC = int(os.getenv("METRICS_BUDGET_SEC", "5"))
 STALE_ROW_SEC = int(os.getenv("STALE_ROW_SEC", "86400"))  # 24 hours
-REFUNDED_SIGS_FILE = os.getenv("REFUNDED_SIGS_FILE", "refunded_sigs.jsonl")
 METRICS_INTERVAL_SEC = int(os.getenv("METRICS_INTERVAL_SEC", "30"))
 
-# USDC->USDD pipeline files (JSONL lines)
-UNPROCESSED_SIGS_FILE = os.getenv("UNPROCESSED_SIGS_FILE", "unprocessed_sigs.json")
-PROCESSED_SWAPS_FILE = os.getenv("PROCESSED_SWAPS_FILE", "processed_sigs.json")
-NON_DEPOSITS_FILE = os.getenv("NON_DEPOSITS_FILE", "non_deposits.json")
-REFERENCE_COUNTER_FILE = os.getenv("REFERENCE_COUNTER_FILE", "reference_counter.json")
+# Timeout thresholds
 REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
 STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
 USDC_CONFIRM_TIMEOUT_SEC = int(os.getenv("USDC_CONFIRM_TIMEOUT_SEC", "600"))  # 10 minutes default for USDD->USDC confirmations
@@ -87,14 +78,17 @@ HEARTBEAT_WATERLINE_NEXUS_FIELD = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "
 HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC", "0"))  # safety window disabled
 
 # Fees (optional)
-# One flat USDC fee (token units, e.g., 0.1 USDC) and one dynamic fee (bps of USDC amount),
-# used consistently across both swap directions.
+# Flat fees (in token units before conversion to base units):
+# - FLAT_FEE_USDC: Charged on USDD->USDC swap direction
+# - FLAT_FEE_USDD: Charged on USDC->USDD swap direction (also used as USDC refund fee since 1:1 parity)
 FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.5")  # fixed fee in USDC token units for USDD->USDC swaps
-FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # tiny routing threshold in USDD tokens for USDC->USDD swaps
+FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # flat fee in USDD/USDC token units for USDC->USDD swaps & USDC refunds
 def _to_units(s: str, decimals: int) -> int:
     from decimal import Decimal
     return int((Decimal(s) * (Decimal(10) ** decimals)).to_integral_value())
 FLAT_FEE_USDC_UNITS = _to_units(FLAT_FEE_USDC, USDC_DECIMALS)
+# FLAT_FEE_USDC_UNITS_REFUND uses FLAT_FEE_USDD value since USDC/USDD have same decimals and 1:1 parity
+# This is the fee deducted when refunding USDC to sender (on failed USDC->USDD swaps)
 FLAT_FEE_USDC_UNITS_REFUND = _to_units(FLAT_FEE_USDD, USDC_DECIMALS)
 
 # Single dynamic fee setting (bps of USDC amount). Applies to both directions.

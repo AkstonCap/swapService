@@ -39,9 +39,9 @@ A Python service that automates swaps between USDC (Solana) and USDD (Nexus). It
 4. Valid mapping -> send USDC to receival account (ATA required). Missing mapping -> pending until timeout -> refund.
 5. Micro credits below `MIN_CREDIT_USDD` treated as fees (aggregated fee-only entries).
 
-### State & Files
-- Append-only JSONL for processed / unprocessed sets.
-- attempt_state.json tracks retries.
+### State & Database
+- SQLite database (`swap_service.db`) for all state persistence.
+- Tables: `processed_sigs`, `unprocessed_sigs`, `refunded_sigs`, `quarantined_sigs`, `processed_txids`, `unprocessed_txids`, `fee_entries`, `attempts`, `waterline_proposals`.
 - Heartbeat asset optionally stores `last_poll_timestamp` and per-chain waterlines.
 
 ## Installation
@@ -108,7 +108,7 @@ See also `SECURITY.md` for security incidents & hardening.
 Missing asset mapping: ensure asset includes both `txid_toService` and `receival_account` before timeout.
 High RPC usage: increase `SOLANA_POLL_INTERVAL`, reduce max fetch caps, or enable delta skip.
 Stalled waterline: investigate unprocessed rows with old timestamps; they may be quarantined or awaiting mapping.
-Refund loop failures: inspect `FAILED_REFUNDS_FILE` entries; cross-check on-chain balances.
+Refund loop failures: query `quarantined_sigs` and `quarantined_txids` tables; cross-check on-chain balances.
 
 ## Pointers
 - Full security guidance: `SECURITY.md`

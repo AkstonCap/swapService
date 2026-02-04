@@ -7,33 +7,32 @@ This document provides state machine diagrams for both swap directions in the bi
 ## USDC → USDD State Machine (Solana to Nexus)
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Detected: USDC deposit detected
+flowchart TD
+    subgraph Normal Flow
+        START((Start)) --> Detected[USDC deposit detected]
+        Detected -->|Valid memo nexus:addr| ReadyForProcessing[Ready For Processing]
+        ReadyForProcessing -->|USDD debit sent| DebitedAwaitingConfirmation[Debited Awaiting Confirmation]
+        DebitedAwaitingConfirmation -->|Nexus confirms| Processed[Processed ✓]
+    end
     
-    Detected --> ReadyForProcessing: Valid memo format\nnexus:<address>
-    Detected --> ToBeRefunded: Invalid memo
+    subgraph Micro Deposit
+        ReadyForProcessing -->|Net amount ≤ 0| ProcessedAsFees[Processed As Fees ✓]
+    end
     
-    ReadyForProcessing --> DebitedAwaitingConfirmation: USDD debit sent\nto Nexus
-    ReadyForProcessing --> ToBeRefunded: Account validation fails
-    ReadyForProcessing --> ProcessedAsFees: Net amount ≤ 0\n(fees only)
+    subgraph Refund Flow
+        Detected -->|Invalid memo| ToBeRefunded[To Be Refunded]
+        ReadyForProcessing -->|Validation fails| ToBeRefunded
+        DebitedAwaitingConfirmation -->|Timeout| ToBeRefunded
+        ToBeRefunded -->|USDC refund sent| RefundSentAwaitingConfirmation[Refund Sent Awaiting Confirm]
+        RefundSentAwaitingConfirmation -->|Confirmed| RefundConfirmed[Refund Confirmed ✓]
+    end
     
-    DebitedAwaitingConfirmation --> Processed: Nexus confirms\n(≥ min confirmations)
-    DebitedAwaitingConfirmation --> ToBeRefunded: Confirmation timeout
-    
-    ToBeRefunded --> RefundSentAwaitingConfirmation: USDC refund sent\nback to sender
-    ToBeRefunded --> ToBeQuarantined: Max refund attempts\nexceeded
-    
-    RefundSentAwaitingConfirmation --> RefundConfirmed: Solana confirms\nrefund tx
-    RefundSentAwaitingConfirmation --> ToBeQuarantined: Confirmation timeout\nOR send fails
-    
-    ToBeQuarantined --> QuarantinedConfirmed: USDC moved to\nquarantine account
-    ToBeQuarantined --> QuarantineFailed: Quarantine send fails\n(manual intervention)
-    
-    Processed --> [*]
-    ProcessedAsFees --> [*]
-    RefundConfirmed --> [*]
-    QuarantinedConfirmed --> [*]
-    QuarantineFailed --> [*]: Logged for\nmanual review
+    subgraph Quarantine Flow
+        ToBeRefunded -->|Max attempts| ToBeQuarantined[To Be Quarantined]
+        RefundSentAwaitingConfirmation -->|Timeout/fails| ToBeQuarantined
+        ToBeQuarantined -->|Moved to quarantine| QuarantinedConfirmed[Quarantined ✓]
+        ToBeQuarantined -->|Send fails| QuarantineFailed[Quarantine Failed ✗]
+    end
 ```
 
 ### USDC → USDD State Descriptions
@@ -50,7 +49,6 @@ stateDiagram-v2
 | **RefundConfirmed** | Refund confirmed on Solana | `refunded_sigs` | `"refund_confirmed"` |
 | **ToBeQuarantined** | Refund attempts exhausted | `unprocessed_sigs` | `"to be quarantined"` |
 | **QuarantinedConfirmed** | Funds moved to quarantine account | `quarantined_sigs` | `"quarantine sent, awaiting confirmation"` |
-| **QuarantineFailed** | Quarantine failed (logged to JSONL) | N/A | N/A (in `failed_refunds.jsonl`) |
 
 ### Key Transitions (USDC → USDD)
 
@@ -64,36 +62,38 @@ stateDiagram-v2
 ## USDD → USDC State Machine (Nexus to Solana)
 
 ```mermaid
-stateDiagram-v2
-    [*] --> PendingReceival: USDD credit to treasury\ndetected
+flowchart TD
+    subgraph Normal Flow
+        START((Start)) --> PendingReceival[USDD credit to treasury detected]
+        PendingReceival -->|Asset mapping found| ReadyForProcessing[Ready For Processing]
+        ReadyForProcessing -->|Valid Solana account| Sending[Sending USDC]
+        Sending -->|Signature created| AwaitingConfirmation[Awaiting Confirmation]
+        AwaitingConfirmation -->|USDC confirmed| Processed[Processed ✓]
+    end
     
-    PendingReceival --> ReadyForProcessing: Asset mapping found\nreceival_account valid
-    PendingReceival --> TradeBalanceCheck: Mapping timeout\n(REFUND_TIMEOUT_SEC)
-    PendingReceival --> ProcessedAsFees: Amount ≤ fee threshold\n(micro credit)
+    subgraph Micro Credit
+        PendingReceival -->|Amount ≤ fee threshold| ProcessedAsFees[Processed As Fees ✓]
+    end
     
-    ReadyForProcessing --> Sending: Valid Solana account\nUSDC send initiated
-    ReadyForProcessing --> RefundPending: Invalid receival_account\nOR account validation fails
+    subgraph Timeout Flow
+        PendingReceival -->|Mapping timeout| TradeBalanceCheck[Trade Balance Check]
+        TradeBalanceCheck -->|Asset still missing| RefundPending[Refund Pending]
+        TradeBalanceCheck -->|Ready to refund| CollectingRefund[Collecting Refund]
+    end
     
-    Sending --> AwaitingConfirmation: USDC tx signature\ncreated
-    Sending --> RefundPending: Send fails after\nmax attempts
-    Sending --> AwaitingConfirmation: Signature recovered\nfrom memo scan
+    subgraph Refund Flow
+        ReadyForProcessing -->|Invalid receival_account| RefundPending
+        Sending -->|Send fails| RefundPending
+        AwaitingConfirmation -->|Confirmation timeout| RefundPending
+        Sending -->|Signature recovered| AwaitingConfirmation
+        RefundPending -->|USDD refund sent| Refunded[Refunded ✓]
+        CollectingRefund -->|USDD returned| Refunded
+    end
     
-    AwaitingConfirmation --> Processed: USDC confirmed\non Solana
-    AwaitingConfirmation --> RefundPending: Confirmation timeout\n(USDC_CONFIRM_TIMEOUT_SEC)
-    
-    TradeBalanceCheck --> RefundPending: Asset still missing
-    TradeBalanceCheck --> CollectingRefund: Ready to refund\nUSDD to sender
-    
-    RefundPending --> Refunded: USDD refund sent\nback to sender
-    RefundPending --> Quarantined: Max refund attempts\nexceeded
-    
-    CollectingRefund --> Refunded: USDD returned\nsuccessfully
-    CollectingRefund --> Quarantined: Refund fails
-    
-    Processed --> [*]
-    ProcessedAsFees --> [*]
-    Refunded --> [*]
-    Quarantined --> [*]: Manual intervention\nrequired
+    subgraph Quarantine Flow
+        RefundPending -->|Max attempts| Quarantined[Quarantined ✗]
+        CollectingRefund -->|Refund fails| Quarantined
+    end
 ```
 
 ### USDD → USDC State Descriptions
@@ -112,6 +112,19 @@ stateDiagram-v2
 | **Refunded** | USDD refunded successfully | `refunded_txids` | `"refunded"` |
 | **Quarantined** | All refund attempts failed | `quarantined_txids` | `"quarantined"` |
 
+### Processing Priority Order (USDD → USDC)
+
+The `process_unprocessed_txids()` function handles states in priority order:
+
+| Priority | Status Handled | Action |
+|----------|----------------|--------|
+| 1 | `pending_receival` (confirmed) | Resolve `receival_account` via asset lookup |
+| 2 | `ready for processing` | Send USDC with memo `nexus_txid:<txid>` |
+| 3 | `sig created, awaiting confirmations` | Check for USDC confirmation or timeout |
+| 4 | `trade balance to be checked` | Retry asset lookup or move to `collecting refund` |
+| 5 | `collecting refund` | Execute USDD refund or quarantine |
+| 6 | `refund pending` | Execute USDD refund or quarantine |
+
 ### Key Transitions (USDD → USDC)
 
 - **Normal Flow**: PendingReceival → ReadyForProcessing → Sending → AwaitingConfirmation → Processed
@@ -126,11 +139,11 @@ stateDiagram-v2
 
 ### USDC → USDD Timeouts
 
-| Timeout | Config Variable | Default | Purpose |
-|---------|----------------|---------|---------|
-| Refund timeout | `REFUND_TIMEOUT_SEC` | 3600s (1h) | Age before forced refund for unresolved memo |
-| Confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10m) | Max wait for Solana refund confirmation |
-| Stale quarantine | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s (24h) | Age to quarantine unresolved deposits |
+| Timeout | Config Variable | Default | Purpose | Handler |
+|---------|----------------|---------|---------|--------|
+| Refund timeout | `REFUND_TIMEOUT_SEC` | 3600s (1h) | Age before forced refund for unresolved memo | `poll_solana_deposits()` |
+| Confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10m) | Max wait for debit confirmation on Nexus | `check_unconfirmed_debits()` |
+| Stale quarantine | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s (24h) | Age to quarantine stuck deposits | `_process_stale_deposits()` |
 
 ### USDD → USDC Timeouts
 
@@ -148,7 +161,8 @@ Both directions use attempt tracking with configurable limits:
 After max attempts exhausted:
 - USDC → USDD: Funds quarantined to `USDC_QUARANTINE_ACCOUNT`
 - USDD → USDC: Funds quarantined to `NEXUS_USDD_QUARANTINE_ACCOUNT`
-- Event logged to `FAILED_REFUNDS_FILE` (default: `failed_refunds.jsonl`)
+- Event recorded in `quarantined_sigs` or `quarantined_txids` database table
+
 
 ---
 
