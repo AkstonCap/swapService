@@ -5,243 +5,179 @@ These diagrams can be rendered in GitHub, VS Code (with Mermaid extension), or a
 ## 1. USDC→USDD Complete Flow
 
 ```mermaid
-stateDiagram-v2
-    [*] --> SolanaDeposit: USDC deposit detected
-
-    state "Solana Deposit Detection" as SolanaDeposit {
-        [*] --> DuplicateCheck
-        DuplicateCheck --> Skip: Already exists
-        DuplicateCheck --> AddUnprocessed: New deposit
-        AddUnprocessed --> ReadyForProcessing
-    }
-
-    state "Signature Processing" as SigProcessing {
-        ReadyForProcessing --> ValidateMemo
-        
-        state ValidateMemo <<choice>>
-        ValidateMemo --> ValidMemo: nexus:address format
-        ValidateMemo --> ToBeRefunded1: Invalid memo
-        
-        ValidMemo --> CheckAccount
-        
-        state CheckAccount <<choice>>
-        CheckAccount --> ValidAccount: is_valid_usdd_account
-        CheckAccount --> ToBeRefunded2: Invalid Nexus account
-        
-        ValidAccount --> CalculateFees
-        CalculateFees --> MicroDeposit: Net amount ≤ 0
-        CalculateFees --> AttemptDebit: Net amount > 0
-        
-        MicroDeposit --> Processed_FeeOnly
-        
-        AttemptDebit --> DebitResult
-        
-        state DebitResult <<choice>>
-        DebitResult --> DebitedAwaitingConfirm: Success
-        DebitResult --> ToBeRefunded3: Failed
-    }
-
-    state "Refund Flow" as RefundFlow {
-        ToBeRefunded1 --> ValidateFromAddr
-        ToBeRefunded2 --> ValidateFromAddr
-        ToBeRefunded3 --> ValidateFromAddr
-        
-        state ValidateFromAddr <<choice>>
-        ValidateFromAddr --> SendRefund: Valid token account
-        ValidateFromAddr --> ToBeQuarantined: Invalid address
-        
-        SendRefund --> RefundSentAwaiting
-        RefundSentAwaiting --> CheckRefundConfirm
-        
-        state CheckRefundConfirm <<choice>>
-        CheckRefundConfirm --> Refunded: Confirmed
-        CheckRefundConfirm --> RefundSentAwaiting: Pending
-    }
-
-    state "Quarantine Flow" as QuarantineFlow {
-        ToBeQuarantined --> SendQuarantine
-        SendQuarantine --> QuarantineResult
-        
-        state QuarantineResult <<choice>>
-        QuarantineResult --> Quarantined: Success
-        QuarantineResult --> QuarantineFailed: Failed
-    }
-
-    state "Confirmation Check" as ConfirmCheck {
-        DebitedAwaitingConfirm --> CheckNexusConfirm
-        
-        state CheckNexusConfirm <<choice>>
-        CheckNexusConfirm --> Processed: Confirmed
-        CheckNexusConfirm --> DebitedAwaitingConfirm: Pending
-    }
-
-    Skip --> [*]
-    Processed_FeeOnly --> [*]
-    Processed --> [*]
-    Refunded --> [*]
-    Quarantined --> [*]
-    QuarantineFailed --> QuarantineFailed: STUCK! No retry
+flowchart TD
+    START((Start)) --> DEPOSIT[USDC Deposit Detected]
+    
+    subgraph Detection["Solana Deposit Detection"]
+        DEPOSIT --> DUP_CHECK{Already exists?}
+        DUP_CHECK -->|Yes| SKIP[Skip]
+        DUP_CHECK -->|No| ADD_UNPROC[Add to unprocessed_sigs]
+        ADD_UNPROC --> READY[ready for processing]
+    end
+    
+    subgraph Processing["Signature Processing"]
+        READY --> VALIDATE_MEMO{Memo valid?<br/>nexus:address}
+        VALIDATE_MEMO -->|No| TO_REFUND1[to be refunded]
+        VALIDATE_MEMO -->|Yes| CHECK_ACCT{Valid USDD account?}
+        CHECK_ACCT -->|No| TO_REFUND2[to be refunded]
+        CHECK_ACCT -->|Yes| CALC_FEES[Calculate fees]
+        CALC_FEES --> NET_CHECK{Net amount > 0?}
+        NET_CHECK -->|No| FEE_ONLY[Processed as fee-only]
+        NET_CHECK -->|Yes| DEBIT[Attempt USDD debit]
+        DEBIT --> DEBIT_OK{Debit success?}
+        DEBIT_OK -->|Yes| AWAITING[debited, awaiting confirmation]
+        DEBIT_OK -->|No| TO_REFUND3[to be refunded]
+    end
+    
+    subgraph Refund["Refund Flow"]
+        TO_REFUND1 --> VALID_FROM{Valid from address?}
+        TO_REFUND2 --> VALID_FROM
+        TO_REFUND3 --> VALID_FROM
+        VALID_FROM -->|No| TO_QUAR[to be quarantined]
+        VALID_FROM -->|Yes| SEND_REF[Send refund]
+        SEND_REF --> REF_AWAIT[refund sent, awaiting confirmation]
+        REF_AWAIT --> REF_CONF{Confirmed?}
+        REF_CONF -->|Yes| REFUNDED[Refunded ✓]
+        REF_CONF -->|No - pending| REF_AWAIT
+    end
+    
+    subgraph Quarantine["Quarantine Flow"]
+        TO_QUAR --> SEND_QUAR[Send to quarantine]
+        SEND_QUAR --> QUAR_OK{Success?}
+        QUAR_OK -->|Yes| QUARANTINED[Quarantined ✓]
+        QUAR_OK -->|No| QUAR_FAIL[quarantine failed ⚠️]
+    end
+    
+    subgraph Confirmation["Debit Confirmation"]
+        AWAITING --> CHECK_CONF{Nexus confirmed?}
+        CHECK_CONF -->|Yes| PROCESSED[Processed ✓]
+        CHECK_CONF -->|No - pending| AWAITING
+    end
+    
+    SKIP --> END_STATE((End))
+    FEE_ONLY --> END_STATE
+    PROCESSED --> END_STATE
+    REFUNDED --> END_STATE
+    QUARANTINED --> END_STATE
+    QUAR_FAIL -.->|STUCK - No retry| QUAR_FAIL
 ```
 
 ## 2. USDD→USDC Complete Flow
 
 ```mermaid
-stateDiagram-v2
-    [*] --> NexusCredit: USDD credit detected
-
-    state "Nexus Credit Detection" as NexusCredit {
-        [*] --> ThresholdCheck
-        
-        state ThresholdCheck <<choice>>
-        ThresholdCheck --> Ignore: Below MIN_CREDIT_USDD
-        ThresholdCheck --> DupCheck: Above threshold
-        
-        DupCheck --> Skip: Already exists
-        DupCheck --> CheckFeeOnly: New credit
-        
-        state CheckFeeOnly <<choice>>
-        CheckFeeOnly --> ProcessedAsFees: Amount ≤ fees
-        CheckFeeOnly --> AddUnprocessedTxid: Amount > fees
-        
-        AddUnprocessedTxid --> PendingReceival
-    }
-
-    state "Receival Resolution" as ReceivalResolution {
-        PendingReceival --> WaitConfirmations: confirmations ≤ 1
-        WaitConfirmations --> PendingReceival
-        PendingReceival --> LookupAsset: confirmations > 1
-        
-        LookupAsset --> AssetResult
-        
-        state AssetResult <<choice>>
-        AssetResult --> ValidReceival: Found & valid USDC account
-        AssetResult --> InvalidReceival: Found but invalid
-        AssetResult --> NotFound: No asset yet
-        
-        ValidReceival --> ReadyForProcessing
-        InvalidReceival --> AttemptRefund1
-        NotFound --> CheckTimeout
-        
-        state CheckTimeout <<choice>>
-        CheckTimeout --> AttemptRefund2: Timeout exceeded
-        CheckTimeout --> PendingReceival: Wait more
-    }
-
-    state "USDC Send Flow" as USDCSend {
-        ReadyForProcessing --> Sending
-        Sending --> SendUSdc
-        
-        SendUSdc --> SendResult
-        
-        state SendResult <<choice>>
-        SendResult --> SigAwaitingConfirm: Success
-        SendResult --> RecoverSig: Failed (check memo)
-        
-        RecoverSig --> RecoveryResult
-        
-        state RecoveryResult <<choice>>
-        RecoveryResult --> SigAwaitingConfirm: Found sig
-        RecoveryResult --> RefundPending: Not found
-    }
-
-    state "Refund Handling" as RefundHandling {
-        AttemptRefund1 --> RefundResult1
-        AttemptRefund2 --> RefundResult2
-        
-        state RefundResult1 <<choice>>
-        RefundResult1 --> RefundedTxid: Success
-        RefundResult1 --> CheckAttempts1: Failed
-        
-        state RefundResult2 <<choice>>
-        RefundResult2 --> RefundedTxid: Success
-        RefundResult2 --> CheckAttempts2: Failed
-        
-        state CheckAttempts1 <<choice>>
-        CheckAttempts1 --> QuarantinedTxid: Max attempts
-        CheckAttempts1 --> RefundPending: Retry later
-        
-        state CheckAttempts2 <<choice>>
-        CheckAttempts2 --> QuarantinedTxid: Max attempts
-        CheckAttempts2 --> TradeBalanceCheck: Retry later
-    }
-
-    state "Confirmation Flow" as ConfirmFlow {
-        SigAwaitingConfirm --> CheckSolanaConfirm
-        
-        state CheckSolanaConfirm <<choice>>
-        CheckSolanaConfirm --> ProcessedTxid: Confirmed
-        CheckSolanaConfirm --> SigAwaitingConfirm: Pending
-    }
-
-    Ignore --> [*]
-    Skip --> [*]
-    ProcessedAsFees --> [*]
-    RefundedTxid --> [*]
-    ProcessedTxid --> [*]
-    QuarantinedTxid --> [*]
-    TradeBalanceCheck --> TradeBalanceCheck: STUCK! No handler
-    RefundPending --> RefundPending: STUCK! Needs retry logic
+flowchart TD
+    START((Start)) --> CREDIT[USDD Credit Detected]
+    
+    subgraph Detection["Nexus Credit Detection"]
+        CREDIT --> THRESH{Above MIN_CREDIT?}
+        THRESH -->|No| IGNORE[Ignored]
+        THRESH -->|Yes| DUP{Already exists?}
+        DUP -->|Yes| SKIP[Skip]
+        DUP -->|No| FEE_CHK{Amount > fees?}
+        FEE_CHK -->|No| FEES[processed as fees]
+        FEE_CHK -->|Yes| ADD_TXID[Add to unprocessed_txids]
+        ADD_TXID --> PENDING[pending_receival]
+    end
+    
+    subgraph Resolution["Receival Resolution"]
+        PENDING --> CONF_CHK{confirmations > 1?}
+        CONF_CHK -->|No| PENDING
+        CONF_CHK -->|Yes| LOOKUP[Lookup asset by txid+owner]
+        LOOKUP --> ASSET_RESULT{Asset found?}
+        ASSET_RESULT -->|Valid USDC account| READY_PROC[ready for processing]
+        ASSET_RESULT -->|Invalid account| REF_INVALID[Attempt refund]
+        ASSET_RESULT -->|Not found| TIMEOUT{Timeout exceeded?}
+        TIMEOUT -->|No| PENDING
+        TIMEOUT -->|Yes| REF_TIMEOUT[Attempt refund]
+    end
+    
+    subgraph Sending["USDC Send Flow"]
+        READY_PROC --> SENDING[sending]
+        SENDING --> SEND_USDC[Send USDC]
+        SEND_USDC --> SEND_OK{Success?}
+        SEND_OK -->|Yes| SIG_AWAIT[sig created, awaiting confirmations]
+        SEND_OK -->|No| RECOVER[Check for existing memo]
+        RECOVER --> FOUND{Sig found?}
+        FOUND -->|Yes| SIG_AWAIT
+        FOUND -->|No| MAX_ATT{Max attempts?}
+        MAX_ATT -->|No| READY_PROC
+        MAX_ATT -->|Yes| REF_PEND[refund pending]
+    end
+    
+    subgraph RefundFlow["Refund Handling"]
+        REF_INVALID --> REF_RESULT1{Refund success?}
+        REF_TIMEOUT --> REF_RESULT2{Refund success?}
+        REF_RESULT1 -->|Yes| REFUNDED[Refunded ✓]
+        REF_RESULT1 -->|No| ATTEMPTS1{Max attempts?}
+        ATTEMPTS1 -->|Yes| QUAR[Quarantined]
+        ATTEMPTS1 -->|No| REF_PEND
+        REF_RESULT2 -->|Yes| REFUNDED
+        REF_RESULT2 -->|No| ATTEMPTS2{Max attempts?}
+        ATTEMPTS2 -->|Yes| QUAR
+        ATTEMPTS2 -->|No| TRADE_BAL[trade balance to be checked ⚠️]
+    end
+    
+    subgraph Confirm["USDC Confirmation"]
+        SIG_AWAIT --> SOL_CONF{Solana confirmed?}
+        SOL_CONF -->|Yes| PROCESSED[Processed ✓]
+        SOL_CONF -->|No| SIG_AWAIT
+    end
+    
+    IGNORE --> END_STATE((End))
+    SKIP --> END_STATE
+    FEES --> END_STATE
+    REFUNDED --> END_STATE
+    PROCESSED --> END_STATE
+    QUAR --> END_STATE
+    TRADE_BAL -.->|STUCK - No handler| TRADE_BAL
+    REF_PEND -.->|STUCK - Needs retry| REF_PEND
 ```
 
 ## 3. Main Event Loop
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Startup
-
-    state "Startup Phase" as Startup {
-        [*] --> PrintInfo
-        PrintInfo --> FetchBalances
-        FetchBalances --> StartupRecovery
-        StartupRecovery --> BalanceReconcile
-        BalanceReconcile --> SetupSignals
-        SetupSignals --> [*]
-    }
-
-    Startup --> MainLoop
-
-    state "Main Loop" as MainLoop {
-        [*] --> CheckStop
+flowchart TD
+    START((Start)) --> STARTUP
+    
+    subgraph STARTUP["Startup Phase"]
+        S1[Print info] --> S2[Fetch balances]
+        S2 --> S3[Startup recovery]
+        S3 --> S4[Balance reconcile]
+        S4 --> S5[Setup signals]
+    end
+    
+    S5 --> LOOP
+    
+    subgraph LOOP["Main Loop"]
+        STOP_CHK{Stop requested?}
+        STOP_CHK -->|Yes| SHUTDOWN
+        STOP_CHK -->|No| MAINT
         
-        state CheckStop <<choice>>
-        CheckStop --> Maintenance: Not stopped
-        CheckStop --> [*]: Stop requested
+        subgraph MAINT["Maintenance"]
+            M1[Backing check] --> M2[Periodic reconcile]
+            M2 --> M3[Balance check 10min]
+            M3 --> M4[Fee conversions]
+            M4 --> M5[Metrics]
+        end
         
-        state "Maintenance" as Maintenance {
-            [*] --> BackingCheck
-            BackingCheck --> PeriodicReconcile
-            PeriodicReconcile --> BalanceCheck10m
-            BalanceCheck10m --> FeeConversions
-            FeeConversions --> Metrics
-            Metrics --> [*]
-        }
+        MAINT --> PAUSE{Should pause?}
+        PAUSE -->|Yes| WAIT[Wait interval]
+        WAIT --> STOP_CHK
+        PAUSE -->|No| POLL
         
-        Maintenance --> ShouldPause
+        subgraph POLL["Polling Phase"]
+            P1[poll_solana_deposits] --> P2[poll_nexus_usdd_deposits]
+            P2 --> P3[process_unprocessed_txids]
+        end
         
-        state ShouldPause <<choice>>
-        ShouldPause --> WaitInterval: Pause required
-        ShouldPause --> Polling: Continue
-        
-        WaitInterval --> CheckStop
-        
-        state "Polling Phase" as Polling {
-            [*] --> SolanaPoll
-            SolanaPoll --> NexusPoll
-            NexusPoll --> NexusProcess
-            NexusProcess --> [*]
-        }
-        
-        Polling --> CheckStop
-    }
-
-    MainLoop --> Shutdown
-
-    state "Shutdown" as Shutdown {
-        [*] --> Cleanup
-        Cleanup --> [*]
-    }
-
-    Shutdown --> [*]
+        POLL --> STOP_CHK
+    end
+    
+    subgraph SHUTDOWN["Shutdown"]
+        SD1[Cleanup]
+    end
+    
+    SHUTDOWN --> END_STATE((End))
 ```
 
 ## 4. Fee Calculation Flow
@@ -332,8 +268,8 @@ flowchart TD
     end
 
     subgraph Missing_Timeouts["Missing Timeout Handlers"]
-        T1["debited, awaiting confirmation<br/>No timeout → stuck forever"]
-        T2["sig created, awaiting confirmations<br/>No timeout → stuck forever"]
+        T1["debited, awaiting confirmation<br/>No timeout - stuck forever"]
+        T2["sig created, awaiting confirmations<br/>No timeout - stuck forever"]
         T3["ready for processing<br/>STALE_DEPOSIT_QUARANTINE_SEC<br/>defined but not used"]
     end
 
@@ -383,7 +319,6 @@ flowchart TB
         NEXUS_PROC[swap_nexus.py<br/>process_unprocessed_txids]
     end
 
-    %% USDC → USDD Flow
     SOL_USER -->|1. Send USDC + memo| SOL_VAULT
     SOL_VAULT -->|2. Detect deposit| SOLANA_POLL
     SOLANA_POLL -->|3. Queue| UNPROC_SIG
@@ -395,7 +330,6 @@ flowchart TB
     SOLANA_POLL -->|6b. Quarantine| SOL_QUAR
     SOLANA_POLL -->|6b. Mark| QUAR_SIG
 
-    %% USDD → USDC Flow
     NXS_USER -->|1. Send USDD| NXS_TREAS
     NXS_USER -->|2. Publish asset| NXS_ASSET
     NXS_TREAS -->|3. Detect credit| NEXUS_POLL
@@ -408,7 +342,6 @@ flowchart TB
     NEXUS_PROC -->|8a. Mark| REF_TXID
     NEXUS_PROC -->|8b. Quarantine| QUAR_TXID
 
-    %% Heartbeat
     SOLANA_POLL -.->|Update| NXS_HEART
     NEXUS_POLL -.->|Update| NXS_HEART
 ```
