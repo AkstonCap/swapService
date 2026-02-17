@@ -270,7 +270,8 @@ def _fetch_deposits_helius(
                         memo = memos[0]
                     else:
                         for ix in (tx.get("instructions") or []):
-                            if str(ix.get("programId")) == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr":
+                            pid = str(ix.get("programId") or "")
+                            if pid == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" or pid.startswith("Memo111"):
                                 data = ix.get("data")
                                 if isinstance(data, str) and data:
                                     memo = data
@@ -1120,6 +1121,8 @@ def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> in
             except Exception as e:
                 print(f"Error marking quarantine confirmed for {deposit_sig}: {e}")
         # If confirmations is None, skip (not confirmed yet)
+
+    return processed_count
 
 
 def _rpc_to_json(resp):

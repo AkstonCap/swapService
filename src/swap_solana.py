@@ -89,7 +89,7 @@ def poll_solana_deposits():
         current_bal_after = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
         state_db.save_last_vault_balance(current_bal_after)
 
-    except Exception:
-        # Suppress top-level poll errors to keep terminal focused on deposit lifecycle
-        pass
+    except Exception as e:
+        # Log poll errors so they are not silently swallowed
+        _log("POLL_SOLANA_ERROR", error=str(e))
     
