@@ -53,9 +53,10 @@ nexus assets/create/asset name=distordiaBridge format=basic \
 
 2) **Send USDD** to treasury and capture txid:
 ```bash
-nexus finance/debit/token from=USDD to=<TREASURY_ACCOUNT> amount=10.5 pin=<PIN>
+nexus finance/debit/account from=<YOUR_USDD_ACCOUNT> to=<TREASURY_ACCOUNT> amount=10.5 pin=<PIN>
 # Response includes "txid": "01b88ff8..."
 ```
+> **Note:** Use `finance/debit/account` with your USDD account name or address. The `finance/debit/token` command debits from the token supply and is reserved for the token creator.
 
 3) **Update asset** with txid:
 ```bash
@@ -202,14 +203,15 @@ Notes:
 - The refund is sent to the original SPL token account the deposit came from (not a wallet owner).
 
 ### USDD → USDC (Nexus to Solana)
-1. User sends USDD to your Nexus USDD Treasury account (`NEXUS_USDD_TREASURY_ACCOUNT`).
-2. The transaction’s reference must be: `solana:<SOLANA_ADDRESS>`.
-3. Service validates the Solana address format.
-4. If valid, the service sends USDC from the vault to that address. The recipient must already have a USDC ATA (we do not create it).
-5. If invalid address or send fails, the service refunds USDD back to the sender on Nexus with a reason in `reference`. On successful sends, an optional dynamic fee (`DYNAMIC_FEE_BPS`, set to 0 if you want no fee on this path) may be retained; no fee is taken on refunds.
+1. User sends USDD to the Nexus USDD Treasury account (`NEXUS_USDD_TREASURY_ACCOUNT`).
+2. User creates or updates a Nexus asset with `txid_toService` set to the debit transaction hash and `receival_account` set to their Solana USDC ATA or wallet address.
+3. Service detects the credit, queries assets filtering by `txid_toService` and `owner` (must match the sender's genesis ID).
+4. If valid mapping found, the service sends USDC from the vault to the `receival_account`. The recipient must already have a USDC ATA (the service will not create it).
+5. If no mapping is found within `REFUND_TIMEOUT_SEC` (default 1 hour), the USDD is refunded. If the receival_account is invalid or the USDC send fails, USDD is refunded with a reason. On successful sends, a flat fee (`FLAT_FEE_USDC`) and optional dynamic fee (`DYNAMIC_FEE_BPS`) are deducted from the USDC output.
 
 Policy notes on USDD → USDC:
-- Tiny USDD credits ≤ `FLAT_FEE_USDD` are routed to your `NEXUS_USDD_LOCAL_ACCOUNT` (no USDC is sent) and the item is marked processed.
+- Tiny USDD credits ≤ `MIN_CREDIT_USDD` are treated as fees (no USDC is sent).
+- See [ASSET_STANDARD.md](ASSET_STANDARD.md) for the full asset specification and [SWAP_INITIATOR_STATE_MACHINES.md](SWAP_INITIATOR_STATE_MACHINES.md) for the step-by-step user flow.
 
 ### Loop-Safety and Reliability
 - Actions that can incur fees (mint, send, refunds) are guarded by attempt limits and cooldowns:
