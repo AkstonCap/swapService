@@ -58,7 +58,9 @@ def poll_solana_deposits():
                 limit=getattr(config, "POLL_HELIUS_LIMIT", 200),
             )
             
-            unprocessed_deposits_added = solana_client.process_filtered_deposits(usdc_deposits, True)
+            # Consume the enriched tuples directly (memo/from/amount already present);
+            # no per-deposit re-fetch, so the Helius fast path stays 1-2 RPC calls.
+            unprocessed_deposits_added = solana_client.process_helius_deposits(usdc_deposits, True)
             print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
 
         [proc_count_swap, proc_count_refund, proc_count_quar, proc_count_mic] = solana_client.process_unprocessed_usdc_deposits(1000, 8.0)
