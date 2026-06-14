@@ -814,8 +814,18 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
                 state_db.update_unprocessed_sig_status(sig, "to be quarantined")
                 continue
 
-            # 6. Process the refund
-            sig_r = send_usdc(from_address, net_amount, memo=f"refund:{sig}")
+            # 6. On-chain idempotency: if a refund for this deposit already went out
+            #    (e.g. crash between send and DB write), record it instead of resending.
+            existing_refund = find_signature_with_memo(f"refundSig:{sig}")
+            if existing_refund:
+                state_db.update_unprocessed_sig_status(sig, "refund sent, awaiting confirmation")
+                state_db.mark_refunded_sig(sig, timestamp, from_address, amount_usdc_units, memo, existing_refund, net_amount, "awaiting confirmation")
+                processed_count += 1
+                continue
+
+            # 7. Process the refund. Memo prefix MUST match the startup-recovery scanner
+            #    (refundSig:) so a crash mid-refund is reconstructed, not double-paid.
+            sig_r = send_usdc(from_address, net_amount, memo=f"refundSig:{sig}")
             if sig_r[0]:
                 processed_count += 1
                 # Bug #12 fix: Track the flat refund fee
@@ -880,8 +890,17 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             # 4. Check quarantine net amount
             net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND  
 
-            # 5. Process the quarantine
-            sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantine:{sig}")
+            # 5. On-chain idempotency: skip if this deposit was already quarantined.
+            existing_quar = find_signature_with_memo(f"quarantinedSig:{sig}")
+            if existing_quar:
+                state_db.update_unprocessed_sig_status(sig, "quarantine sent, awaiting confirmation")
+                state_db.mark_quarantined_sig(sig, timestamp, from_address, amount_usdc_units, memo, existing_quar, net_amount, "awaiting confirmation")
+                processed_count += 1
+                continue
+
+            # 6. Process the quarantine. Memo prefix MUST match the startup-recovery
+            #    scanner (quarantinedSig:) for crash reconstruction.
+            sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
             if sig_q[0]:
                 processed_count += 1
                 # Bug #8 fix: Track the quarantine fee
@@ -1014,17 +1033,22 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
             resp = _rpc_call(client.get_signature_statuses, [refund_sig])
             val = _rpc_get_value(resp)
             confirmations = None
+            conf_status = None
             if val and isinstance(val, list) and len(val) > 0:
                 status_info = val[0]
                 if isinstance(status_info, dict):
                     confirmations = status_info.get('confirmations')
+                    conf_status = status_info.get('confirmationStatus')
         except Exception as e:
             print(f"Error checking confirmations for refund {refund_sig}: {e}")
             continue
-        
-        if confirmations is not None and confirmations < min_confirmations:
+
+        # A finalized/rooted tx reports confirmations=None with confirmationStatus set,
+        # so confirmationStatus is the primary signal; the numeric count is a fallback.
+        is_final = (conf_status in ("finalized", "confirmed")) or (confirmations is not None and confirmations >= min_confirmations)
+        if not is_final:
             continue
-        elif confirmations is not None and confirmations >= min_confirmations:
+        else:
             # Confirmed: update refunded_sigs status
             try:
                 # Update refunded_sigs status to confirmed
@@ -1091,17 +1115,22 @@ def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> in
             resp = _rpc_call(client.get_signature_statuses, [quarantine_sig])
             val = _rpc_get_value(resp)
             confirmations = None
+            conf_status = None
             if val and isinstance(val, list) and len(val) > 0:
                 status_info = val[0]
                 if isinstance(status_info, dict):
                     confirmations = status_info.get('confirmations')
+                    conf_status = status_info.get('confirmationStatus')
         except Exception as e:
             print(f"Error checking confirmations for quarantine {quarantine_sig}: {e}")
             continue
-        
-        if confirmations is not None and confirmations < min_confirmations:
+
+        # A finalized/rooted tx reports confirmations=None with confirmationStatus set,
+        # so confirmationStatus is the primary signal; the numeric count is a fallback.
+        is_final = (conf_status in ("finalized", "confirmed")) or (confirmations is not None and confirmations >= min_confirmations)
+        if not is_final:
             continue
-        elif confirmations is not None and confirmations >= min_confirmations:
+        else:
             # Confirmed: update quarantined_sigs status
             try:
                 # Update quarantined_sigs status to confirmed

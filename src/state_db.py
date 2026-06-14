@@ -9,6 +9,8 @@ def init_db():
     """Initialize DB tables if not exist."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # WAL is persistent per database file and improves concurrent read/write safety.
+    cursor.execute("PRAGMA journal_mode=WAL")
 
     # Core tables
     cursor.execute("""
@@ -458,6 +460,9 @@ def mark_quarantined_sig(
         (sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status),
     )
     conn.commit()
+    conn.close()
+
+
 def is_quarantined_sig(sig: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -1011,8 +1016,13 @@ def next_reference() -> int:
         Next reference number (1-based)
     """
     conn = sqlite3.connect(DB_PATH)
+    conn.isolation_level = None  # manual transaction control
     cursor = conn.cursor()
-    
+    cursor.execute("PRAGMA busy_timeout=5000")
+    # Serialize reference generation across connections so two callers cannot read
+    # the same value (which would duplicate/skip Nexus debit references).
+    cursor.execute("BEGIN IMMEDIATE")
+
     # Try to increment existing counter atomically
     cursor.execute("""
         UPDATE counters SET value = value + 1 WHERE name = 'reference'

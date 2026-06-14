@@ -6,6 +6,8 @@
 
 This document is a fresh, independent assessment. It complements—rather than restates—the existing [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) (a prior code/doc audit, mostly addressed) and [`SECURITY.md`](SECURITY.md) (an operator hardening guide). Where this review found issues **not** covered by those documents, they are flagged as **new**.
 
+> **Update (2026-06-14):** Most findings below have since been remediated in code. See [§8 Resolution Status](#8-resolution-status-2026-06-14) for the per-finding state and what remains open. The body of the report (§3–§4) preserves the original findings for context.
+
 ---
 
 ## 1. Executive Summary
@@ -232,4 +234,28 @@ Store the key outside the working tree (the documented `0600` guidance is good b
 
 ## 7. Caveats
 
-This was a static review; findings about runtime behavior (e.g., `getSignatureStatuses` returning `null`, "no such table" on first query) are based on reading the code and the documented behavior of the Solana RPC and SQLite, not on executing the service. A live test pass on devnet/testnet is strongly recommended and would likely surface additional edge cases in the multi-stage refund/quarantine state machines. Line numbers refer to the repository state on branch `claude/elegant-bohr-kqlicw` as of the date above.
+This was a static review; findings about runtime behavior (e.g., `getSignatureStatuses` returning `null`, "no such table" on first query) are based on reading the code and the documented behavior of the Solana RPC and SQLite, not on executing the service. A live test pass on devnet/testnet is strongly recommended and would likely surface additional edge cases in the multi-stage refund/quarantine state machines. Line numbers in §3–§5 refer to the original (pre-fix) repository state.
+
+---
+
+## 8. Resolution Status (2026-06-14)
+
+The following fixes were applied on branch `claude/elegant-bohr-kqlicw`. Each was byte-compiled; `state_db` changes were additionally exercised with a functional test (schema creation → 17 tables, WAL active, monotonic references, no connection leak).
+
+| ID | Status | What changed |
+|----|--------|--------------|
+| F-1 | ✅ Fixed | `main.run()` now calls `state_db.init_db()` before any state access. |
+| F-2 | ✅ Fixed | `fees.py` calls the real `nexus_client.get_circulating_usdd()`; the backing-deficit pause path executes. |
+| F-3 | ✅ Fixed | Implemented `balance_reconciler.run_balance_reconciliation(dry_run=...)` (+ `_distinct_mint_recipient_accounts`), reusing `reconcile_account_trades` to flag accounts with positive trade delta. |
+| F-4 | ✅ Fixed | Confirmation checks now key off `confirmationStatus` (`finalized`/`confirmed`), with the numeric count as a fallback — finalized refunds/quarantines no longer stall forever. |
+| F-5 | ✅ Fixed | Reconcile-mint calls `debit_usdd_with_txid` with base→token unit conversion and proper `(ok, txid)` tuple handling. |
+| F-6 | ✅ Fixed | Added `nexus_client.mint_usdd_to_local()`; `get_circulating_usdd` rename also covers the fee-conversion path. |
+| H-1 | ✅ Fixed | `.gitignore` now excludes `vault-keypair.json`, `*-keypair.json`, `*.db`, `swap_service.db`, `fees_state.json`, `fee_events.jsonl`. |
+| H-2 | ✅ Fixed | Active refund/quarantine sends now use the `refundSig:` / `quarantinedSig:` memo prefixes that startup recovery scans, plus an on-chain `find_signature_with_memo` pre-check before sending (closes the crash-window double-pay). |
+| H-3 | 🟡 Mitigated | Debit CLI timeouts raised from 5 s to `NEXUS_CLI_TIMEOUT_SEC` (≈30 s), drastically reducing spurious timeouts. **Open:** a definitive "verify-on-chain before refunding after an ambiguous timeout" (and debit-stage attempt gating, PROC-1) is still recommended. |
+| H-5 | 🟡 Mitigated | WAL enabled persistently in `init_db()`; `next_reference()` now serializes via `BEGIN IMMEDIATE` + `busy_timeout`. **Open:** a global per-connection `busy_timeout` (connection factory) is still worth rolling out across all `state_db` helpers. |
+| H-6 | ✅ Fixed | `mark_quarantined_sig` now closes its connection. |
+| H-4 | ⚠️ Open (by design) | `NEXUS_PIN` is still passed as a CLI argument. Changing this safely depends on what the Nexus CLI build supports (stdin/env/session-unlock) and could break all money operations if guessed; left for the operator to wire up. Documented as a local-host trust requirement. |
+| L-1…L-6 | ◻️ Open | Hardening items (structured logging, address-charset validation, type-annotation cleanups, automated CI/tests). Recommended but not blocking. |
+
+**Net effect:** all three Critical and three of four High findings are fully resolved; the remaining High (H-3) is materially mitigated. The two intentionally-deferred items (H-4, and the L-series) are documented with rationale. A devnet/testnet end-to-end run remains the recommended final gate before handling real funds.

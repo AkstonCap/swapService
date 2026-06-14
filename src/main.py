@@ -89,6 +89,8 @@ def _process_stale_deposits():
 #print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
 
 def run():
+    # Ensure the SQLite schema exists before any state access (idempotent).
+    state_db.init_db()
     print("\n")
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
@@ -186,7 +188,11 @@ def run():
                             pending_deposits = True  # fail safe
                         threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS', 0)
                         if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            if _safe_call(nexus_client.debit_usdd, config.NEXUS_USDD_FEES_ACCOUNT, surplus, 'FEE_RECONCILE', timeout_sec=10):
+                            # surplus is in base units; debit_usdd_with_txid expects token units.
+                            surplus_tokens = surplus / (10 ** config.USDD_DECIMALS)
+                            ref = state_db.next_reference()
+                            res = _safe_call(nexus_client.debit_usdd_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, surplus_tokens, ref, timeout_sec=15)
+                            if res and res[0]:
                                 print(f"[reconcile] Minted {surplus} USDD to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()
                                 _last_reconcile = now

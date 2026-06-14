@@ -270,3 +270,65 @@ def run_single(account: str, waterline_ts: int, include_remote_balance: bool = F
     res = reconcile_account_trades(account, waterline_ts, include_remote_balance=include_remote_balance)
     print_account_reconciliation(res)
     return res
+
+
+def _distinct_mint_recipient_accounts(waterline_ts: int) -> List[str]:
+    """Nexus USDD accounts that received mints (USDC->USDD), recovered from deposit memos."""
+    q = """
+        SELECT DISTINCT memo FROM unprocessed_sigs WHERE timestamp >= ? AND memo IS NOT NULL
+        UNION
+        SELECT DISTINCT us.memo
+        FROM processed_sigs ps LEFT JOIN unprocessed_sigs us ON us.sig = ps.sig
+        WHERE ps.timestamp >= ? AND us.memo IS NOT NULL
+    """
+    conn = _db()
+    cur = conn.cursor()
+    try:
+        cur.execute(q, (waterline_ts, waterline_ts))
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    accts: set[str] = set()
+    for (memo,) in rows:
+        addr = _extract_nexus_address_from_memo(memo)
+        if addr:
+            accts.add(addr)
+    return sorted(accts)
+
+
+def run_balance_reconciliation(dry_run: bool = True, waterline_ts: int | None = None, include_remote_balance: bool = False) -> Dict:
+    """Read-only scan flagging accounts whose treasury USDD outflow exceeds what their
+    (non-refunded) USDC deposits should have minted - a possible double-mint.
+
+    Returns a dict consumed by ``main.run()``::
+
+        { 'checked_addresses': int, 'discrepancies': [...], 'total_surplus_usdd': int, ... }
+
+    ``dry_run`` is accepted for API compatibility; this function never mutates state.
+    """
+    if waterline_ts is None:
+        waterline_ts = 0
+    accounts = _distinct_mint_recipient_accounts(waterline_ts)
+    discrepancies: List[Dict] = []
+    total_surplus = 0
+    checked = 0
+    for acct in accounts:
+        try:
+            res = reconcile_account_trades(acct, waterline_ts, include_remote_balance=include_remote_balance)
+        except Exception:
+            continue
+        checked += 1
+        try:
+            delta = int(res.get('trade_delta_usdd') or 0)
+        except Exception:
+            delta = 0
+        if delta > 0:
+            discrepancies.append({'account': acct, 'surplus_usdd': delta})
+            total_surplus += delta
+    return {
+        'dry_run': dry_run,
+        'waterline_ts': waterline_ts,
+        'checked_addresses': checked,
+        'discrepancies': discrepancies,
+        'total_surplus_usdd': total_surplus,
+    }

@@ -164,7 +164,9 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd: float, reference: int) -> tu
         return (False, None)
     
     cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_usdd}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
-    code, out, err = _run(cmd, timeout=5)
+    # Use a generous, consistent timeout: a debit killed mid-flight may still execute
+    # on the node, which would desynchronize state and risk a double payout.
+    code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
     if code != 0:
         return (False, None)
     # Try to pick txid from output JSON or text
@@ -319,7 +321,9 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
         f"reference={reference}",
         f"pin={config.NEXUS_PIN}",
     ]
-    code, out, err = _run(cmd, timeout=5)
+    # Generous, consistent timeout (see debit_usdd_with_txid): avoid killing an
+    # in-flight debit that may still commit on the node.
+    code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
     if code != 0:
         return (False, None)
     txid = None
@@ -332,6 +336,20 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
                 txid = line.split("txid=", 1)[1].strip().split()[0]
                 break
     return (True, str(txid) if txid else None)
+
+
+def mint_usdd_to_local(amount_units: int, reference: str | int = "REBALANCE") -> bool:
+    """Mint USDD from supply to the configured local account.
+
+    ``amount_units`` is in base units (USDD_DECIMALS); it is converted to the
+    token units the Nexus CLI expects. Used by the optional fee-conversion rebalancer.
+    """
+    acct = getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None)
+    if not acct or amount_units <= 0:
+        return False
+    tokens = amount_units / (10 ** config.USDD_DECIMALS)
+    ok, _txid = debit_usdd_with_txid(acct, tokens, reference)
+    return ok
 
 
 # --- Asset mapping for swaps (distordiaBridge) ---
