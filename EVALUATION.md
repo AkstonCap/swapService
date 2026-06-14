@@ -259,3 +259,20 @@ The following fixes were applied on branch `claude/elegant-bohr-kqlicw`. Each wa
 | L-1…L-6 | ◻️ Open | Hardening items (structured logging, address-charset validation, type-annotation cleanups, automated CI/tests). Recommended but not blocking. |
 
 **Net effect:** all three Critical and three of four High findings are fully resolved; the remaining High (H-3) is materially mitigated. The two intentionally-deferred items (H-4, and the L-series) are documented with rationale. A devnet/testnet end-to-end run remains the recommended final gate before handling real funds.
+
+---
+
+## 9. Second-Pass Review (2026-06-14, post-fix)
+
+A fresh review of the patched tree was performed — including the patches themselves. It surfaced one pre-existing Critical bug that the §8 fixes *activated*, plus a performance regression introduced by the H-2 fix. Both are now resolved.
+
+| ID | Severity | Status | Detail |
+|----|----------|--------|--------|
+| N-1 | 🔴 Critical | ✅ Fixed | **Unit mismatch in backing/solvency math.** `nexus_client.get_circulating_usdd()` returns *token units* (Nexus `currentsupply` is human-readable, e.g. `4002.0` — confirmed in `Nexus API docs/COMMANDS/FINANCE.MD:395`), but it was compared against and subtracted from the *base-unit* vault balance in `fees.maintain_backing_and_bounds` and `main.run` (reconcile + metrics). The mismatch is a factor of `10**USDD_DECIMALS` (1e6). This was latent before because those call paths were dead code; fixing **F-2/F-5** made them live, turning the reconcile-mint surplus into a ~1e6 over-estimate (it would mint roughly the entire vault balance as USDD). **Fix:** added `nexus_client.get_circulating_usdd_units()` (base units) and pointed all backing math at it; `get_circulating_usdd()` is retained for display only. |
+| N-2 | 🟡 Medium | ✅ Fixed | **Per-refund signature scan (introduced by H-2).** The H-2 on-chain idempotency pre-check ran `find_signature_with_memo` (up to ~50 `getTransaction` calls) on *every* refund and quarantine, which could blow the 8 s processing budget under load. **Fix:** the scan is now gated behind `get_attempt_count(...) > 0` and an attempt is recorded before sending, so the common first-attempt path skips the scan while crash/retry recovery still works. |
+| N-3 | 🔵 Low | ◻️ Open | `run_balance_reconciliation` (the new F-3 code) scans all mint-recipient accounts over full history with `waterline_ts=0`; cost is roughly O(accounts × table-size). It is read-only and the periodic call is wrapped in a 15 s `_safe_call`, but the startup call is unguarded. Consider a bounded default waterline if the DB grows large. |
+| N-4 | 🔵 Low | ◻️ Open | Startup line `USDD Circulating Supply: {usdd_amount} USDD )` has a stray `)` and `get_circulating_usdd()` truncates fractional supply (`int(dec)`) — cosmetic/display only; backing math is unaffected (it uses the new base-unit accessor). |
+
+**Verification (this pass):** all edited files byte-compile; `state_db` schema/WAL/reference/quarantine behavior was exercised against a temp DB (17 tables, WAL active, monotonic references, no leak); every cross-module reference and the math-vs-display split for circulating supply were confirmed by static checks. Full runtime/import and end-to-end testing still require the Solana/Nexus dependencies and live RPC, so a devnet/testnet pass remains the recommended final gate.
+
+**Revised net effect:** Critical F-1/F-2/F-3 and the newly-found Critical N-1 are resolved; High H-1/H-2/H-6 resolved, H-3/H-5 mitigated; Medium N-2 resolved. Remaining open items are H-4 (by design), N-3/N-4 (low), and the L-series hardening — none blocking, but the live test gate stands.

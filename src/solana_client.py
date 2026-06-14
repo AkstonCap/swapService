@@ -814,17 +814,21 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
                 state_db.update_unprocessed_sig_status(sig, "to be quarantined")
                 continue
 
-            # 6. On-chain idempotency: if a refund for this deposit already went out
-            #    (e.g. crash between send and DB write), record it instead of resending.
-            existing_refund = find_signature_with_memo(f"refundSig:{sig}")
-            if existing_refund:
-                state_db.update_unprocessed_sig_status(sig, "refund sent, awaiting confirmation")
-                state_db.mark_refunded_sig(sig, timestamp, from_address, amount_usdc_units, memo, existing_refund, net_amount, "awaiting confirmation")
-                processed_count += 1
-                continue
+            # 6. On-chain idempotency: only scan the chain when a prior attempt may have
+            #    already sent a refund (e.g. crash between send and DB write). This avoids
+            #    a ~50-tx signature scan on every first-time refund.
+            refund_key = f"usdc_refund:{sig}"
+            if state_db.get_attempt_count(refund_key) > 0:
+                existing_refund = find_signature_with_memo(f"refundSig:{sig}")
+                if existing_refund:
+                    state_db.update_unprocessed_sig_status(sig, "refund sent, awaiting confirmation")
+                    state_db.mark_refunded_sig(sig, timestamp, from_address, amount_usdc_units, memo, existing_refund, net_amount, "awaiting confirmation")
+                    processed_count += 1
+                    continue
 
             # 7. Process the refund. Memo prefix MUST match the startup-recovery scanner
             #    (refundSig:) so a crash mid-refund is reconstructed, not double-paid.
+            state_db.record_attempt(refund_key)
             sig_r = send_usdc(from_address, net_amount, memo=f"refundSig:{sig}")
             if sig_r[0]:
                 processed_count += 1
@@ -890,16 +894,21 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             # 4. Check quarantine net amount
             net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND  
 
-            # 5. On-chain idempotency: skip if this deposit was already quarantined.
-            existing_quar = find_signature_with_memo(f"quarantinedSig:{sig}")
-            if existing_quar:
-                state_db.update_unprocessed_sig_status(sig, "quarantine sent, awaiting confirmation")
-                state_db.mark_quarantined_sig(sig, timestamp, from_address, amount_usdc_units, memo, existing_quar, net_amount, "awaiting confirmation")
-                processed_count += 1
-                continue
+            # 5. On-chain idempotency: only scan after a prior attempt (avoids a per-item
+            #    scan on the common first attempt). Double-quarantine is not an external
+            #    loss, but this keeps state consistent after a crash.
+            quar_key = f"usdc_quarantine:{sig}"
+            if state_db.get_attempt_count(quar_key) > 0:
+                existing_quar = find_signature_with_memo(f"quarantinedSig:{sig}")
+                if existing_quar:
+                    state_db.update_unprocessed_sig_status(sig, "quarantine sent, awaiting confirmation")
+                    state_db.mark_quarantined_sig(sig, timestamp, from_address, amount_usdc_units, memo, existing_quar, net_amount, "awaiting confirmation")
+                    processed_count += 1
+                    continue
 
             # 6. Process the quarantine. Memo prefix MUST match the startup-recovery
             #    scanner (quarantinedSig:) for crash reconstruction.
+            state_db.record_attempt(quar_key)
             sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
             if sig_q[0]:
                 processed_count += 1

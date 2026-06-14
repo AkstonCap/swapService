@@ -690,6 +690,34 @@ def get_circulating_usdd() -> int:
         return 0
 
 
+def get_circulating_usdd_units() -> int:
+    """Circulating USDD supply in BASE units (token amount x 10**USDD_DECIMALS).
+
+    Nexus 'currentsupply' is reported in human-readable token units (e.g. 4002.0),
+    so it must be scaled to base units before comparing against on-chain base-unit
+    balances (e.g. the vault USDC balance). Use THIS for backing/solvency math;
+    use get_circulating_usdd() only for human-readable display.
+    """
+    cmd = [config.NEXUS_CLI, "finance/get/token/currentsupply", f"name={config.NEXUS_TOKEN_NAME}"]
+    try:
+        code, out, err = _run(cmd, timeout=10)
+        if code != 0:
+            print("Nexus USDD current supply error:", err or out)
+            return 0
+        data = _parse_json_lenient(out)
+        if isinstance(data, (int, float, str)):
+            dec = Decimal(str(data))
+        elif isinstance(data, dict):
+            dec = Decimal(str(data["currentsupply"]))
+        else:
+            return 0
+        decimals = int(getattr(config, "USDD_DECIMALS", 6))
+        return int((dec * (Decimal(10) ** decimals)).to_integral_value(rounding=ROUND_DOWN))
+    except Exception as e:
+        print("Nexus USDD current supply exception:", e)
+        return 0
+
+
 def get_nxs_default_balance_units() -> int:
     """Return available balance of the NXS account named 'default'."""
     cmd = [config.NEXUS_CLI, "finance/get/account", "name=default"]

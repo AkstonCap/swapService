@@ -104,7 +104,7 @@ def process_fee_conversions():
         from . import solana_client, nexus_client
         # Read balances
         vault_usdc = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
-        circ_usdd = nexus_client.get_circulating_usdd()
+        circ_usdd = nexus_client.get_circulating_usdd_units()
         lamports = solana_client.get_vault_sol_balance()
         nxs_units = nexus_client.get_nxs_default_balance_units()
         # thresholds
@@ -198,7 +198,7 @@ def maintain_backing_and_bounds() -> bool:
     try:
         from . import solana_client, nexus_client
         vault_usdc = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
-        circ_usdd = nexus_client.get_circulating_usdd()
+        circ_usdd = nexus_client.get_circulating_usdd_units()
         if circ_usdd > 0:
             ratio_bps_deficit = int(((circ_usdd - vault_usdc) * 10000) / circ_usdd) if vault_usdc < circ_usdd else 0
         else:
