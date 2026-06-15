@@ -203,19 +203,20 @@ def process_unprocessed_txids():
                     _log("USDD_PROCESS_BUDGET_EXCEEDED", stage="usdc_sending")
                     break
                     
-                # Recovery logic for lost signatures
-                if r.get("comment") == USDD_STATUS_SENDING and r.get("reference") and not r.get("sig"):
+                # Recovery for entries stuck in SENDING with no recorded signature
+                # (e.g. a crash between send and DB write): recover via the txid memo.
+                if r.get("comment") == USDD_STATUS_SENDING and not r.get("sig"):
                     try:
-                        memo_ref = str(r.get("reference"))
-                        found_sig = solana_client.find_signature_with_memo(memo_ref)
+                        found_sig = solana_client.find_signature_with_memo(f"nexus_txid:{r.get('txid')}")
                         if found_sig:
                             state_db.update_unprocessed_txid(
                                 txid=r.get("txid"),
-                                status=USDD_STATUS_AWAITING
+                                status=USDD_STATUS_AWAITING,
+                                sig=found_sig
                             )
                             r["sig"] = found_sig
                             r["comment"] = USDD_STATUS_AWAITING
-                            _log("USDD_RECOVERED_SIG", txid=r.get("txid"), sig=found_sig, ref=memo_ref)
+                            _log("USDD_RECOVERED_SIG", txid=r.get("txid"), sig=found_sig)
                     except Exception:
                         pass
                 
@@ -302,7 +303,7 @@ def process_unprocessed_txids():
                                 amount_usdc_units=None,
                                 amount_usdd_units=total_fee_usdd_units
                             )
-                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_AWAITING)
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_AWAITING, sig=sig)
                         _log("USDD_USDC_SENT", txid=txid, sig=sig, amount=net_usdc_units)
                     elif ok and not sig:
                         # Idempotency - already sent
@@ -332,10 +333,15 @@ def process_unprocessed_txids():
                 
                 txid = r.get("txid")
                 
-                # Check if the USDC send was confirmed by looking for the memo on-chain
+                # Confirm the USDC send. Fast path: check the recorded signature directly
+                # (1 RPC, batchable) instead of scanning up to 50 txs by memo.
                 try:
-                    memo = f"nexus_txid:{txid}"
-                    found_sig = solana_client.find_signature_with_memo(memo)
+                    sent_sig = r.get("sig")
+                    if sent_sig:
+                        found_sig = sent_sig if solana_client.get_signatures_confirmation([sent_sig]).get(sent_sig) else None
+                    else:
+                        # Legacy/crash fallback: recover the signature by its memo.
+                        found_sig = solana_client.find_signature_with_memo(f"nexus_txid:{txid}")
                     if found_sig:
                         # USDC send confirmed - mark as processed
                         amt_usdd = _parse_decimal_amount(r.get("amount_usdd"))

@@ -432,177 +432,6 @@ def _fetch_deposits_core_rpc(
         return []
     
 
-def fetch_filtered_token_account_transaction_history(token_account_addr: str, wline: int, amount: int, timeout: float = 10.0) -> list:
-    """Fetch the transaction history of a Solana token account.
-    
-    Args:
-        token_account_addr: The token account address as a string.
-        wline: The line number to filter transactions.
-        amount: The minimum amount to filter transactions.
-
-    Returns:
-        A list of filtered transactions (dict), or an empty list on error.
-    """
-    try:
-        client = _get_client()
-        time_start = time.monotonic()
-        time_current = time_start
-
-        # Step 1: Get recent signatures for the token account
-        sig_resp = _rpc_call(client.get_signatures_for_address, PublicKey.from_string(token_account_addr), limit=1000)
-        sig_entries = _rpc_get_value(sig_resp) or []
-
-        # Filter transactions based on wline and amount
-        filtered_txs = []
-        for entry in sig_entries:
-
-            if not isinstance(entry, dict):
-                continue
-
-            block_time = entry.get("blockTime")
-            if block_time is None or block_time < wline:
-                continue
-            
-            sig = entry.get("signature")
-            if not sig:
-                continue
-
-            # Step 2: Fetch the full transaction for this signature
-            tx_resp = _rpc_call(client.get_transaction, sig, encoding="jsonParsed")
-            tx_data = _rpc_get_result(tx_resp)
-            if not tx_data or not isinstance(tx_data, dict):
-                continue
-
-            # Extract block time (confirm it matches)
-            tx_block_time = tx_data.get("blockTime")
-            if tx_block_time != block_time:
-                continue
-
-            # Step 3: Calculate deposit amount from pre/post balances
-            meta = tx_data.get("meta", {})
-            pre_balances = meta.get("preTokenBalances", [])
-            post_balances = meta.get("postTokenBalances", [])
-
-            vault_delta = 0
-            for post in post_balances:
-                if not isinstance(post, dict):
-                    continue
-
-                # Find the vault ATA balance change (assuming token_account_addr is the vault ATA)
-                if post.get("mint") == str(config.USDC_MINT) and post.get("owner") == str(config.SOL_MAIN_ACCOUNT):
-                    post_amount = int(post.get("uiTokenAmount", {}).get("amount", "0"))
-                    # Find matching pre balance
-                    for pre in pre_balances:
-                        if (isinstance(pre, dict) and
-                            pre.get("accountIndex") == post.get("accountIndex") and
-                            pre.get("mint") == post.get("mint")):
-                            pre_amount = int(pre.get("uiTokenAmount", {}).get("amount", "0"))
-                            vault_delta = post_amount - pre_amount
-                            break
-                    break
-
-            # Filter by minimum amount (positive delta = deposit to vault)
-            if vault_delta >= amount:
-                filtered_txs.append({
-                    "signature": sig,
-                    "blocktime": block_time,
-                    "amount": vault_delta,
-                })
-
-            time_current = time.monotonic()
-            if time_current - time_start > timeout:
-                break
-
-        # 4. Sort by blocktime ascending (oldest first)
-        filtered_txs.sort(key=lambda x: x["blocktime"])
-
-        return filtered_txs
-    
-    except Exception as e:
-        print(f"Error fetching token account transaction history: {e}")
-        return []
-    
-
-def process_filtered_deposits(filtered_txs: list, db_check: bool = True, timeout: float = 8.0) -> int:
-    """
-    Process a list of filtered transactions from fetch_filtered_token_account_transaction_history.
-    For each sig, fetch full tx details (memo, from_address), check database status, 
-    and add to unprocessed if not existing.
-    
-    Args:
-        filtered_txs: List of dicts with 'signature', 'blocktime', 'amount'
-        db_check: If True, check and skip if already processed/unprocessed
-        
-    Returns:
-        Number of new unprocessed entries added
-    """
-    if not filtered_txs:
-        return 0
-    
-    added_count = 0
-    client = _get_client()
-    time_start = time.monotonic()
-    time_current = time_start
-
-    for tx_info in filtered_txs:
-        sig = tx_info.get("signature")
-        blocktime = tx_info.get("blocktime")
-        usdc_amount_units = tx_info.get("amount")
-
-        if not sig:
-            continue
-
-        # Check database if enabled
-        if db_check:
-            from . import state_db
-            if state_db.is_processed_sig(sig) or state_db.is_unprocessed_sig(sig) or state_db.is_quarantined_sig(sig) or state_db.is_refunded_sig(sig):
-                continue # Quarantined = processed??
-
-        # Fetch full transaction for memo and from_address
-        try:
-            tx_resp = _rpc_call(client.get_transaction, sig, encoding="jsonParsed")
-            tx_data = _rpc_get_result(tx_resp)
-            if not tx_data or not isinstance(tx_data, dict):
-                continue
-
-            # Extract memo (from instructions or logs), amount check and source
-            memo = None
-            amtcheck = None
-            source = None
-            try:
-                tx_obj = tx_data.get("transaction", {})
-                msg = tx_obj.get("message", {})
-                insts = msg.get("instructions", [])
-                for ix in insts:
-                    prog = ix.get("program")
-                    if prog and str(prog) == "spl-memo":
-                        memo = ix.get("parsed", {})
-                    elif prog and str(prog) == "spl-token":
-                        parsed = ix.get("parsed", {})
-                        info = parsed.get("info", {})
-                        source = info.get("source", {})
-                        tokenAmount = info.get("tokenAmount", {})
-                        amtcheck = tokenAmount.get("amount", 0)
-
-            except Exception:
-                pass
-
-            # Add to unprocessed
-            from . import state_db
-            state_db.add_unprocessed_sig(sig, blocktime, memo or "", source, usdc_amount_units, "ready for processing", None)
-            added_count += 1
-
-            time_current = time.monotonic()
-            if time_current - time_start > timeout:
-                break
-
-        except Exception as e:
-            print(f"Error processing transaction {sig}: {e}")
-            continue
-
-    return added_count
-
-
 def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
     """Persist enriched deposits from ``fetch_incoming_usdc_deposits_via_helius``.
 
@@ -1054,6 +883,47 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
         return False, None
 
 
+def get_signatures_confirmation(sigs: list, min_confirmations: int = 1) -> dict:
+    """Batch-check Solana signatures via getSignatureStatuses (up to 256 per call).
+
+    Returns ``{sig: True}`` for signatures that are confirmed/finalized (or have at
+    least ``min_confirmations`` confirmations). Unknown/None statuses are omitted.
+    Uses the shared client and converts to Signature objects as the RPC expects.
+    """
+    from solders.signature import Signature
+    out: dict = {}
+    uniq = [s for s in dict.fromkeys(sigs) if s]
+    if not uniq:
+        return out
+    client = _get_client()
+    for i in range(0, len(uniq), 256):
+        chunk = uniq[i:i + 256]
+        objs = []
+        keep = []
+        for s in chunk:
+            try:
+                objs.append(Signature.from_string(s))
+                keep.append(s)
+            except Exception:
+                continue
+        if not objs:
+            continue
+        try:
+            resp = _rpc_call(client.get_signature_statuses, objs)
+            val = _rpc_get_value(resp)
+        except Exception:
+            continue
+        if not isinstance(val, list):
+            continue
+        for s, st in zip(keep, val):
+            if isinstance(st, dict):
+                cs = st.get("confirmationStatus")
+                confs = st.get("confirmations")
+                if cs in ("finalized", "confirmed") or (confs is not None and confs >= min_confirmations):
+                    out[s] = True
+    return out
+
+
 def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
     """Check confirmation status for USDC refund transactions.
     
@@ -1065,9 +935,8 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
     conn = state_db.sqlite3.connect(state_db.DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT sig, timestamp, from_address, amount_usdc_units, memo, refund_sig, refunded_units, status
-        FROM refunded_sigs
-        WHERE status = 'awaiting confirmation'
+        SELECT sig, refund_sig FROM refunded_sigs
+        WHERE status = 'awaiting confirmation' AND refund_sig IS NOT NULL
         LIMIT 1000
     """)
     rows = cursor.fetchall()
@@ -1079,40 +948,14 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
     processed_count = 0
     time_start = time.monotonic()
     current_time = time_start
-    client = _get_client()
+    # Batch-check all refund signatures in one (or few) getSignatureStatuses calls
+    # instead of one RPC per row.
+    finalized = get_signatures_confirmation([r[1] for r in rows], min_confirmations)
 
-    for deposit_sig, timestamp, from_address, amount_usdc_units, memo, refund_sig, refunded_units, status in rows:
-        # Timeout check
-        current_time = time.monotonic()
-        if current_time - time_start > timeout:
+    for deposit_sig, refund_sig in rows:
+        if time.monotonic() - time_start > timeout:
             break
-        
-        # Skip if no refund signature was recorded
-        if not refund_sig:
-            print(f"[REFUND_CHECK] No refund_sig for deposit {deposit_sig}, skipping")
-            continue
-        
-        # Get confirmation status for the REFUND signature (not the deposit signature)
-        try:
-            resp = _rpc_call(client.get_signature_statuses, [refund_sig])
-            val = _rpc_get_value(resp)
-            confirmations = None
-            conf_status = None
-            if val and isinstance(val, list) and len(val) > 0:
-                status_info = val[0]
-                if isinstance(status_info, dict):
-                    confirmations = status_info.get('confirmations')
-                    conf_status = status_info.get('confirmationStatus')
-        except Exception as e:
-            print(f"Error checking confirmations for refund {refund_sig}: {e}")
-            continue
-
-        # A finalized/rooted tx reports confirmations=None with confirmationStatus set,
-        # so confirmationStatus is the primary signal; the numeric count is a fallback.
-        is_final = (conf_status in ("finalized", "confirmed")) or (confirmations is not None and confirmations >= min_confirmations)
-        if not is_final:
-            continue
-        else:
+        if refund_sig and finalized.get(refund_sig):
             # Confirmed: update refunded_sigs status
             try:
                 # Update refunded_sigs status to confirmed
@@ -1128,7 +971,7 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
                 state_db.remove_unprocessed_sig(deposit_sig)
                 
                 processed_count += 1
-                print(f"Refund confirmed for deposit {deposit_sig}, refund tx {refund_sig} with {confirmations} confirmations")
+                print(f"Refund confirmed for deposit {deposit_sig}, refund tx {refund_sig}")
             except Exception as e:
                 print(f"Error marking refund confirmed for {deposit_sig}: {e}")
         # If confirmations is None, skip (not confirmed yet)
@@ -1147,9 +990,8 @@ def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> in
     conn = state_db.sqlite3.connect(state_db.DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status
-        FROM quarantined_sigs
-        WHERE status = 'awaiting confirmation'
+        SELECT sig, quarantine_sig FROM quarantined_sigs
+        WHERE status = 'awaiting confirmation' AND quarantine_sig IS NOT NULL
         LIMIT 1000
     """)
     rows = cursor.fetchall()
@@ -1161,40 +1003,13 @@ def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> in
     processed_count = 0
     time_start = time.monotonic()
     current_time = time_start
-    client = _get_client()
+    # Batch-check all quarantine signatures in one (or few) getSignatureStatuses calls.
+    finalized = get_signatures_confirmation([r[1] for r in rows], min_confirmations)
 
-    for deposit_sig, timestamp, from_address, amount_usdc_units, memo, quarantine_sig, quarantined_units, status in rows:
-        # Timeout check
-        current_time = time.monotonic()
-        if current_time - time_start > timeout:
+    for deposit_sig, quarantine_sig in rows:
+        if time.monotonic() - time_start > timeout:
             break
-        
-        # Skip if no quarantine signature was recorded
-        if not quarantine_sig:
-            print(f"[QUARANTINE_CHECK] No quarantine_sig for deposit {deposit_sig}, skipping")
-            continue
-        
-        # Get confirmation status for the QUARANTINE signature (not the deposit signature)
-        try:
-            resp = _rpc_call(client.get_signature_statuses, [quarantine_sig])
-            val = _rpc_get_value(resp)
-            confirmations = None
-            conf_status = None
-            if val and isinstance(val, list) and len(val) > 0:
-                status_info = val[0]
-                if isinstance(status_info, dict):
-                    confirmations = status_info.get('confirmations')
-                    conf_status = status_info.get('confirmationStatus')
-        except Exception as e:
-            print(f"Error checking confirmations for quarantine {quarantine_sig}: {e}")
-            continue
-
-        # A finalized/rooted tx reports confirmations=None with confirmationStatus set,
-        # so confirmationStatus is the primary signal; the numeric count is a fallback.
-        is_final = (conf_status in ("finalized", "confirmed")) or (confirmations is not None and confirmations >= min_confirmations)
-        if not is_final:
-            continue
-        else:
+        if quarantine_sig and finalized.get(quarantine_sig):
             # Confirmed: update quarantined_sigs status
             try:
                 # Update quarantined_sigs status to confirmed
@@ -1210,7 +1025,7 @@ def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> in
                 state_db.remove_unprocessed_sig(deposit_sig)
                 
                 processed_count += 1
-                print(f"Quarantine confirmed for deposit {deposit_sig}, quarantine tx {quarantine_sig} with {confirmations} confirmations")
+                print(f"Quarantine confirmed for deposit {deposit_sig}, quarantine tx {quarantine_sig}")
             except Exception as e:
                 print(f"Error marking quarantine confirmed for {deposit_sig}: {e}")
         # If confirmations is None, skip (not confirmed yet)
@@ -1378,15 +1193,32 @@ def get_vault_sol_balance() -> int:
         return 0
 
 
-def get_token_account_balance(token_account_addr: str) -> int:
+# Short-lived cache for hot, repeated balance reads (the maintenance block reads the
+# vault balance for the backing check, reconcile, and metrics within one loop iteration).
+_balance_cache: dict[str, tuple[float, int]] = {}
+
+
+def get_token_account_balance(token_account_addr: str, *, max_age_sec: float = 0.0) -> int:
+    """Return the SPL token account balance in base units.
+
+    Pass ``max_age_sec`` > 0 to accept a recently-cached value (only successful reads
+    are cached). Callers needing a fresh value (e.g. the deposit-delta poll) omit it.
+    """
+    key = str(token_account_addr)
+    if max_age_sec > 0:
+        ent = _balance_cache.get(key)
+        if ent is not None and (time.monotonic() - ent[0]) <= max_age_sec:
+            return ent[1]
     try:
         client = _get_client()
-        resp = _rpc_call(client.get_token_account_balance, PublicKey.from_string(token_account_addr))
+        resp = _rpc_call(client.get_token_account_balance, PublicKey.from_string(key))
         val = _rpc_get_value(resp)
         amt = None
         if isinstance(val, dict):
             amt = val.get("amount")
-        return int(amt or 0)
+        result = int(amt or 0)
+        _balance_cache[key] = (time.monotonic(), result)
+        return result
     except Exception:
         return 0
 

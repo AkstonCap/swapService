@@ -175,7 +175,7 @@ def run():
                 global _last_reconcile
                 if (now - _last_reconcile) >= max(60, config.BACKING_RECONCILE_INTERVAL_SEC):
                     try:
-                        vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=8)
+                        vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=8)
                         circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=8)
                         surplus = max(0, vault_usdc - circ_usdd)
                         # Skip reconcile if any pending Solana deposits not yet swapped
@@ -221,7 +221,7 @@ def run():
                 if now % max(5, METRICS_INTERVAL) == 0:  # coarse modulus trigger
                     metrics_start = time.time()
                     try:
-                        vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=5)
+                        vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=5)
                         circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=5)
                         ratio = (vault_usdc / circ_usdd) if circ_usdd else 0
                         fees_state = _safe_call(fees.reconcile_accounting, timeout_sec=3)

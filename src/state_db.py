@@ -69,7 +69,8 @@ def init_db():
             owner_from_address TEXT,
             confirmations_credit INTEGER,
             status TEXT,
-            receival_account TEXT
+            receival_account TEXT,
+            sig TEXT
         )
     """)
     cursor.execute("""
@@ -186,7 +187,15 @@ def init_db():
             last_updated INTEGER
         )
     """)
-    
+
+    # --- Lightweight migrations for pre-existing databases ---
+    # unprocessed_txids.sig persists the Solana send signature so USDD->USDC
+    # confirmation can use get_signature_statuses instead of scanning memos.
+    cursor.execute("PRAGMA table_info(unprocessed_txids)")
+    _utx_cols = {row[1] for row in cursor.fetchall()}
+    if "sig" not in _utx_cols:
+        cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN sig TEXT")
+
     conn.commit()
     conn.close()
 
@@ -1110,15 +1119,16 @@ def add_unprocessed_txid(
     confirmations_credit: int | None = None,
     status: str | None = None,
     receival_account: str | None = None,
+    sig: str | None = None,
 ) -> None:
     """Add or update an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO unprocessed_txids
-        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account))
+        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig))
     conn.commit()
     conn.close()
 
@@ -1132,7 +1142,7 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account
+        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig
         FROM unprocessed_txids
         ORDER BY timestamp ASC
         LIMIT ?
@@ -1152,6 +1162,7 @@ def update_unprocessed_txid(
     confirmations_credit: int | None = None,
     status: str | None = None,
     receival_account: str | None = None,
+    sig: str | None = None,
 ):
     """Update specific fields of an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
@@ -1183,7 +1194,10 @@ def update_unprocessed_txid(
     if receival_account is not None:
         fields.append("receival_account = ?")
         values.append(receival_account)
-    
+    if sig is not None:
+        fields.append("sig = ?")
+        values.append(sig)
+
     if not fields:
         conn.close()
         return
@@ -1259,7 +1273,8 @@ def get_unprocessed_txids_as_dicts(limit: int = 1000) -> list[dict]:
             "owner": t[5],  # owner_from_address
             "confirmations": t[6],  # confirmations_credit
             "comment": t[7],  # status
-            "receival_account": t[8] if len(t) > 8 else None
+            "receival_account": t[8] if len(t) > 8 else None,
+            "sig": t[9] if len(t) > 9 else None
         }
         for t in tuples
     ]
