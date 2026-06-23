@@ -133,6 +133,15 @@ celerybeat.pid
 
 # Environments
 .env
+
+# swapService secrets & local state (keep keys and DB out of git)
+vault-keypair.json
+*-keypair.json
+*.db
+swap_service.db
+fees_state.json
+fee_events.jsonl
+
 .venv
 env/
 venv/
