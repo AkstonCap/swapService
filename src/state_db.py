@@ -196,6 +196,15 @@ def init_db():
     if "sig" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN sig TEXT")
 
+    # unprocessed_sigs.reference records the Nexus debit reference BEFORE the debit is
+    # attempted, so a crash or an unparsed CLI response can be resolved against the
+    # chain instead of being guessed at (which previously double-minted, or minted
+    # AND refunded).
+    cursor.execute("PRAGMA table_info(unprocessed_sigs)")
+    _usig_cols = {row[1] for row in cursor.fetchall()}
+    if "reference" not in _usig_cols:
+        cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN reference INTEGER")
+
     conn.commit()
     conn.close()
 
@@ -362,6 +371,40 @@ def update_unprocessed_sig_txid(sig: str, txid: str | None):
     """, (txid, sig))
     conn.commit()
     conn.close()
+
+def set_unprocessed_sig_reference(sig: str, reference: int | None):
+    """Persist the Nexus debit reference for a deposit (written BEFORE the debit)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE unprocessed_sigs SET reference = ? WHERE sig = ?", (reference, sig))
+    conn.commit()
+    conn.close()
+
+
+def get_sigs_pending_debit_verification(statuses: tuple, limit: int = 500) -> List[Tuple]:
+    """Rows whose debit outcome is unknown and must be resolved against the chain.
+
+    Returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference)
+    """
+    if not statuses:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in statuses)
+    cursor.execute(
+        f"""
+        SELECT sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference
+        FROM unprocessed_sigs
+        WHERE status IN ({placeholders})
+        ORDER BY timestamp ASC
+        LIMIT ?
+        """,
+        tuple(statuses) + (limit,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 
 def remove_unprocessed_sig(sig: str):
     conn = sqlite3.connect(DB_PATH)
@@ -814,6 +857,16 @@ def get_attempt_count(action_key: str) -> int:
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else 0
+
+
+def get_attempt_last_timestamp(action_key: str) -> int:
+    """Unix time of the most recent recorded attempt (0 if none)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_timestamp FROM attempts WHERE action_key = ?", (action_key,))
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row and row[0] else 0
 
 
 def reset_attempts(action_key: str):

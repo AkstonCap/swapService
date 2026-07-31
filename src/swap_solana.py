@@ -60,8 +60,12 @@ def poll_solana_deposits():
         heartbeat = nexus_client.get_heartbeat_asset()
         if not heartbeat:
             return
-        wline_sol = heartbeat.get("last_safe_timestamp_solana")
+        # Read via the configured field name (tolerating the legacy one).
+        wline_sol = heartbeat.get(getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana"))
         if wline_sol is None:
+            wline_sol = heartbeat.get("last_safe_timestamp_solana")
+        if wline_sol is None:
+            _log("POLL_SOLANA_HALTED", reason="heartbeat missing solana waterline field")
             return
         
         poll_start = _time.time()
@@ -107,6 +111,12 @@ def poll_solana_deposits():
         # Bug #8 fix: Check quarantine confirmations (mirrors refund confirmation pattern)
         confirmed_quar = solana_client.check_quarantine_confirmations(100, 8.0)
         print(f"Confirmed quarantines: {confirmed_quar}\n") if confirmed_quar > 0 else None
+
+        # Resolve any debit whose outcome is unknown (crash, timeout, unparsable CLI
+        # response) against the chain BEFORE the confirmation pass, so an executed
+        # debit is never mistaken for a failure and refunded.
+        resolved = nexus_client.resolve_unverified_debits()
+        print(f"Resolved unverified debits: {resolved}\n") if resolved > 0 else None
 
         confirmed_debits = nexus_client.check_unconfirmed_debits(10, 8.0)
         print(f"Confirmed debits: {confirmed_debits}\n") if confirmed_debits > 0 else None

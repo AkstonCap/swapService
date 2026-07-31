@@ -547,26 +547,40 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 proc_count_mic += 1
                 continue
 
-            # 7. Debit USDD if valid
-            # Bug #9 fix: Use next_reference() which atomically increments to prevent duplicate references
+            # 7. Debit USDD if valid.
+            # Cross-cycle/cross-thread guard: only one worker may act on this deposit.
+            if not state_db.reserve_action("usdc_to_usdd_debit", sig, ttl_sec=600):
+                continue
+
+            # Bug #9 fix: next_reference() atomically increments to prevent duplicate references.
             reference = state_db.next_reference()
-            result = nexus_client.debit_usdd_with_txid(nexus_address, net_amount, reference)
-            if result[0]:
+
+            # Persist INTENT before touching the chain. If we crash here, or the CLI
+            # answer is unreadable, the reference is on disk and the outcome can be
+            # resolved against the chain (resolve_unverified_debits) instead of guessed.
+            # Guessing is what previously produced a double mint, or a mint AND a refund.
+            state_db.set_unprocessed_sig_reference(sig, reference)
+            state_db.record_attempt(f"usdd_debit:{sig}")
+            state_db.update_unprocessed_sig_status(sig, "debit in flight")
+
+            try:
+                result = nexus_client.debit_usdd_with_txid(nexus_address, net_amount, reference)
+            except Exception as e:
+                # Timeout or transport failure: the debit may still have executed.
+                state_db.update_unprocessed_sig_status(sig, "debit unverified")
+                print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} error={e} - awaiting chain verification")
+                continue
+
+            if result[0] and result[1]:
                 proc_count_swap += 1
-                txid = str(result[1]) if result[1] else None
-                if txid:
-                    state_db.update_unprocessed_sig_txid(sig, txid)
-                    state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
-                else:
-                    # Debit succeeded but no txid returned - should not happen, mark for refund
-                    state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                    proc_count_refund += 1
-                    print(f"[DEBIT_NO_TXID] sig={sig} - debit succeeded but no txid, marking for refund")
+                state_db.update_unprocessed_sig_txid(sig, str(result[1]))
+                state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
             else:
-                # Debit failed - mark for refund to prevent infinite retry loop
-                state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                proc_count_refund += 1
-                print(f"[DEBIT_FAILED] sig={sig} - Nexus debit failed, marking for refund")
+                # The CLI reported failure OR returned an unparsable body. Both are
+                # AMBIGUOUS - debit_usdd_with_txid returns (False, None) when the call
+                # succeeded but no txid could be parsed. Never refund on this signal.
+                state_db.update_unprocessed_sig_status(sig, "debit unverified")
+                print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} - outcome unknown, awaiting chain verification")
         except Exception as e:
             print(f"Error processing deposit {sig}: {e}")
             continue

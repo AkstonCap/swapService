@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 from . import config, state_db  # switched from JSON state to DB only
@@ -32,22 +33,76 @@ def _safe_call(fn, *args, timeout_sec=5, **kwargs):
     return result.get("value")
 
 
+_lock_handle = None
+
+
+def acquire_singleton_lock() -> bool:
+    """Take an exclusive lock so two instances can never share the state DB.
+
+    Without this, a double start (systemd restart that fails to reap, or a manual run
+    alongside the service) puts two processes on one SQLite file with no cross-process
+    mutual exclusion - the same debit can be executed twice. The handle is kept for the
+    process lifetime; the OS releases it on exit.
+    """
+    global _lock_handle
+    lock_path = os.getenv("SWAP_LOCK_PATH") or (str(getattr(state_db, "DB_PATH", "swap_service.db")) + ".lock")
+    try:
+        import fcntl
+    except ImportError:
+        print(f"[lock] fcntl unavailable on this platform; SINGLE-INSTANCE IS NOT ENFORCED. "
+              f"Ensure by other means that only one instance runs.")
+        return True
+    try:
+        handle = open(lock_path, "w")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.write(str(os.getpid()))
+        handle.flush()
+        _lock_handle = handle  # keep open: closing would release the lock
+        print(f"[lock] acquired {lock_path} (pid {os.getpid()})")
+        return True
+    except BlockingIOError:
+        print(f"[lock] another swapService instance already holds {lock_path}; refusing to start. "
+              f"Two instances sharing the state DB can double-spend.")
+        return False
+    except Exception as e:
+        print(f"[lock] could not acquire {lock_path}: {e}; refusing to start.")
+        return False
+
+
+# Threads started by _run_with_watchdog, keyed by label, so a cycle never starts a
+# second copy of a poller that is still running.
+_running_pollers: dict = {}
+
+
 def _run_with_watchdog(func, label, budget_sec):
-    """Run function in thread with timeout watchdog."""
+    """Run `func` in a thread, bounded by `budget_sec`.
+
+    A thread cannot be forcibly cancelled, so exceeding the budget does NOT stop the
+    work - it keeps running. Previously the loop then started another copy each cycle,
+    letting two pollers race the same rows and debit twice. Now an over-budget poller
+    simply blocks its own next run until it finishes.
+    """
+    prev = _running_pollers.get(label)
+    if prev is not None and prev.is_alive():
+        print(f"[watchdog] {label} from a previous cycle is still running; not starting another")
+        return
+
     exc_result = {}
-    
+
     def _wrapper():
         try:
             func()
         except Exception as e:
             exc_result["error"] = e
-    
+
     thread = threading.Thread(target=_wrapper, daemon=True)
+    _running_pollers[label] = thread
     thread.start()
     thread.join(budget_sec)
-    
+
     if thread.is_alive():
-        print(f"[watchdog] {label} exceeded {budget_sec}s budget; skipping remainder this cycle")
+        print(f"[watchdog] {label} exceeded {budget_sec}s budget; still running in background "
+              f"(its next cycle will be skipped until it finishes)")
 
 
 def _process_stale_deposits():
@@ -91,6 +146,11 @@ def _process_stale_deposits():
 def run():
     # Ensure the SQLite schema exists before any state access (idempotent).
     state_db.init_db()
+
+    # Refuse to run a second instance against the same state DB.
+    if not acquire_singleton_lock():
+        return
+
     print("\n")
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
@@ -99,6 +159,18 @@ def run():
     print("   Monitoring:")
     print("   - USDC → USDD: Solana deposits with memo nexus:<USDD_ACCOUNT>")
     print("   - USDD → USDC: USDD deposits mapped via distordiaBridge asset (txid_toService + receival_account)\n")
+
+    # Fail loudly on a heartbeat asset that cannot accept the fields we write: every
+    # update would fail atomically, silently freezing the heartbeat and both waterlines.
+    try:
+        from . import nexus_client as _nc
+        hb_ok, hb_msg = _safe_call(_nc.validate_heartbeat_asset, timeout_sec=10)
+        print(f"   {'✓' if hb_ok else '⚠'} Heartbeat: {hb_msg}")
+        if not hb_ok:
+            print("   ⚠ Waterlines cannot advance until this is corrected — deposits will be re-scanned "
+                  "and the public liveness signal will stay frozen.")
+    except Exception as e:
+        print(f"   ⚠ Heartbeat validation error: {e}")
 
     # Startup balances summary (USDC vault + USDD circulating supply) with timeout protection
     try:
@@ -182,7 +254,9 @@ def run():
                         pending_deposits = False
                         try:
                             unproc_rows = state_db.get_unprocessed_sigs()  # DB rows
-                            if any(True for _sig, _ts, _memo, _from, _amt, _status, _txid in unproc_rows if _status in (None, 'ready for processing','memo unresolved','refunded','debited, awaiting confirmations')):
+                            # 'debit in flight'/'debit unverified' MUST count as pending: minting
+                            # a fee surplus while a debit may still land would double-count it.
+                            if any(True for _sig, _ts, _memo, _from, _amt, _status, _txid in unproc_rows if _status in (None, 'ready for processing','memo unresolved','refunded','debited, awaiting confirmation','debited, awaiting confirmations','debit in flight','debit unverified')):
                                 pending_deposits = True
                         except Exception:
                             pending_deposits = True  # fail safe

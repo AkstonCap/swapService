@@ -57,7 +57,9 @@ On the next poll `_fetch_deposits_helius` stops at `ts <= since_ts` (`solana_cli
 
 ---
 
-### 🔴 B-2 — The watchdog does not cancel work, so pollers overlap and can double-mint
+### 🔴 B-2 — The watchdog does not cancel work, so pollers overlap and can double-mint — ✅ **FIXED (2026-06-15)**
+
+> **Resolution, in three layers.** (1) `_run_with_watchdog` now tracks the thread it started per label and **refuses to start a second copy while the previous one is alive** — a thread still cannot be cancelled, but an over-budget poller now only delays its own next run instead of racing itself. (2) The USDC→USDD debit is wrapped in `reserve_action("usdc_to_usdd_debit", sig)`, finally putting the purpose-built reservation table to use; a concurrent worker is refused and skips the item. (3) B-12's singleton lock closes the cross-process variant. Verified by test: with one poller deliberately over budget, a second cycle is refused and only resumes after it finishes; a second `reserve_action` for the same sig returns `False`.
 
 **Where:** `src/main.py:35-50`
 
@@ -89,7 +91,23 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 
 ---
 
-### 🔴 B-3 — A crash or unparsed CLI response double-mints, or mints *and* refunds
+### 🔴 B-3 — A crash or unparsed CLI response double-mints, or mints *and* refunds — ✅ **FIXED (2026-06-15)**
+
+> **Resolution: intent-before-action, then let the chain decide.** A `reference` column was added to `unprocessed_sigs` (with migration). The unique per-attempt reference and a `debit in flight` status are now persisted **before** the CLI is invoked. Any non-definitive outcome — exception, timeout, or the `(False, None)` returned when the call succeeded but the body was unparsable — is recorded as `debit unverified` and **never refunded on that signal alone**.
+>
+> A new pass, `resolve_unverified_debits()`, runs each cycle (before the confirmation pass) and resolves those rows against the chain via a new `find_usdd_debit_by_reference()`:
+>
+> | on-chain lookup | action |
+> |---|---|
+> | reference found | record the txid, proceed — never refund |
+> | not found, inside grace (`DEBIT_VERIFY_GRACE_SEC`, 300 s) | leave alone |
+> | not found, past grace, attempts remain | provably never landed → safe retry with a **new** reference (also fixes PROC-1, the missing debit retry) |
+> | not found, past grace, attempts exhausted | refund |
+> | no reference recorded (pre-upgrade row) | quarantine for manual review — never guess |
+>
+> All five branches verified by test.
+>
+> **Correction to this report's earlier recommendation:** §8 advised resolving ambiguity with the existing `was_usdd_debited_to_account_for_amount()`. On implementation that function proved unusable here — it inspects the **treasury account**, whereas this path mints via `finance/debit/token from=USDD` (the token *supply* register), and it compares `int(contract.amount)` (a decimal token amount, so `int("10.5")` raises and yields 0) against base units, so it can never match. It is left in place but documented as unsuitable; `find_usdd_debit_by_reference()` keys on the unique reference and is exact.
 
 **Where:** `src/solana_client.py` (debit step); `src/nexus_client.py:151-177`
 
@@ -141,7 +159,9 @@ Three different fallback constants coexist: `swap_nexus.py:691`, `nexus_client.p
 
 ---
 
-### 🔴 B-5 — The heartbeat waterline field name is inconsistent, so heartbeat updates fail permanently
+### 🔴 B-5 — The heartbeat waterline field name is inconsistent, so heartbeat updates fail permanently — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** everything now agrees on `last_safe_timestamp_nexus`, the name already used by `ASSET_STANDARD.md`, `create_heartbeat_asset.py` and the writer — only `config.py` and `.env.example` disagreed, and both were corrected. The writer no longer hardcodes field names; it uses `HEARTBEAT_WATERLINE_NEXUS_FIELD` / `HEARTBEAT_WATERLINE_SOLANA_FIELD`, so the setting is finally honoured. A new `validate_heartbeat_asset()` runs at startup and reports loudly if the asset lacks any field the service will write (listing the names it actually has), instead of letting every update fail silently. The read path uses the configured name with a fallback to the legacy one, and now logs when it halts.
 
 **Where:** `src/config.py:77` vs `src/nexus_client.py:776` vs `create_heartbeat_asset.py:182`
 
@@ -245,7 +265,9 @@ Related: no caller passes `config.MAX_ACTION_ATTEMPTS` to `should_attempt()`; al
 
 ---
 
-### 🟠 B-12 — Nothing prevents two instances running at once
+### 🟠 B-12 — Nothing prevents two instances running at once — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** `acquire_singleton_lock()` takes an exclusive non-blocking `flock` (default `<STATE_DB_PATH>.lock`, override with `SWAP_LOCK_PATH`) at startup and refuses to run if another instance holds it; the handle is held for the process lifetime. On platforms without `fcntl` it warns explicitly that single-instance is not enforced rather than pretending to be safe. Verified: a second process attempting the same lock is refused.
 
 No lockfile, PID file or `flock` anywhere. A double `systemd` start, a manual run alongside the service, or a restart that fails to reap the old process yields two processes sharing one SQLite file — the same race as B-2 but cross-process and without even in-process ordering. With the `reservations` table unused, there is no mutual exclusion at all.
 
@@ -311,15 +333,20 @@ The single most important systemic finding is that a large set of advertised saf
 
 ## 8. Prioritized Remediation Roadmap
 
-**Gate 0 — blocking, before any mainnet funds**
-1. ✅ **B-1 done** — balance-delta skip removed; waterline advancement now provably safe.
-2. **B-2** activate `reserve_action()` around every money action; cooperative watchdog; no overlapping cycles.
-3. **B-3** persist intent before the debit; resolve ambiguous CLI results via `was_usdd_debited_to_account_for_amount()` instead of assuming failure.
-4. ✅ **B-4 done** — dust floor added, gap credits recorded, docs reconciled with code.
-5. **B-5** use the configured heartbeat field; validate the asset's fields at startup and fail loudly.
-6. **B-12** startup singleton lock.
+**Gate 0 — blocking, before any mainnet funds — ✅ COMPLETE (2026-06-15)**
+1. ✅ **B-1** — balance-delta skip removed; waterline advancement now provably safe.
+2. ✅ **B-2** — non-overlapping pollers, `reserve_action()` on the debit, singleton lock.
+3. ✅ **B-3** — intent persisted before the debit; ambiguity resolved against the chain, never guessed.
+4. ✅ **B-4** — dust floor added, gap credits recorded, docs reconciled with code.
+5. ✅ **B-5** — configured heartbeat fields honoured; startup validation fails loudly.
+6. ✅ **B-12** — startup singleton lock.
 
-> **Gate 0 remains open.** B-2, B-3, B-5 and B-12 are unfixed; B-2/B-3 can still double-mint and B-5 can wedge a fresh deployment.
+> **Gate 0 is closed on code, but not on evidence.** Every fix above was verified by unit
+> tests against the real functions; **none has been exercised against a live Solana or
+> Nexus node.** The devnet/testnet run in §9 is now the gating item — in particular the
+> B-3 resolver, whose correctness depends on the Nexus CLI actually returning
+> `contracts.reference` on `finance/transactions/token`. Gate 1 (B-6 float money math,
+> B-7 finality) remains open and still matters before meaningful volume.
 
 **Gate 1 — before meaningful volume**
 7. **B-6** `Decimal` end-to-end; integer base units in the schema.
