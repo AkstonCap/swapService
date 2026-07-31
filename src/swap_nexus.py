@@ -556,12 +556,13 @@ def poll_nexus_usdd_deposits():
     base_cmd.append("order=desc")
 
     # Proper WHERE clause (Query DSL) for server-side filtering if enabled.
-    # We only want CREDIT contracts where contracts.to=treasury_addr AND contracts.amount >= MIN_CREDIT_USDD
+    # Filter at the DUST floor, not the swap minimum: credits between the two are real
+    # user funds that must still be fetched so they can be recorded (see below).
     # DSL operates over 'results' root; transactions list returns objects where contracts[] nested.
     # We cannot address array members directly with > filter per doc, so we still download all then client-filter by OP/to.
     # However if CLI supports simple amount filter we'll keep backward compatibility.
     # Use WHERE only if flagged to avoid incompatibility on older CLI.
-    where_threshold = getattr(config, "MIN_CREDIT_USDD", None)
+    where_threshold = getattr(config, "DUST_CREDIT_USDD", None)
     if getattr(config, "USE_NEXUS_WHERE_FILTER_USDD", True) and where_threshold:
         # Attempt to filter by amount and OP CREDIT *heuristically*; if unsupported the CLI should ignore or error (logged).
         # Syntax example from docs: command WHERE 'results.balance>10'
@@ -687,12 +688,44 @@ def poll_nexus_usdd_deposits():
                     if amount_dec <= 0:
                         continue
                         
-                    # Anti-DoS: Check minimum credit threshold
-                    min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
-                    if amount_dec < min_credit_threshold:
-                        # Ignore micro credit entirely: no state writes, no fee accounting.
+                    # Dust floor (anti-DoS): below this we ignore the credit entirely.
+                    dust_threshold = Decimal(config.DUST_CREDIT_USDD_UNITS) / (Decimal(10) ** config.USDD_DECIMALS)
+                    if amount_dec < dust_threshold:
+                        # True spam dust: no state writes, no fee accounting.
                         continue
-                        
+
+                    # Below the swap minimum but above dust: this is real user money.
+                    # It must NEVER be dropped silently - record it so the funds are
+                    # accounted for and the sender is traceable for manual resolution.
+                    min_credit_threshold = Decimal(config.MIN_CREDIT_USDD_UNITS) / (Decimal(10) ** config.USDD_DECIMALS)
+                    if amount_dec < min_credit_threshold:
+                        owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        below_min_units = int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                        if below_min_units > 0:
+                            state_db.add_fee_entry(
+                                sig=None,
+                                txid=txid,
+                                kind="below_min_credit_usdd",
+                                amount_usdc_units=None,
+                                amount_usdd_units=below_min_units,
+                            )
+                        state_db.mark_processed_txid(
+                            txid=txid,
+                            timestamp=ts,
+                            amount_usdd=float(amount_dec),
+                            from_address=sender,
+                            to_address=to_addr,
+                            owner=owner or "",
+                            sig="",
+                            status=USDD_STATUS_FEES,
+                        )
+                        processed_txids.add(txid)
+                        processed_count += 1
+                        _log("USDD_BELOW_MIN_CREDIT", txid=txid, amount=str(amount_dec),
+                             minimum=str(min_credit_threshold), sender=sender)
+                        continue
+
+
                     flat_usdd_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
                     dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
                     dyn_fee_dec = (amount_dec * Decimal(max(0, dyn_bps))) / Decimal(10000)

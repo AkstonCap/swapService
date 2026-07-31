@@ -14,7 +14,9 @@ The service lets you swap:
 - USDD → USDC: Send USDD to the treasury and publish an asset mapping your USDD transaction `txid` to a Solana receival account.
 
 Thresholds & Fees (defaults – operator may change):
-- Minimum swap amount both directions: `0.100101` of the source token (smaller = treated as fees / ignored).
+- Minimum swap amounts (smaller = treated as fees, **no tokens are sent back**):
+  - USDC → USDD: `0.100101 USDC`
+  - USDD → USDC: `0.500501 USDD` — this direction carries a larger flat fee, so its minimum is higher. Sending less than this will **not** be swapped.
 - Flat fee (USDC path) & dynamic fee (bps) may apply as configured.
 
 ---
@@ -71,7 +73,7 @@ Done! The service will detect your credit, verify the asset owner matches, and s
 - Asset owner must match the sender's `owner` field of the USDD credit (security check)
 - The same asset is reused for multiple swaps—just update `txid_toService` each time
 - Your Solana wallet must already have a USDC ATA (most wallets auto-create on first receive)
-- Minimum: `0.100101 USDD`. Smaller amounts are treated as fees
+- Minimum: `0.500501 USDD` (`MIN_CREDIT_USDD`). Smaller amounts are recorded and treated as fees — no USDC is sent
 - If no asset mapping within `REFUND_TIMEOUT_SEC` (default 1 hour) → USDD is refunded
 
 High‑level flow:
@@ -91,7 +93,7 @@ Detailed steps:
 
 2) Send USDD to the treasury
   - To: `NEXUS_USDD_TREASURY_ACCOUNT`
-  - Amount: ≥ `MIN_CREDIT_USDD` (default 0.100101). Amounts < threshold are treated as micro credits (100% fee) and no USDC will be sent.
+  - Amount: ≥ `MIN_CREDIT_USDD` (default 0.500501). Amounts below the threshold are recorded and treated as micro credits (100% fee); no USDC will be sent.
   - Command example (token debit):
     ```bash
     nexus finance/debit/token from=USDD to=<TREASURY_ACCOUNT> amount=<AMOUNT_IN_BASE_UNITS> pin=<PIN>
@@ -130,7 +132,7 @@ Detailed steps:
 Notes
 - Asset owner must match the sender’s `owner` field of the USDD credit; otherwise it is ignored.
 - You can batch multiple swaps by using multiple assets or updating the same asset sequentially (only the row with matching `txid_toService` is considered).
-- Tiny USDD credits below `MIN_CREDIT_USDD` (default 0.100101) are treated as fees (100% micro fee policy) and skipped.
+- Tiny USDD credits below `MIN_CREDIT_USDD` (default 0.500501) are treated as fees (100% micro fee policy). They are recorded in the service database (sender, amount, txid) so they can be traced; credits below `DUST_CREDIT_USDD` (default 0.01) are ignored entirely as spam.
 - Keep the asset published before the refund timeout to avoid unnecessary refunds.
 
 ---
@@ -172,7 +174,7 @@ USDD→USDC:
 Send USDD to <NEXUS_USDD_TREASURY_ACCOUNT>
 Grab txid from CLI output
 Publish or update asset with fields: {"txid_toService":"<TXID>","receival_account":"<SOL_OR_USDC_TOKEN_ACCOUNT>"}
-Amount ≥ 0.100101 USDD
+Amount ≥ 0.500501 USDD
 ```
 
 ---

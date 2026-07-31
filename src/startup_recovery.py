@@ -100,7 +100,9 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
                 continue
             
             # Check minimum threshold
-            min_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
+            # Dust floor, matching poll_nexus_usdd_deposits: credits above dust but below
+            # the swap minimum are recorded (as fees) rather than skipped without trace.
+            min_threshold = config.DUST_CREDIT_USDD_UNITS / (10 ** config.USDD_DECIMALS)
             if amount_dec < min_threshold:
                 continue
             

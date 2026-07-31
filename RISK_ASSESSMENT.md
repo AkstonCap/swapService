@@ -31,7 +31,9 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 
 ## 2. Tier 1 — Critical: Fund Loss & Unbacked Minting
 
-### 🔴 B-1 — Deposits are silently skipped forever whenever payouts exceed deposits
+### 🔴 B-1 — Deposits are silently skipped forever whenever payouts exceed deposits — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** the balance-delta gate is deleted (ingestion now always runs), and waterline advancement moved into `_advance_solana_waterline()`, which enforces the invariant *never pass an unpersisted deposit*: it holds the waterline entirely if enumeration failed, pins it behind the oldest unprocessed deposit when work is pending, advances to `poll_start - safety` only when everything fetched is persisted, and never moves backwards. This also fixed a second instance of the same bug — the end-of-poll call passed its arguments in the wrong order (`update_heartbeat_asset(new_waterline, None, poll_start)`), writing a waterline value into `last_poll_timestamp` and setting the Solana waterline to *now*. All four branches verified by unit test against the real function.
 
 **Where:** `src/swap_solana.py:33-45`
 
@@ -110,7 +112,11 @@ Again the defence exists and is dead: `nexus_client.was_usdd_debited_to_account_
 
 ---
 
-### 🔴 B-4 — The published USDD minimum is 5× below the enforced one; credits in the gap are silently destroyed
+### 🔴 B-4 — The published USDD minimum is 5× below the enforced one; credits in the gap are silently destroyed — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** three-band classification replaces the single silent `continue`. A new `DUST_CREDIT_USDD` floor (default `0.01`) keeps the anti-DoS behaviour for genuine spam; credits **between the dust floor and `MIN_CREDIT_USDD` are now recorded** — a `processed_txids` row plus a `below_min_credit_usdd` fee entry capturing sender, amount and txid — so the funds are traceable and manually resolvable instead of vanishing. The server-side `where` filters in `swap_nexus.py`, `nexus_client.fetch_deposits_since()` and `startup_recovery.py` were lowered to the dust floor so the gap band is actually fetched, and the three inconsistent hardcoded `100101` fallbacks were removed in favour of the config value. `README.md` (5 places), `CONFIG.md` and `.env.example` now state the real `0.500501` minimum. Band classification and the recording path verified by unit test.
+>
+> The enforced minimum was **not** lowered to the documented `0.100101`: that value sits below the `FLAT_FEE_USDC` (0.5) on this path, so swaps there net ≤ 0 (see B-13). Whether the gap band should be *refunded* rather than kept as fees is a policy decision left to the operator — the funds are now recorded either way.
 
 **Where:** `src/config.py:104` vs `README.md:17,30,74,133,175`
 
@@ -306,12 +312,14 @@ The single most important systemic finding is that a large set of advertised saf
 ## 8. Prioritized Remediation Roadmap
 
 **Gate 0 — blocking, before any mainnet funds**
-1. **B-1** remove the balance-delta skip; never advance a waterline past un-persisted deposits.
+1. ✅ **B-1 done** — balance-delta skip removed; waterline advancement now provably safe.
 2. **B-2** activate `reserve_action()` around every money action; cooperative watchdog; no overlapping cycles.
 3. **B-3** persist intent before the debit; resolve ambiguous CLI results via `was_usdd_debited_to_account_for_amount()` instead of assuming failure.
-4. **B-4** reconcile the USDD minimum between code and docs; never drop a credit without recording it.
+4. ✅ **B-4 done** — dust floor added, gap credits recorded, docs reconciled with code.
 5. **B-5** use the configured heartbeat field; validate the asset's fields at startup and fail loudly.
 6. **B-12** startup singleton lock.
+
+> **Gate 0 remains open.** B-2, B-3, B-5 and B-12 are unfixed; B-2/B-3 can still double-mint and B-5 can wedge a fresh deployment.
 
 **Gate 1 — before meaningful volume**
 7. **B-6** `Decimal` end-to-end; integer base units in the schema.

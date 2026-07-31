@@ -842,7 +842,9 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
     base_cmd.append("order=desc")  # Newest first
     
     # Use WHERE filter if available (may reduce bandwidth)
-    min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
+    # Filter at the dust floor, not the swap minimum: credits in between are real user
+    # funds that must still be fetched so they can be recorded rather than lost.
+    min_credit_threshold = config.DUST_CREDIT_USDD_UNITS / (10 ** config.USDD_DECIMALS)
     try:
         base_cmd.append(f"where='contracts.amount>={min_credit_threshold}'")
     except Exception:

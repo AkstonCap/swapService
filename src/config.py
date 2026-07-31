@@ -101,8 +101,17 @@ NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 # Anti-DoS protections
 MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.100101")  # minimum deposit to process as swap
 MIN_DEPOSIT_USDC_UNITS = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
+# Minimum USDD credit that is swapped for USDC. Must stay ABOVE the USDD->USDC fee
+# (FLAT_FEE_USDC + dynamic), or the swap nets <= 0 and the whole credit becomes a fee.
+# Keep README.md / CONFIG.md / .env.example in sync with this value: users who follow a
+# documented minimum lower than this one previously had their credit silently destroyed.
 MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.500501")  # minimum credit to process as swap
 MIN_CREDIT_USDD_UNITS = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+# Anti-DoS dust floor. Credits BELOW this are ignored entirely (no state, no accounting).
+# Credits between this floor and MIN_CREDIT_USDD are real user funds: they are recorded
+# and booked as fees rather than dropped without trace.
+DUST_CREDIT_USDD = os.getenv("DUST_CREDIT_USDD", "0.01")
+DUST_CREDIT_USDD_UNITS = _to_units(DUST_CREDIT_USDD, USDD_DECIMALS)
 MAX_DEPOSITS_PER_LOOP = int(os.getenv("MAX_DEPOSITS_PER_LOOP", "100"))  # batch processing limit
 MAX_CREDITS_PER_LOOP = int(os.getenv("MAX_CREDITS_PER_LOOP", "100"))  # batch processing limit for USDD credits
 MICRO_DEPOSIT_FEE_PCT = int(os.getenv("MICRO_DEPOSIT_FEE_PCT", "100"))  # 100% fee for sub-minimum deposits
