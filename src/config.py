@@ -51,6 +51,16 @@ MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
 ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
 
 # Timeout and hang prevention
+# Commitment used when INGESTING deposits and when treating our own payouts as settled.
+# 'confirmed' is supermajority-voted but NOT rooted and can still be reorged: minting USDD
+# against a reorged deposit leaves permanently unbacked supply, and Nexus cannot learn of a
+# Solana reorg. Default to 'finalized' (~13s slower, irreversible). Lower it only if you
+# accept that risk, and preferably only below SOLANA_FINALIZED_ABOVE_UNITS.
+SOLANA_DEPOSIT_COMMITMENT = os.getenv("SOLANA_DEPOSIT_COMMITMENT", "finalized")
+# Deposits at or above this size ALWAYS require 'finalized', even if the commitment above
+# is relaxed. 0 disables the carve-out (i.e. the commitment above applies to every amount).
+SOLANA_FINALIZED_ABOVE_UNITS = int(os.getenv("SOLANA_FINALIZED_ABOVE_UNITS", "0"))
+
 SOLANA_RPC_TIMEOUT_SEC = int(os.getenv("SOLANA_RPC_TIMEOUT_SEC", "8"))
 SOLANA_TX_FETCH_TIMEOUT_SEC = int(os.getenv("SOLANA_TX_FETCH_TIMEOUT_SEC", "12"))
 SOLANA_POLL_TIME_BUDGET_SEC = int(os.getenv("SOLANA_POLL_TIME_BUDGET_SEC", "15"))

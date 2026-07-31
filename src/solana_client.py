@@ -87,13 +87,23 @@ def _helius_rpc_call(method: str, params=None, timeout_sec: Optional[float] = No
     return js
 
 
+def _deposit_commitment() -> str:
+    """Commitment for ingesting deposits / settling our own payouts.
+
+    Defaults to 'finalized'. 'confirmed' is supermajority-voted but not rooted, so a
+    deposit can be reorged away after we have minted USDD against it - an irreversible
+    loss, since Nexus cannot learn of a Solana reorg.
+    """
+    return str(getattr(config, "SOLANA_DEPOSIT_COMMITMENT", "finalized") or "finalized")
+
+
 def helius_get_transactions_for_address(
     address: str,
     *,
     limit: int = 100,
     before: Optional[str] = None,
     until: Optional[str] = None,
-    commitment: str = "confirmed",
+    commitment: str | None = None,
     encoding: Optional[str] = None,
 ) -> list:
     """Fetch transactions for an address via Helius `getTransactionsForAddress`.
@@ -102,7 +112,7 @@ def helius_get_transactions_for_address(
     is unavailable or fails, callers can catch and fallback to core RPC.
     """
     lim = max(1, min(1000, int(limit)))
-    opts: dict = {"limit": lim, "commitment": commitment}
+    opts: dict = {"limit": lim, "commitment": commitment or _deposit_commitment()}
     if before:
         opts["before"] = before
     if until:
@@ -119,14 +129,14 @@ def core_get_transactions_for_address(
     limit: int = 100,
     before: Optional[str] = None,
     until: Optional[str] = None,
-    commitment: str = "confirmed",
+    commitment: str | None = None,
 ) -> list:
     """Fallback using core RPC: getSignaturesForAddress + getTransaction (jsonParsed).
     Returns a list of transaction JSONs similar to getTransaction results.
     """
     client = _get_client()
     lim = max(1, min(1000, int(limit)))
-    sig_args = {"limit": lim}
+    sig_args = {"limit": lim, "commitment": commitment or _deposit_commitment()}
     if before:
         sig_args["before"] = before
     if until:
@@ -165,7 +175,7 @@ def get_transactions_for_address(
     limit: int = 100,
     before: Optional[str] = None,
     until: Optional[str] = None,
-    commitment: str = "confirmed",
+    commitment: str | None = None,
     prefer: str = "helius",
 ) -> list:
     """Unified helper: try Helius RPC first (if configured), else fallback to core RPC.
@@ -245,7 +255,9 @@ def _fetch_deposits_helius(
                 str(token_account_addr),
                 limit=page_size,
                 before=before,
-                commitment="confirmed",
+                # 'finalized' by default: a 'confirmed' deposit can still be reorged
+                # away after we have already minted USDD against it.
+                commitment=getattr(config, "SOLANA_DEPOSIT_COMMITMENT", "finalized"),
                 encoding=None,
             ) or []
             if not txs:
@@ -333,6 +345,7 @@ def _fetch_deposits_core_rpc(
             client.get_signatures_for_address,
             PublicKey.from_string(token_account_addr),
             limit=min(1000, limit * 2),  # Fetch extra since some may be filtered
+            commitment=_deposit_commitment(),  # reorg safety: see _deposit_commitment()
             timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
         )
         sig_entries = _rpc_get_value(sig_resp) or []
@@ -432,18 +445,46 @@ def _fetch_deposits_core_rpc(
         return []
     
 
-def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
+def process_helius_deposits(deposits: list, db_check: bool = True) -> tuple:
     """Persist enriched deposits from ``fetch_incoming_usdc_deposits_via_helius``.
 
     Each item is a tuple ``(sig, timestamp, memo, from_address, amount_units)`` that
     already contains everything we need, so we write straight to ``unprocessed_sigs``
     with **no per-deposit get_transaction re-fetch** (that would defeat the 1-2 call
-    enriched fast path). Returns the number of new rows added.
+    enriched fast path).
+
+    Returns ``(added, oldest_deferred_ts)``. ``oldest_deferred_ts`` is the block time of
+    the oldest deposit withheld pending finalization, or ``None``. The caller MUST keep
+    the waterline behind it - a deferred deposit is not in the DB, so nothing else would
+    stop the waterline advancing past it and hiding it forever.
     """
     if not deposits:
-        return 0
+        return (0, None)
     from . import state_db
+
+    # Carve-out: when the operator has relaxed ingestion below 'finalized', deposits at
+    # or above SOLANA_FINALIZED_ABOVE_UNITS still require finalization before we mint
+    # against them, so a reorg cannot cost us the large amounts.
+    require_final: set = set()
+    big_threshold = int(getattr(config, "SOLANA_FINALIZED_ABOVE_UNITS", 0) or 0)
+    if big_threshold > 0 and _deposit_commitment() != "finalized":
+        big_sigs = []
+        for it in deposits:
+            try:
+                s, _ts, _memo, _from, amt = it
+            except Exception:
+                continue
+            if s and int(amt or 0) >= big_threshold:
+                big_sigs.append(s)
+        if big_sigs:
+            finalized = get_signatures_confirmation(big_sigs)
+            require_final = {s for s in big_sigs if not finalized.get(s)}
+            if require_final:
+                print(f"[FINALITY_HOLD] {len(require_final)} large deposit(s) not yet finalized; "
+                      f"deferring until they are")
+
     added = 0
+    oldest_deferred_ts = None
     for item in deposits:
         try:
             sig, ts, memo, from_address, amount_units = item
@@ -459,6 +500,16 @@ def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
                 continue
         if not sig:
             continue
+        if sig in require_final:
+            # Large deposit awaiting finalization; picked up on a later poll. Track its
+            # timestamp so the caller pins the waterline behind it.
+            try:
+                ts_i = int(ts or 0)
+                if ts_i and (oldest_deferred_ts is None or ts_i < oldest_deferred_ts):
+                    oldest_deferred_ts = ts_i
+            except Exception:
+                pass
+            continue
         if db_check and (
             state_db.is_processed_sig(sig)
             or state_db.is_unprocessed_sig(sig)
@@ -468,7 +519,7 @@ def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
             continue
         state_db.add_unprocessed_sig(sig, ts, memo or "", from_address, amount_units, "ready for processing", None)
         added += 1
-    return added
+    return (added, oldest_deferred_ts)
 
 
 def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -> list:
@@ -532,7 +583,8 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 continue
 
             # 6. Calculate amount minus fees
-            net_amount = nexus_client.get_usdd_send_amount(amount_usdc)
+            # Base units, exact integer math (no float / scientific-notation hazard).
+            net_amount = nexus_client.get_usdd_send_amount_units(amount_usdc)
             if net_amount <= 0:
                 # Bug #12 fix: Track the fee (entire deposit amount is kept as fee)
                 state_db.add_fee_entry(
@@ -929,11 +981,14 @@ def get_signatures_confirmation(sigs: list, min_confirmations: int = 1) -> dict:
             continue
         if not isinstance(val, list):
             continue
+        # If we ingest at 'finalized', settle our own payouts at 'finalized' too - a
+        # merely 'confirmed' refund can still be reorged away after we mark it done.
+        accepted = ("finalized",) if _deposit_commitment() == "finalized" else ("finalized", "confirmed")
         for s, st in zip(keep, val):
             if isinstance(st, dict):
                 cs = st.get("confirmationStatus")
                 confs = st.get("confirmations")
-                if cs in ("finalized", "confirmed") or (confs is not None and confs >= min_confirmations):
+                if cs in accepted or (confs is not None and confs >= min_confirmations):
                     out[s] = True
     return out
 

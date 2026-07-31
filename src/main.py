@@ -262,10 +262,9 @@ def run():
                             pending_deposits = True  # fail safe
                         threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS', 0)
                         if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            # surplus is in base units; debit_usdd_with_txid expects token units.
-                            surplus_tokens = surplus / (10 ** config.USDD_DECIMALS)
+                            # Both are base units; debit_usdd_with_txid formats for the CLI.
                             ref = state_db.next_reference()
-                            res = _safe_call(nexus_client.debit_usdd_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, surplus_tokens, ref, timeout_sec=15)
+                            res = _safe_call(nexus_client.debit_usdd_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(surplus), ref, timeout_sec=15)
                             if res and res[0]:
                                 print(f"[reconcile] Minted {surplus} USDD to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()

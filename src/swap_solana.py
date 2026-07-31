@@ -18,7 +18,7 @@ def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
     return int(amount) // (10 ** (src_decimals - dst_decimals))
 
 
-def _advance_solana_waterline(current_wline, poll_start, fetch_ok: bool) -> None:
+def _advance_solana_waterline(current_wline, poll_start, fetch_ok: bool, deferred_ts=None) -> None:
     """Move `last_safe_timestamp_solana` forward only to a point proven safe.
 
     Invariant: the waterline must never pass a deposit that is not durably recorded,
@@ -43,6 +43,14 @@ def _advance_solana_waterline(current_wline, poll_start, fetch_ok: bool) -> None
     else:
         candidate = int(poll_start) - safety
         reason = "all_fetched_deposits_persisted"
+
+    # A deposit withheld pending finalization is NOT in the DB, so nothing above accounts
+    # for it. The waterline must stay behind it or it would be hidden forever.
+    if deferred_ts:
+        deferred_floor = int(deferred_ts) - safety - 1
+        if deferred_floor < candidate:
+            candidate = deferred_floor
+            reason = "pinned_behind_deferred_unfinalized_deposit"
 
     if candidate > int(current_wline):
         _log("WATERLINE_ADVANCED", old_ts=int(current_wline), new_ts=candidate, reason=reason)
@@ -78,6 +86,7 @@ def poll_solana_deposits():
         # which permanently hid every deposit that landed in the skipped window.
         fetch_ok = False
         unprocessed_deposits_added = 0
+        deferred_ts = None  # oldest deposit withheld pending finalization, if any
         try:
             # Prefer Helius enriched RPC to batch-fetch txs + memos in 1–2 calls; fallback to existing scanner.
             usdc_deposits = solana_client.fetch_incoming_usdc_deposits_via_helius(
@@ -89,7 +98,7 @@ def poll_solana_deposits():
 
             # Consume the enriched tuples directly (memo/from/amount already present);
             # no per-deposit re-fetch, so the Helius fast path stays 1-2 RPC calls.
-            unprocessed_deposits_added = solana_client.process_helius_deposits(usdc_deposits, True)
+            unprocessed_deposits_added, deferred_ts = solana_client.process_helius_deposits(usdc_deposits, True)
             fetch_ok = True
             print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
         except Exception as e:
@@ -121,7 +130,7 @@ def poll_solana_deposits():
         confirmed_debits = nexus_client.check_unconfirmed_debits(10, 8.0)
         print(f"Confirmed debits: {confirmed_debits}\n") if confirmed_debits > 0 else None
 
-        _advance_solana_waterline(wline_sol, poll_start, fetch_ok)
+        _advance_solana_waterline(wline_sol, poll_start, fetch_ok, deferred_ts)
 
         # Retained for observability only; this value no longer gates ingestion.
         current_bal_after = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)

@@ -57,6 +57,23 @@ def _format_token_amount(amount: Decimal, decimals: int) -> str:
     q = amount.quantize(Decimal(10) ** -int(decimals), rounding=ROUND_DOWN)
     return format(q, 'f')
 
+def _row_amount_units(r: dict) -> int:
+    """Exact credited amount in base units for an unprocessed_txids row.
+
+    Prefers the stored integer `amount_usdd_units`; falls back to the legacy REAL
+    column for rows written before that column existed. The REAL path round-trips
+    through binary float, which can lose the last base unit.
+    """
+    units = r.get("amount_usdd_units")
+    if units is not None:
+        try:
+            return int(units)
+        except Exception:
+            pass
+    amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+    return int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+
+
 def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     """Subtract a fixed Nexus congestion fee (configured in USDD token units)."""
     try:
@@ -127,8 +144,7 @@ def process_unprocessed_txids():
                 _log("USDD_OWNER_MISMATCH", txid=txid, recv_owner=asset_owner, expected_owner=owner)
             elif recv:
                 # Invalid token account -> refund path
-                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                amt_units = _row_amount_units(r)
                 sender = r.get("from")
                 if sender:
                     refund_key = f"usdd_refund:{txid}"
@@ -164,8 +180,7 @@ def process_unprocessed_txids():
                 if ts_row and (time.time() - ts_row) > getattr(config, "REFUND_TIMEOUT_SEC", 3600):
                     sender = r.get("from")
                     if sender:
-                        amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                        amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                        amt_units = _row_amount_units(r)
                         refund_key = f"usdd_refund_unresolved:{txid}"
                         if state_db.should_attempt(refund_key):
                             state_db.record_attempt(refund_key)
@@ -425,8 +440,7 @@ def process_unprocessed_txids():
                     _log("USDD_COLLECT_REFUND_NO_SENDER", txid=txid)
                     continue
                 
-                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                amt_units = _row_amount_units(r)
                 
                 refund_key = f"usdd_collect_refund:{txid}"
                 if state_db.should_attempt(refund_key):
@@ -478,8 +492,7 @@ def process_unprocessed_txids():
                     _log("USDD_REFUND_PENDING_NO_SENDER", txid=txid)
                     continue
                 
-                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                amt_units = _row_amount_units(r)
                 
                 refund_key = f"usdd_refund_pending:{txid}"
                 if state_db.should_attempt(refund_key):
@@ -767,7 +780,9 @@ def poll_nexus_usdd_deposits():
                         to_address=to_addr,
                         owner_from_address=owner,
                         confirmations_credit=conf,
-                        status=USDD_STATUS_PENDING
+                        status=USDD_STATUS_PENDING,
+                        # Exact base units: refunds are derived from this, not the REAL column.
+                        amount_usdd_units=int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)),
                     )
                     unprocessed_txids.add(txid)
                     processed_count += 1

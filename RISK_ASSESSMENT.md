@@ -184,7 +184,20 @@ Combined with B-6 (the poller aborts when the heartbeat is unusable), a fresh de
 
 ## 3. Tier 2 — High: Money Correctness & Finality
 
-### 🟠 B-6 — Amounts are computed in binary floating point and reach the CLI in scientific notation
+### 🟠 B-6 — Amounts are computed in binary floating point and reach the CLI in scientific notation — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_usdd_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_usdd_with_txid()` now takes base units and formats them with `_format_usdd_amount()` (fixed-point, never exponent form). All call sites — the swap debit, the backing reconcile mint, and `mint_usdd_to_local()` — pass base units. Verified against the previously-failing inputs:
+>
+> | deposit (USDC units) | old float string | new CLI string |
+> |---|---|---|
+> | 100,101 | `8.989999999847731e-07` | `0` |
+> | 100,200 | `9.979999999999711e-05` | `0.000099` |
+> | 150,000 | `0.04984999999999999` | `0.04985` |
+> | 3,333,333 | `3.229999667` (9 dp on a 6-dp token) | `3.229999` |
+>
+> The fee-tracking scale in `check_unconfirmed_debits` (`int(float * 10**decimals)`) is now integer subtraction of base units. `unprocessed_txids` also gained an exact `amount_usdd_units` column (with migration), populated at insert and preferred for refund amounts.
+>
+> **Correction to this report's original claim.** It stated that storing money as SQLite `REAL` was *actively* producing off-by-one drift on refunds. On measurement that is wrong: the refund path parses via `Decimal(str(value))`, and `str()` round-trips a float to its shortest exact decimal, so `8.29 → 8290000` correctly. Only the **naive** `int(value * 10**6)` form drifts (`8.29 → 8289999`), and that form appeared in fee tracking, not refunds. The drift claim therefore applied to the fee path (now fixed); the new `amount_usdd_units` column is **defence-in-depth** — it removes the dependence on float repr round-tripping and on every future caller remembering to use `Decimal(str(...))` — not the repair of an active bug. Converting the remaining `REAL` record-keeping columns to `INTEGER` is still worthwhile but is not urgent.
 
 **Where:** `src/nexus_client.py:135-148`; money columns typed `REAL` at `state_db.py:22,66,80,92,105`
 
@@ -203,7 +216,13 @@ Two problems: **scientific notation** that a decimal-amount parser is unlikely t
 
 ---
 
-### 🟠 B-7 — USDD is minted against `confirmed` Solana state, not `finalized`
+### 🟠 B-7 — USDD is minted against `confirmed` Solana state, not `finalized` — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** ingestion commitment is now configurable and **defaults to `finalized`** (`SOLANA_DEPOSIT_COMMITMENT`), applied on the Helius path and both core-RPC fallbacks. Settlement of our *own* payouts follows the same strictness — when ingesting at `finalized`, `get_signatures_confirmation()` accepts only `finalized`, so a merely-`confirmed` refund can no longer be marked complete and then reorged away.
+>
+> For operators who deliberately trade safety for latency, `SOLANA_FINALIZED_ABOVE_UNITS` keeps a hard floor: deposits at or above that size are withheld until finalized even when the global commitment is relaxed.
+>
+> That carve-out introduced a subtle hazard worth recording: a withheld deposit is **not** written to the DB, so nothing would have kept the waterline behind it — it would have been skipped forever, re-creating B-1 through a different door. `process_helius_deposits()` therefore returns the oldest deferred timestamp and `_advance_solana_waterline()` pins the waterline behind it. Verified by test.
 
 **Where:** `src/solana_client.py:248` (`commitment="confirmed"`)
 
@@ -349,8 +368,8 @@ The single most important systemic finding is that a large set of advertised saf
 > B-7 finality) remains open and still matters before meaningful volume.
 
 **Gate 1 — before meaningful volume**
-7. **B-6** `Decimal` end-to-end; integer base units in the schema.
-8. **B-7** credit on `finalized` (or threshold-based).
+7. ✅ **B-6 done** — `Decimal`/integer money math end-to-end; exact base units for refunds.
+8. ✅ **B-7 done** — ingestion and payout settlement default to `finalized`, with a size carve-out.
 9. **B-8** heartbeat failure must alert and fall back, not silently halt.
 10. **B-10/B-11** implement the cooldown and the USDD quarantine transfer — or delete the claims from the docs.
 11. **B-13/B-14** set minimums above fees; correct every published fee and minimum.

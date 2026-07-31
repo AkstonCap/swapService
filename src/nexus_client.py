@@ -132,38 +132,52 @@ def _format_usdd_amount(amount_units: int) -> str:
 
 
 
-def get_usdd_send_amount(amount_usdc: int) -> float:
-    """Calculate the USDD amount to send, accounting for fees.
-    
-    Args:
-        amount_usdc: Input amount in USDC base units (e.g., 10500000 for 10.5 USDC)
-    
-    Returns:
-        Net USDD in token units (human-readable, e.g., 10.3 for 10.3 USDD).
-        This can be passed directly to Nexus CLI which expects token units.
+def get_usdd_send_amount_units(amount_usdc_units: int) -> int:
+    """Net USDD to send, in BASE UNITS, for a USDC deposit in base units.
+
+    Exact integer/Decimal arithmetic throughout. The previous float version returned
+    values like 8.989999999847731e-07, which was interpolated straight into the CLI
+    command as `amount=8.989999999847731e-07` - scientific notation a decimal parser
+    will not accept, with 17 significant digits against a 6-decimal token.
     """
-    base_amount = amount_usdc / 10**config.USDC_DECIMALS
-    flat_fee = float(config.FLAT_FEE_USDD)  # Convert string to float
-    fee = base_amount * config.DYNAMIC_FEE_BPS / 10000 + flat_fee
-    return base_amount - fee
+    try:
+        gross = Decimal(int(amount_usdc_units)) / (Decimal(10) ** config.USDC_DECIMALS)
+    except Exception:
+        return 0
+    flat_fee = Decimal(str(config.FLAT_FEE_USDD))
+    dyn_bps = Decimal(max(0, int(config.DYNAMIC_FEE_BPS)))
+    net = gross - (gross * dyn_bps / Decimal(10000)) - flat_fee
+    if net <= 0:
+        return 0
+    # Round DOWN to whole base units: never pay out a fraction we cannot represent.
+    return int((net * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
 
 
-def debit_usdd_with_txid(to_addr: str, amount_usdd: float, reference: int) -> tuple[bool, str | None]:
+def get_usdd_send_amount(amount_usdc: int) -> Decimal:
+    """Deprecated: prefer get_usdd_send_amount_units(). Returns Decimal token units."""
+    return Decimal(get_usdd_send_amount_units(amount_usdc)) / (Decimal(10) ** config.USDD_DECIMALS)
+
+
+def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -> tuple[bool, str | None]:
     """Perform USDD debit and attempt to parse a txid from output.
+
+    `amount_usdd_units` is in BASE UNITS and is formatted for the CLI by
+    _format_usdd_amount(), which emits a plain fixed-point decimal string. Passing a
+    float here previously produced scientific notation in the command line.
     
     Args:
         to_addr: Destination Nexus USDD account address
-        amount_usdd: Amount in token units (human-readable, e.g., 10.5 for 10.5 USDD).
-                     Nexus CLI expects token units, not base units.
+        amount_usdd_units: Amount in BASE units (e.g. 10500000 for 10.5 USDD)
         reference: Unique reference number for this debit
-    
+
     Returns:
         Tuple of (success, txid_or_None)
     """
     if not config.NEXUS_PIN:
         return (False, None)
-    
-    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_usdd}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
+
+    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     # Use a generous, consistent timeout: a debit killed mid-flight may still execute
     # on the node, which would desynchronize state and risk a double payout.
     code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
@@ -238,15 +252,16 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             continue
         
         # Case 3: Transaction fully confirmed
-        # Recalculate USDD amount from USDC (same fee logic as debit)
-        amount_usdd_debited = get_usdd_send_amount(amount_usdc_units or 0)
-        
-        # Bug #10 fix: Track fees when debit is confirmed
-        # Fee = amount_usdc_units (base units) - amount_usdd_debited (token units) * 10^decimals
+        # Recalculate USDD amount from USDC (same fee logic as the debit), in BASE UNITS.
+        usdd_out_base = get_usdd_send_amount_units(amount_usdc_units or 0)
+        amount_usdd_debited = float(Decimal(usdd_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
+
+        # Bug #10 fix: Track fees when debit is confirmed.
+        # Both sides are base units (USDC and USDD share decimals at 1:1 parity), so this
+        # is exact integer arithmetic - no float scaling.
         try:
             usdc_in_base = int(amount_usdc_units or 0)
-            usdd_out_base = int(amount_usdd_debited * (10 ** config.USDD_DECIMALS))
-            fee_usdc_units = max(0, usdc_in_base - usdd_out_base)
+            fee_usdc_units = max(0, usdc_in_base - int(usdd_out_base))
             if fee_usdc_units > 0:
                 state_db.add_fee_entry(
                     sig=sig,
@@ -415,8 +430,7 @@ def mint_usdd_to_local(amount_units: int, reference: str | int = "REBALANCE") ->
     acct = getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None)
     if not acct or amount_units <= 0:
         return False
-    tokens = amount_units / (10 ** config.USDD_DECIMALS)
-    ok, _txid = debit_usdd_with_txid(acct, tokens, reference)
+    ok, _txid = debit_usdd_with_txid(acct, int(amount_units), reference)
     return ok
 
 

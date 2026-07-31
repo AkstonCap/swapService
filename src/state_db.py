@@ -195,6 +195,10 @@ def init_db():
     _utx_cols = {row[1] for row in cursor.fetchall()}
     if "sig" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN sig TEXT")
+    # Exact base-unit amount. `amount_usdd` is REAL, so deriving a refund from it
+    # round-trips through binary float (8.29 -> 8289999 base units, a 1-unit shortfall).
+    if "amount_usdd_units" not in _utx_cols:
+        cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN amount_usdd_units INTEGER")
 
     # unprocessed_sigs.reference records the Nexus debit reference BEFORE the debit is
     # attempted, so a crash or an unparsed CLI response can be resolved against the
@@ -1173,15 +1177,16 @@ def add_unprocessed_txid(
     status: str | None = None,
     receival_account: str | None = None,
     sig: str | None = None,
+    amount_usdd_units: int | None = None,
 ) -> None:
     """Add or update an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO unprocessed_txids
-        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig))
+        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units))
     conn.commit()
     conn.close()
 
@@ -1195,7 +1200,7 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig
+        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units
         FROM unprocessed_txids
         ORDER BY timestamp ASC
         LIMIT ?
@@ -1327,7 +1332,8 @@ def get_unprocessed_txids_as_dicts(limit: int = 1000) -> list[dict]:
             "confirmations": t[6],  # confirmations_credit
             "comment": t[7],  # status
             "receival_account": t[8] if len(t) > 8 else None,
-            "sig": t[9] if len(t) > 9 else None
+            "sig": t[9] if len(t) > 9 else None,
+            "amount_usdd_units": t[10] if len(t) > 10 else None
         }
         for t in tuples
     ]

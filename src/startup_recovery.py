@@ -16,7 +16,7 @@ Design notes:
  - Reference seeding heuristic: choose max(reference found in database OR Nexus) + 1.
 """
 from __future__ import annotations
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from . import config, solana_client, nexus_client, state_db
 import time
 
@@ -138,7 +138,9 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
                 to_address=treasury_addr,
                 owner_from_address=owner,
                 confirmations_credit=conf,
-                status="pending_receival"
+                status="pending_receival",
+                # Exact base units: refunds are derived from this, not the REAL column.
+                amount_usdd_units=int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)),
             )
             unprocessed_txids.add(txid)
             added_count += 1
