@@ -7,6 +7,8 @@
 This document is a fresh, independent assessment. It complements—rather than restates—the existing [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) (a prior code/doc audit, mostly addressed) and [`SECURITY.md`](SECURITY.md) (an operator hardening guide). Where this review found issues **not** covered by those documents, they are flagged as **new**.
 
 > **Update (2026-06-14):** Most findings below have since been remediated in code. See [§8 Resolution Status](#8-resolution-status-2026-06-14) for the per-finding state and what remains open. The body of the report (§3–§4) preserves the original findings for context.
+>
+> **See also (2026-06-15):** [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md) — a whole-system risk assessment (trust model, solvency, availability, economics, operator tooling). It reports **five further Critical fund-loss / unbacked-mint defects** not covered here, and is the document to read before any mainnet deployment.
 
 ---
 
