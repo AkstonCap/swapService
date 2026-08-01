@@ -19,6 +19,14 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 
 **Recommendation: do not run this against mainnet funds until Tier 1 is resolved.** B-1, B-2 and B-4 trigger during normal traffic, not under attack.
 
+> **Status update (2026-06-15): every finding B-1 through B-21 has been fixed in code and
+> unit-tested.** The systemic "documented but not implemented" gap in §7 is closed: the
+> retry cooldown, USDD quarantine, action reservations and on-chain debit verification now
+> actually run, and the fee/minimum documentation matches the code. The remaining blocker
+> is **evidence, not code** — none of it has been exercised against a live Solana or Nexus
+> node. See §9. B-27 (no test suite / CI) also remains open: the verification so far is
+> ad-hoc scripts, not a committed regression suite.
+
 | Tier | Theme | Count |
 |------|-------|-------|
 | 1 | Fund loss / unbacked mint (Critical) | 5 |
@@ -232,7 +240,9 @@ Deposits are ingested at `confirmed` — supermajority-voted but **not rooted**,
 
 ---
 
-### 🟠 B-8 — The heartbeat asset is both a single point of failure and the trust anchor for scanning
+### 🟠 B-8 — The heartbeat asset is both a single point of failure and the trust anchor for scanning — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** an unreadable heartbeat no longer halts ingestion silently. The poller falls back to the last known-good waterline in the local `heartbeat` table and raises a `heartbeat_unreadable_fallback` alert; only when there is no local fallback does it stop, and then it fires `heartbeat_unreadable` at CRITICAL. A waterline that is somehow ahead of now (corrupt or hand-edited asset) is clamped instead of silently skipping every future deposit.
 
 **Where:** `src/swap_solana.py:26-31`
 
@@ -266,7 +276,9 @@ There is **no** multisig, threshold signing or HSM; **no** per-transaction, dail
 
 ---
 
-### 🟠 B-10 — The documented retry cooldown does not exist
+### 🟠 B-10 — The documented retry cooldown does not exist — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** `should_attempt()` now honours `ACTION_RETRY_COOLDOWN_SEC` (it stored `last_timestamp` but never read it) and defaults `max_attempts` from `config.MAX_ACTION_ATTEMPTS` rather than a hardcoded 3. Crucially, "cooling down" and "budget spent" are now distinguishable: a new `attempts_exhausted()` drives the terminal quarantine/refund decision, so a cooldown no longer causes a premature quarantine. All call sites updated.
 
 **Where:** `config.py:51` (`ACTION_RETRY_COOLDOWN_SEC`, default 300) — **never referenced in `src/`**
 
@@ -276,7 +288,9 @@ Related: no caller passes `config.MAX_ACTION_ATTEMPTS` to `should_attempt()`; al
 
 ---
 
-### 🟠 B-11 — USDD-side quarantine is not implemented
+### 🟠 B-11 — USDD-side quarantine is not implemented — ✅ **FIXED (2026-06-15)**
+
+> **Resolution:** `nexus_client.quarantine_usdd()` actually transfers the credited USDD from the treasury to `NEXUS_USDD_QUARANTINE_ACCOUNT`, and every quarantine path in `swap_nexus` now routes through a `_quarantine_txid()` helper that moves the funds, records the full row, and alerts. If the quarantine account is unset the status is recorded as `quarantined (USDD NOT moved)` rather than implying segregation that did not happen — so the backing ratio is no longer silently overstated.
 
 **Where:** `config.py:39` (`NEXUS_USDD_QUARANTINE_ACCOUNT`) — **never referenced in `src/`**
 
@@ -298,15 +312,15 @@ No lockfile, PID file or `flock` anywhere. A double `systemd` start, a manual ru
 
 | ID | Risk | Detail |
 |----|------|--------|
-| **B-13** | **The advertised minimum deposit pays out nothing** | `MIN_DEPOSIT_USDC = 0.100101` against a `0.1` flat fee leaves `0.0000009` USDD — **below one base unit (1e-6)** — yet it passes the `net_amount > 0` check and is recorded as a *successful swap*. `README.md:30-32` publishes that minimum without noting the output is zero. The USDD→USDC minimum (`0.500501`) sits essentially *at* its own break-even too (`FLAT_FEE_USDC` 0.5). Both minimums must be set meaningfully above their fees. |
-| **B-14** | **Published fee is 5× understated** | `FLAT_FEE_USDC` is `0.5` in `config.py:84` but documented as `0.1` in `.env.example:80`, `CONFIG.md:73` and `README.md:339,549`. It applies to the USDD→USDC direction, so users are quoted a fee one-fifth of the real one. `NEXUS_CONGESTION_FEE_USDD` is likewise 10× off between code (`0.001`) and `.env.example`/README (`0.01`). |
-| **B-15** | **Detection without remediation or alerting** | Backing checks and balance reconciliation only `print()` to stdout (`main.py:139,207`). There is **no alerting channel of any kind** — no webhook, email or pager. An unbacked-mint discrepancy, a backing pause, or a wedged poller is invisible unless a human is watching a terminal. |
-| **B-16** | **Backing pause freezes refunds too** | When `maintain_backing_and_bounds()` returns `True` the loop `continue`s, halting *all* processing including refunds and quarantine of already-stuck user funds, with no notification and no manual override. |
-| **B-17** | **No maximum swap size or liquidity pre-check** | No `MAX_SWAP` or per-address limit. Oversized deposits are accepted and only fail at payout, dropping into refund/quarantine; a single large or hostile deposit can consume the vault or wedge the queue. |
-| **B-18** | **Two fee ledgers that never reconcile** | `fees.py` maintains `fees_state.json` + `fee_events.jsonl` while `state_db.fee_entries` records fees separately (9 call sites). Neither is reconciled against the other or against on-chain balances, so fee figures are not trustworthy for accounting. |
-| **B-19** | **The quarantine viewer structurally reports 0 USDD** | `quarantine_viewer.py:270,283` sums `amount_usdd` from `quarantined_txids`, but the only writer — `state_db.mark_quarantined_txid()` (`state_db.py:590`) — inserts **only `(txid, sig)`**. Every other column is permanently `NULL`, so quarantined USDD always displays as **0**. An operator sizing the stuck-funds backlog concludes nothing is at risk. The same table's `txid` column is also fed Solana signatures by `startup_recovery.py:229,313` while the viewer labels it "Nexus TxID". |
-| **B-20** | **Operator recovery tooling is injectable via attacker-controlled memos** | Depositor-supplied `memo` text is rendered raw to the terminal (`quarantine_viewer.py:100`) and written unescaped to CSV (`:304`). A memo containing ANSI escapes (`\x1b[2J`, `\r`) can erase or forge rows in the very table used to authorise manual fund recovery; one starting with `=`/`+`/`-` becomes a live formula on CSV export. Exports also land in the CWD with no `csv` pattern in `.gitignore`, so customer addresses/amounts can be committed. |
-| **B-21** | **`create_heartbeat_asset.py` spends funds with no guards and hides failure** | It issues `assets/create/asset` (~1 NXS, immutable once created) with **no confirmation, no `--dry-run`, no idempotency check and no network guard**; re-running burns another NXS and creates a conflicting asset. It checks only `returncode != 0`, so a Nexus CLI error returned in a JSON body **exits 0 with a success message**. It also passes the PIN in `argv`, masks it positionally (`cmd[:-1] + ["pin=***"]`, safe only by accident), and echoes raw CLI output that may contain the PIN. |
+| **B-13** ✅ | **FIXED** — config now enforces a floor of 2x the flat fee for both minimums and logs when it raises a configured value; docs corrected. | `MIN_DEPOSIT_USDC = 0.100101` against a `0.1` flat fee leaves `0.0000009` USDD — **below one base unit (1e-6)** — yet it passes the `net_amount > 0` check and is recorded as a *successful swap*. `README.md:30-32` publishes that minimum without noting the output is zero. The USDD→USDC minimum (`0.500501`) sits essentially *at* its own break-even too (`FLAT_FEE_USDC` 0.5). Both minimums must be set meaningfully above their fees. |
+| **B-14** ✅ | **FIXED** — `FLAT_FEE_USDC` documented as 0.5 (and as the USDD→USDC fee), `NEXUS_CONGESTION_FEE_USDD` as 0.001, across README/CONFIG/.env.example. | `FLAT_FEE_USDC` is `0.5` in `config.py:84` but documented as `0.1` in `.env.example:80`, `CONFIG.md:73` and `README.md:339,549`. It applies to the USDD→USDC direction, so users are quoted a fee one-fifth of the real one. `NEXUS_CONGESTION_FEE_USDD` is likewise 10× off between code (`0.001`) and `.env.example`/README (`0.01`). |
+| **B-15** ✅ | **FIXED** — new `src/alerts.py` with webhook + command channels, per-event rate limiting, PIN redaction and off-hot-path delivery; wired into backing pause, unbacked-mint discrepancy, heartbeat failure, quarantine and cap breaches. | Backing checks and balance reconciliation only `print()` to stdout (`main.py:139,207`). There is **no alerting channel of any kind** — no webhook, email or pager. An unbacked-mint discrepancy, a backing pause, or a wedged poller is invisible unless a human is watching a terminal. |
+| **B-16** ✅ | **FIXED** — pausing no longer `continue`s the loop. Pollers run in `paused` mode: no new debits and no new USDC sends, but refunds, quarantine and confirmations keep running. A failed backing check now fails safe to paused. | When `maintain_backing_and_bounds()` returns `True` the loop `continue`s, halting *all* processing including refunds and quarantine of already-stuck user funds, with no notification and no manual override. |
+| **B-17** ✅ | **FIXED** — `MAX_SWAP_USDC`/`MAX_SWAP_USDD` refuse oversized items into the refund path, and USDD→USDC now checks vault liquidity before marking a swap ready (holding it rather than burning attempts). | No `MAX_SWAP` or per-address limit. Oversized deposits are accepted and only fail at payout, dropping into refund/quarantine; a single large or hostile deposit can consume the vault or wedge the queue. |
+| **B-18** ✅ | **FIXED** — the DB `fee_entries` table is now the single source of truth; `fees.add_usdc_fee()` writes to it, `get_usdc_fees()` reads from it, and `reconcile_accounting()` reports drift against the legacy JSON without silently "correcting" either side. | `fees.py` maintains `fees_state.json` + `fee_events.jsonl` while `state_db.fee_entries` records fees separately (9 call sites). Neither is reconciled against the other or against on-chain balances, so fee figures are not trustworthy for accounting. |
+| **B-19** ✅ | **FIXED** — `mark_quarantined_txid()` persists the full row (timestamp/amount/from/to/owner/status) preserving prior detail on re-mark, and the viewer formats token amounts exactly instead of `int(float(x)*1e6)`. Reconstructed USDC-side quarantines now go to `quarantined_sigs` instead of being mislabelled as Nexus txids. | `quarantine_viewer.py:270,283` sums `amount_usdd` from `quarantined_txids`, but the only writer — `state_db.mark_quarantined_txid()` (`state_db.py:590`) — inserts **only `(txid, sig)`**. Every other column is permanently `NULL`, so quarantined USDD always displays as **0**. An operator sizing the stuck-funds backlog concludes nothing is at risk. The same table's `txid` column is also fed Solana signatures by `startup_recovery.py:229,313` while the viewer labels it "Nexus TxID". |
+| **B-20** ✅ | **FIXED** — `sanitize()` strips control/ANSI characters from all untrusted text before it reaches a terminal, `csv_safe()` neutralises `= + - @` formula leaders on export, and CSV exports are git-ignored. `--usdc --usdd` together no longer silently hides the USDD table. | Depositor-supplied `memo` text is rendered raw to the terminal (`quarantine_viewer.py:100`) and written unescaped to CSV (`:304`). A memo containing ANSI escapes (`\x1b[2J`, `\r`) can erase or forge rows in the very table used to authorise manual fund recovery; one starting with `=`/`+`/`-` becomes a live formula on CSV export. Exports also land in the CWD with no `csv` pattern in `.gitignore`, so customer addresses/amounts can be committed. |
+| **B-21** ✅ | **FIXED** — added `--dry-run`, a typed confirmation (`--yes` for non-interactive), and an existing-asset probe (`--force` to override). A JSON error body with exit 0 now returns non-zero, as does an unparsable address. The PIN is redacted by key rather than position and scrubbed from echoed CLI output. Field names are validated and rejected if they collide with Nexus API parameters such as `pin`. Success output now points at `NEXUS_HEARTBEAT_ASSET_NAME`, which is what the service actually reads. | It issues `assets/create/asset` (~1 NXS, immutable once created) with **no confirmation, no `--dry-run`, no idempotency check and no network guard**; re-running burns another NXS and creates a conflicting asset. It checks only `returncode != 0`, so a Nexus CLI error returned in a JSON body **exits 0 with a success message**. It also passes the PIN in `argv`, masks it positionally (`cmd[:-1] + ["pin=***"]`, safe only by accident), and echoes raw CLI output that may contain the PIN. |
 
 ---
 

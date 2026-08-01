@@ -1,5 +1,5 @@
 from decimal import Decimal
-from . import config, state_db, nexus_client, solana_client, fees
+from . import config, state_db, nexus_client, solana_client, fees, alerts
 
 # Lightweight structured logging for deposit lifecycle only
 def _log(event: str, **fields):
@@ -60,23 +60,49 @@ def _advance_solana_waterline(current_wline, poll_start, fetch_ok: bool, deferre
         nexus_client.update_heartbeat_asset(int(poll_start), None, None)
 
 
-def poll_solana_deposits():
+def poll_solana_deposits(paused: bool = False):
+    """Poll Solana. When `paused` (backing deficit), stop taking on NEW swap exposure
+    but keep returning money: refunds, quarantines and confirmations still run."""
     from solana.rpc.api import Client
     from solders.signature import Signature
     try:
         import time as _time
         heartbeat = nexus_client.get_heartbeat_asset()
         if not heartbeat:
-            return
+            # Fall back to the last known-good local waterline instead of halting
+            # silently - a Nexus outage previously stopped USDC ingestion entirely
+            # while the service still looked healthy.
+            hb_row = state_db.get_heartbeat(getattr(config, "NEXUS_HEARTBEAT_ASSET_NAME", "") or "")
+            local_wl = hb_row[2] if hb_row and len(hb_row) > 2 else None
+            if local_wl is None:
+                alerts.critical("heartbeat_unreadable",
+                                "heartbeat asset unreadable and no local waterline; "
+                                "Solana ingestion is HALTED")
+                return
+            alerts.warning("heartbeat_unreadable_fallback",
+                           "heartbeat asset unreadable; using last known-good local waterline",
+                           waterline=local_wl)
+            heartbeat = {getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD",
+                                 "last_safe_timestamp_solana"): local_wl}
         # Read via the configured field name (tolerating the legacy one).
         wline_sol = heartbeat.get(getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana"))
         if wline_sol is None:
             wline_sol = heartbeat.get("last_safe_timestamp_solana")
         if wline_sol is None:
-            _log("POLL_SOLANA_HALTED", reason="heartbeat missing solana waterline field")
+            alerts.critical("heartbeat_missing_waterline",
+                            "heartbeat asset has no Solana waterline field; ingestion HALTED",
+                            expected_field=getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", None))
             return
-        
+
         poll_start = _time.time()
+
+        # Clamp a waterline that is somehow ahead of now (corrupt or hand-edited asset):
+        # left alone it would skip every future deposit.
+        if int(wline_sol) > int(poll_start):
+            alerts.warning("waterline_in_future",
+                           "Solana waterline is ahead of now; clamping",
+                           waterline=int(wline_sol), now=int(poll_start))
+            wline_sol = int(poll_start) - int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 120))
 
         # Deposit ingestion is NEVER gated on the vault balance delta.
         # The vault is debited by USDD->USDC payouts, refunds and quarantine moves as
@@ -87,26 +113,32 @@ def poll_solana_deposits():
         fetch_ok = False
         unprocessed_deposits_added = 0
         deferred_ts = None  # oldest deposit withheld pending finalization, if any
-        try:
-            # Prefer Helius enriched RPC to batch-fetch txs + memos in 1–2 calls; fallback to existing scanner.
-            usdc_deposits = solana_client.fetch_incoming_usdc_deposits_via_helius(
-                str(config.VAULT_USDC_ACCOUNT),
-                since_ts=int(wline_sol),
-                min_units=getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0),
-                limit=getattr(config, "POLL_HELIUS_LIMIT", 200),
-            )
+        if paused:
+            # Backing deficit: take on no NEW exposure, but still run the refund,
+            # quarantine and confirmation passes below so user funds keep moving.
+            _log("USDC_INGEST_PAUSED", reason="backing deficit")
+        else:
+            try:
+                # Prefer Helius enriched RPC to batch-fetch txs + memos in 1–2 calls; fallback to existing scanner.
+                usdc_deposits = solana_client.fetch_incoming_usdc_deposits_via_helius(
+                    str(config.VAULT_USDC_ACCOUNT),
+                    since_ts=int(wline_sol),
+                    min_units=getattr(config, "MIN_DEPOSIT_USDC_UNITS", 0),
+                    limit=getattr(config, "POLL_HELIUS_LIMIT", 200),
+                )
 
-            # Consume the enriched tuples directly (memo/from/amount already present);
-            # no per-deposit re-fetch, so the Helius fast path stays 1-2 RPC calls.
-            unprocessed_deposits_added, deferred_ts = solana_client.process_helius_deposits(usdc_deposits, True)
-            fetch_ok = True
-            print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
-        except Exception as e:
-            # A failed enumeration must not advance the waterline (see _advance_solana_waterline).
-            _log("USDC_FETCH_FAILED", error=str(e))
+                # Consume the enriched tuples directly (memo/from/amount already present);
+                # no per-deposit re-fetch, so the Helius fast path stays 1-2 RPC calls.
+                unprocessed_deposits_added, deferred_ts = solana_client.process_helius_deposits(usdc_deposits, True)
+                fetch_ok = True
+                print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
+            except Exception as e:
+                # A failed enumeration must not advance the waterline (see _advance_solana_waterline).
+                _log("USDC_FETCH_FAILED", error=str(e))
 
-        [proc_count_swap, proc_count_refund, proc_count_quar, proc_count_mic] = solana_client.process_unprocessed_usdc_deposits(1000, 8.0)
-        print(f"Debited, awaiting confirmation: {proc_count_swap}, \nTo be refunded: {proc_count_refund}, \nTo be quarantined: {proc_count_quar}, \nMicro-sigs found: {proc_count_mic}\n")
+        if not paused:
+            [proc_count_swap, proc_count_refund, proc_count_quar, proc_count_mic] = solana_client.process_unprocessed_usdc_deposits(1000, 8.0)
+            print(f"Debited, awaiting confirmation: {proc_count_swap}, \nTo be refunded: {proc_count_refund}, \nTo be quarantined: {proc_count_quar}, \nMicro-sigs found: {proc_count_mic}\n")
 
         refunds = solana_client.process_usdc_deposits_refunding(1000, 8.0)
         print(f"Processed refunds, awaiting confirmation: {refunds}\n") if refunds > 0 else None

@@ -355,6 +355,34 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     return resolved
 
 
+def quarantine_usdd(txid: str, amount_usdd_units: int, reason: str = "") -> bool:
+    """Actually MOVE quarantined USDD out of the treasury.
+
+    README/CONFIG/SETUP/SECURITY all state that USDD from exhausted refunds is moved to
+    NEXUS_USDD_QUARANTINE_ACCOUNT so it stops counting toward the backing ratio. Nothing
+    ever moved it - only a DB status was written - so the funds stayed in the live
+    treasury and the ratio was overstated by exactly the quarantined amount.
+
+    Returns True if the transfer succeeded (or there was nothing to move).
+    """
+    dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
+    if not dest:
+        print("[quarantine_usdd] NEXUS_USDD_QUARANTINE_ACCOUNT not set; USDD stays in treasury "
+              "and will keep counting toward the backing ratio")
+        return False
+    if int(amount_usdd_units or 0) <= 0:
+        return True
+    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
+    if not treas:
+        print("[quarantine_usdd] NEXUS_USDD_TREASURY_ACCOUNT not set")
+        return False
+    ref = f"quarantine:{txid}" if txid else (reason or "quarantine")
+    ok = transfer_usdd_between_accounts(treas, dest, int(amount_usdd_units), ref[:120])
+    if ok:
+        print(f"[quarantine_usdd] moved {amount_usdd_units} base units to {dest} ({ref})")
+    return ok
+
+
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     """Refund USDD by transferring from treasury to the recipient (amount in base units)."""
     # Check if this refund was already processed by checking for txid in reason

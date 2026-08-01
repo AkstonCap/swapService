@@ -117,13 +117,21 @@ NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 
 # Anti-DoS protections
 MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.100101")  # minimum deposit to process as swap
-MIN_DEPOSIT_USDC_UNITS = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
+_MIN_DEPOSIT_USDC_CONFIGURED = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
+# A minimum at or below the flat fee means the user nets ~nothing while the swap is still
+# recorded as successful (0.100101 USDC against a 0.1 fee netted 0.0000009 USDD - below one
+# base unit). Enforce a floor of 2x the flat fee so the output is always at least the fee.
+MIN_DEPOSIT_USDC_UNITS = max(_MIN_DEPOSIT_USDC_CONFIGURED, 2 * FLAT_FEE_USDC_UNITS_REFUND)
+MIN_DEPOSIT_USDC_RAISED = MIN_DEPOSIT_USDC_UNITS > _MIN_DEPOSIT_USDC_CONFIGURED
 # Minimum USDD credit that is swapped for USDC. Must stay ABOVE the USDD->USDC fee
 # (FLAT_FEE_USDC + dynamic), or the swap nets <= 0 and the whole credit becomes a fee.
 # Keep README.md / CONFIG.md / .env.example in sync with this value: users who follow a
 # documented minimum lower than this one previously had their credit silently destroyed.
 MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.500501")  # minimum credit to process as swap
-MIN_CREDIT_USDD_UNITS = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+_MIN_CREDIT_USDD_CONFIGURED = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+# Same floor rule as MIN_DEPOSIT_USDC: this direction's flat fee is FLAT_FEE_USDC.
+MIN_CREDIT_USDD_UNITS = max(_MIN_CREDIT_USDD_CONFIGURED, 2 * FLAT_FEE_USDC_UNITS)
+MIN_CREDIT_USDD_RAISED = MIN_CREDIT_USDD_UNITS > _MIN_CREDIT_USDD_CONFIGURED
 # Anti-DoS dust floor. Credits BELOW this are ignored entirely (no state, no accounting).
 # Credits between this floor and MIN_CREDIT_USDD are real user funds: they are recorded
 # and booked as fees rather than dropped without trace.
@@ -162,6 +170,24 @@ FEES_USDD_MAX = int(os.getenv("FEES_USDD_MAX", "0"))
 
 # Quarantine account for failed refunds (USDC token account we own)
 USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
+
+# --- Exposure caps (defence in depth against a bug or a compromised key) ---
+# Largest single swap accepted. Oversized items are refunded rather than paid out.
+# 0 disables the cap.
+MAX_SWAP_USDC = os.getenv("MAX_SWAP_USDC", "0")
+MAX_SWAP_USDC_UNITS = _to_units(MAX_SWAP_USDC, USDC_DECIMALS)
+MAX_SWAP_USDD = os.getenv("MAX_SWAP_USDD", "0")
+MAX_SWAP_USDD_UNITS = _to_units(MAX_SWAP_USDD, USDD_DECIMALS)
+# Rolling 24h ceiling on total outbound USDC. Enforced independently of the polling loop,
+# so a runaway loop or a stolen key cannot drain the vault in one go. 0 disables.
+DAILY_PAYOUT_CAP_USDC = os.getenv("DAILY_PAYOUT_CAP_USDC", "0")
+DAILY_PAYOUT_CAP_USDC_UNITS = _to_units(DAILY_PAYOUT_CAP_USDC, USDC_DECIMALS)
+
+# --- Alerting (operator notification) ---
+# Without one of these, discrepancies/pauses/halts are only visible on stdout.
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")      # POSTed a JSON body
+ALERT_COMMAND = os.getenv("ALERT_COMMAND")              # argv0; receives JSON on stdin
+ALERT_MIN_INTERVAL_SEC = int(os.getenv("ALERT_MIN_INTERVAL_SEC", "300"))  # per-event dedupe
 
 # Target accumulation ratio: 1 SOL for every 10000 NXS by default
 TARGET_SOL_PER_NXS_NUM = int(os.getenv("TARGET_SOL_PER_NXS_NUM", "1"))

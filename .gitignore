@@ -141,6 +141,9 @@ vault-keypair.json
 swap_service.db
 fees_state.json
 fee_events.jsonl
+quarantine_*.csv
+pending_*.csv
+*.lock
 
 .venv
 env/

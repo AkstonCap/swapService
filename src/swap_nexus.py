@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from . import config, state_db, solana_client, nexus_client, fees
+from . import config, state_db, solana_client, nexus_client, fees, alerts
 import time
 
 # Allowed lifecycle comments for unprocessed txids
@@ -74,6 +74,41 @@ def _row_amount_units(r: dict) -> int:
     return int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
 
 
+def _quarantine_txid(r: dict, reason: str = "") -> None:
+    """Quarantine a stuck USDD credit: MOVE the funds, then record the full row.
+
+    Two bugs are fixed here. The funds were never actually moved (only a status string
+    was written), so quarantined USDD kept counting toward the backing ratio; and the
+    row was written with only (txid, sig), so every other column stayed NULL and the
+    operator's quarantine viewer always reported 0 USDD.
+    """
+    txid = r.get("txid")
+    try:
+        amt_units = _row_amount_units(r)
+    except Exception:
+        amt_units = 0
+    moved = False
+    try:
+        moved = nexus_client.quarantine_usdd(txid, amt_units, reason)
+    except Exception as e:
+        _log("USDD_QUARANTINE_MOVE_ERROR", txid=txid, error=str(e))
+    state_db.mark_quarantined_txid(
+        txid=txid,
+        sig="",
+        timestamp=r.get("ts"),
+        amount_usdd=float(r.get("amount_usdd") or 0),
+        from_address=r.get("from"),
+        to_address=r.get("to"),
+        owner=r.get("owner"),
+        status=USDD_STATUS_QUARANTINED if moved else "quarantined (USDD NOT moved)",
+    )
+    alerts.warning(
+        "usdd_quarantined",
+        reason or "USDD credit quarantined for manual review",
+        txid=txid, amount_units=amt_units, funds_moved=moved,
+    )
+
+
 def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     """Subtract a fixed Nexus congestion fee (configured in USDD token units)."""
     try:
@@ -83,8 +118,11 @@ def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     out = amount_dec - fee_dec
     return out if out > 0 else Decimal(0)
 
-def process_unprocessed_txids():
+def process_unprocessed_txids(paused: bool = False):
     """Process queued USDD→USDC entries as soon as possible.
+
+    When `paused` (backing deficit) no NEW USDC is sent out, but refunds, quarantine
+    and confirmation passes still run so user funds are never frozen by the pause.
     
     Steps 3-5 from spec:
     - Resolve receival_account via assets
@@ -166,9 +204,9 @@ def process_unprocessed_txids():
                             state_db.remove_unprocessed_txid(txid)
                         else:
                             attempts = state_db.get_attempt_count(refund_key)
-                            if attempts >= config.MAX_ACTION_ATTEMPTS:
+                            if state_db.attempts_exhausted(refund_key):
                                 # Quarantine
-                                state_db.mark_quarantined_txid(txid=txid, sig="")
+                                _quarantine_txid(r)
                                 state_db.remove_unprocessed_txid(txid)
                                 _log("USDD_REFUND_QUARANTINED", txid=txid, reason="invalid_receival_account")
                             else:
@@ -199,9 +237,9 @@ def process_unprocessed_txids():
                                 state_db.remove_unprocessed_txid(txid)
                             else:
                                 attempts = state_db.get_attempt_count(refund_key)
-                                if attempts >= config.MAX_ACTION_ATTEMPTS:
+                                if state_db.attempts_exhausted(refund_key):
                                     # Quarantine
-                                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                                    _quarantine_txid(r)
                                     state_db.remove_unprocessed_txid(txid)
                                     _log("USDD_REFUND_QUARANTINED", txid=txid, reason="unresolved_timeout")
                                 else:
@@ -212,8 +250,8 @@ def process_unprocessed_txids():
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
             unprocessed = state_db.get_unprocessed_txids_as_dicts()
             
-            # Priority 2: Send USDC for ready entries
-            for r in list(unprocessed):
+            # Priority 2: Send USDC for ready entries (skipped while paused)
+            for r in list(unprocessed) if not paused else []:
                 if time.time() - process_start > PROCESS_BUDGET_SEC:
                     _log("USDD_PROCESS_BUDGET_EXCEEDED", stage="usdc_sending")
                     break
@@ -287,18 +325,37 @@ def process_unprocessed_txids():
                 
                 if net_usdc_units <= 0:
                     continue
-                
+
+                # Liquidity pre-check: do not promise a payout the vault cannot cover.
+                # Previously an underfunded vault only failed at send time, burning
+                # attempts and pushing a good swap into the refund path.
+                try:
+                    vault_units = solana_client.get_token_account_balance(
+                        str(config.VAULT_USDC_ACCOUNT), max_age_sec=5)
+                    if vault_units < net_usdc_units:
+                        alerts.critical(
+                            "insufficient_vault_liquidity",
+                            "vault USDC cannot cover a ready swap; holding it (not failing)",
+                            txid=txid, needed_units=net_usdc_units, vault_units=vault_units,
+                        )
+                        continue  # stay READY; retry when the vault is topped up
+                except Exception as e:
+                    _log("USDD_LIQUIDITY_CHECK_ERROR", txid=txid, error=str(e))
+
                 # Mark as sending before attempting
                 state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_SENDING)
-                
+
                 # Attempt to send USDC
                 send_key = f"usdc_send:{txid}"
                 if not state_db.should_attempt(send_key):
-                    # Max attempts exceeded -> refund path
-                    state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
-                    _log("USDD_SEND_MAX_ATTEMPTS", txid=txid)
+                    if state_db.attempts_exhausted(send_key):
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
+                        _log("USDD_SEND_MAX_ATTEMPTS", txid=txid)
+                    else:
+                        # Only cooling down - keep it READY and retry on a later cycle.
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_READY)
                     continue
-                
+
                 state_db.record_attempt(send_key)
                 
                 try:
@@ -435,7 +492,7 @@ def process_unprocessed_txids():
                 
                 if not sender:
                     # Can't refund without sender address - quarantine
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    _quarantine_txid(r)
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_COLLECT_REFUND_NO_SENDER", txid=txid)
                     continue
@@ -461,15 +518,14 @@ def process_unprocessed_txids():
                         _log("USDD_COLLECT_REFUND_SUCCESS", txid=txid)
                     else:
                         attempts = state_db.get_attempt_count(refund_key)
-                        if attempts >= config.MAX_ACTION_ATTEMPTS:
-                            state_db.mark_quarantined_txid(txid=txid, sig="")
+                        if state_db.attempts_exhausted(refund_key):
+                            _quarantine_txid(r)
                             state_db.remove_unprocessed_txid(txid)
                             _log("USDD_COLLECT_REFUND_QUARANTINED", txid=txid, attempts=attempts)
                         else:
                             _log("USDD_COLLECT_REFUND_RETRY", txid=txid, attempts=attempts)
-                else:
-                    # Max attempts exceeded during previous calls
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                elif state_db.attempts_exhausted(refund_key):
+                    _quarantine_txid(r, "collect refund attempts exhausted")
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_COLLECT_REFUND_MAX_ATTEMPTS", txid=txid)
         
@@ -487,7 +543,7 @@ def process_unprocessed_txids():
                 sender = r.get("from")
                 
                 if not sender:
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    _quarantine_txid(r)
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_REFUND_PENDING_NO_SENDER", txid=txid)
                     continue
@@ -512,12 +568,12 @@ def process_unprocessed_txids():
                         _log("USDD_REFUND_PENDING_SUCCESS", txid=txid)
                     else:
                         attempts = state_db.get_attempt_count(refund_key)
-                        if attempts >= config.MAX_ACTION_ATTEMPTS:
-                            state_db.mark_quarantined_txid(txid=txid, sig="")
+                        if state_db.attempts_exhausted(refund_key):
+                            _quarantine_txid(r)
                             state_db.remove_unprocessed_txid(txid)
                             _log("USDD_REFUND_PENDING_QUARANTINED", txid=txid)
                 else:
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    _quarantine_txid(r)
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_REFUND_PENDING_MAX_ATTEMPTS", txid=txid)
             
@@ -738,6 +794,25 @@ def poll_nexus_usdd_deposits():
                              minimum=str(min_credit_threshold), sender=sender)
                         continue
 
+
+                    # Per-swap size cap: queue oversized credits for refund rather than
+                    # committing the vault to a payout that large.
+                    max_swap_usdd = int(getattr(config, "MAX_SWAP_USDD_UNITS", 0) or 0)
+                    credit_units = int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                    if max_swap_usdd > 0 and credit_units > max_swap_usdd:
+                        owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        state_db.add_unprocessed_txid(
+                            txid=txid, timestamp=ts, amount_usdd=float(amount_dec),
+                            from_address=sender, to_address=to_addr, owner_from_address=owner,
+                            confirmations_credit=conf, status=USDD_STATUS_REFUND_PENDING,
+                            amount_usdd_units=credit_units,
+                        )
+                        unprocessed_txids.add(txid)
+                        processed_count += 1
+                        alerts.warning("swap_over_cap",
+                                       "USDD credit exceeds MAX_SWAP_USDD; queued for refund",
+                                       txid=txid, amount_units=credit_units, cap_units=max_swap_usdd)
+                        continue
 
                     flat_usdd_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
                     dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))

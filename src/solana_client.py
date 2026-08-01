@@ -582,6 +582,18 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 proc_count_refund += 1
                 continue
 
+            # 5b. Per-swap size cap: refund oversized deposits rather than minting
+            # against them. Bounds the blast radius of a bug or a hostile deposit.
+            max_swap = int(getattr(config, "MAX_SWAP_USDC_UNITS", 0) or 0)
+            if max_swap > 0 and int(amount_usdc or 0) > max_swap:
+                from . import alerts
+                alerts.warning("swap_over_cap",
+                               "deposit exceeds MAX_SWAP_USDC; refunding instead of swapping",
+                               sig=sig, amount_units=int(amount_usdc or 0), cap_units=max_swap)
+                state_db.update_unprocessed_sig_status(sig, "to be refunded")
+                proc_count_refund += 1
+                continue
+
             # 6. Calculate amount minus fees
             # Base units, exact integer math (no float / scientific-notation hazard).
             net_amount = nexus_client.get_usdd_send_amount_units(amount_usdc)
@@ -903,7 +915,26 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
     """
     if amount_base_units <= 0:
         return True, None
-    
+
+    # Rolling 24h exposure cap, enforced at the single choke point every USDC payment
+    # passes through, so a runaway loop or a stolen key cannot drain the vault at once.
+    cap = int(getattr(config, "DAILY_PAYOUT_CAP_USDC_UNITS", 0) or 0)
+    if cap > 0:
+        try:
+            spent = state_db.payouts_since(86400)
+            if spent + int(amount_base_units) > cap:
+                from . import alerts
+                alerts.critical(
+                    "payout_cap_exceeded",
+                    "24h outbound USDC cap would be breached; payment refused",
+                    spent_units=spent, requested_units=int(amount_base_units), cap_units=cap,
+                    destination=str(destination),
+                )
+                return False, None
+        except Exception as e:
+            print(f"[payout_cap] check failed, refusing payment to stay safe: {e}")
+            return False, None
+
     try:
         kp = load_vault_keypair()
         client = _get_client()
@@ -940,10 +971,16 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
         
         # Send transaction
         sig = _build_and_send_legacy_tx(ixs, kp)
-        
+
+        # Record against the rolling cap only after the send actually succeeded.
+        try:
+            state_db.record_payout("usdc_send", int(amount_base_units), sig)
+        except Exception as e:
+            print(f"[payout_ledger] failed to record payout {sig}: {e}")
+
         print(f"Sent USDC tx sig: {sig}")
         return True, sig
-        
+
     except Exception as e:
         print(f"Error sending USDC: {e}")
         return False, None

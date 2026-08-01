@@ -27,13 +27,22 @@ def _save():
         pass
 
 def add_usdc_fee(amount_base_units: int, *, sig: str | None = None, kind: str | None = None):
-    """Accumulate USDC fee (base units) with simple locking and event journal.
-    kind examples: flat, dynamic, fee_only, refund_flat
+    """Record a USDC fee (base units).
+
+    The DATABASE (`fee_entries`) is the single source of truth. This module previously
+    kept a parallel JSON ledger (fees_state.json + fee_events.jsonl) that was never
+    reconciled against the DB, so the two disagreed and neither could be trusted for
+    accounting. The JSON journal is still appended as a legacy mirror only.
     """
     if amount_base_units <= 0:
         return
     if not isinstance(amount_base_units, int):
         amount_base_units = int(amount_base_units)
+    try:
+        state_db.add_fee_entry(sig=sig, txid=None, kind=kind or "generic",
+                               amount_usdc_units=amount_base_units, amount_usdd_units=None)
+    except Exception as e:
+        print(f"[fees] failed to record fee in DB: {e}")
     with _fees_lock:
         _fees_state["usdc_accumulated"] = int(_fees_state.get("usdc_accumulated", 0)) + amount_base_units
         _save()
@@ -50,15 +59,21 @@ def add_usdc_fee(amount_base_units: int, *, sig: str | None = None, kind: str | 
             pass
 
 def get_usdc_fees() -> int:
-    return int(_fees_state.get("usdc_accumulated", 0))
+    """Total USDC fees, read from the authoritative DB ledger."""
+    try:
+        return int(state_db.get_total_fees_collected()[0])
+    except Exception:
+        return int(_fees_state.get("usdc_accumulated", 0))
 
 def reset_usdc_fees():
     _fees_state["usdc_accumulated"] = 0
     _save()
 
 def reconcile_accounting(expected_total: int | None = None) -> dict:
-    """Recalculate fee sum from journal; optionally compare with expected_total.
-    Returns dict with {journal_sum, stored, delta}.
+    """Compare the legacy JSON journal against the authoritative DB ledger.
+
+    Returns {journal_sum, stored, db_total, drift_vs_db, delta}. A non-zero
+    `drift_vs_db` means the legacy files disagree with the database; the DB wins.
     """
     journal_sum = 0
     try:
@@ -85,7 +100,17 @@ def reconcile_accounting(expected_total: int | None = None) -> dict:
         with _fees_lock:
             _fees_state["usdc_accumulated"] = journal_sum
             _save()
-    return {"journal_sum": journal_sum, "stored": stored, "delta": delta}
+    try:
+        db_total = int(state_db.get_total_fees_collected()[0])
+    except Exception:
+        db_total = 0
+    drift_vs_db = journal_sum - db_total
+    if drift_vs_db:
+        # Report, never auto-correct: a silent "fix" would hide whichever side is wrong.
+        print(f"[fees] legacy JSON journal disagrees with the DB ledger by {drift_vs_db} "
+              f"USDC base units (journal={journal_sum} db={db_total}); the DB is authoritative")
+    return {"journal_sum": journal_sum, "stored": stored, "db_total": db_total,
+            "drift_vs_db": drift_vs_db, "delta": delta}
 
 def process_fee_conversions():
     """Policy-driven rebalance when backing ratio > 1.

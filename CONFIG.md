@@ -32,7 +32,7 @@ Legend:
 | NEXUS_CLI_PATH | N | path | ./nexus | Executable path. Ensure chmod +x. |
 | NEXUS_SESSION | N | str |  | If your CLI wrapper enforces session tokens. Not read directly by service code now. |
 | NEXUS_USDD_LOCAL_ACCOUNT | N | str |  | Receives micro USDD credits / congestion fees. |
-| NEXUS_USDD_QUARANTINE_ACCOUNT | N | str |  | Destination for quarantined failed USDD refunds. |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | N | str |  | Destination for quarantined failed USDD refunds. If unset, quarantined USDD stays in the treasury and keeps counting toward the backing ratio. |
 | NEXUS_USDD_FEES_ACCOUNT | N | str |  | If separating fee accrual from local account. |
 | NEXUS_TOKEN_NAME | N | str | USDD | Sanity validation of token name on mint/credit path. |
 | NEXUS_RPC_HOST | N | str | http://127.0.0.1:8399 | Node / gateway host if used. |
@@ -67,13 +67,13 @@ Legend:
 | USDC_CONFIRM_TIMEOUT_SEC | int | 600 | Wait for outbound USDC confirmation. |
 | STALE_ROW_SEC | int | 86400 | Age trigger for stale state record handling. |
 | HEARTBEAT_MIN_INTERVAL_SEC | int | max(10,POLL) | Prevent spam updates (>=10s). |
-| HEARTBEAT_WATERLINE_SAFETY_SEC | int | 0/120 | Safety margin subtract when filtering old items. |
-| ACTION_RETRY_COOLDOWN_SEC | int | 300 | Backoff between attempts. |
+| HEARTBEAT_WATERLINE_SAFETY_SEC | int | 120 | Safety margin subtracted when filtering old items. |
+| ACTION_RETRY_COOLDOWN_SEC | int | 300 | Minimum seconds between retry attempts of the same action (now enforced). |
 
 ## Fees & Thresholds
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| FLAT_FEE_USDC | decimal | 0.1 | Fixed fee on USDC→USDD path (also charged on refunds there). |
+| FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **USDD→USDC** path (deducted from the USDC output). Named for the output token, not the input. |
 | FLAT_FEE_USDD | decimal | 0.1 | Tiny USDD threshold / micro gating. |
 | DYNAMIC_FEE_BPS | int | 10 | Applied both directions on success (0 = disable). |
 | MIN_DEPOSIT_USDC | decimal | 0.100101 | Minimum to treat as swap. Below -> fee policy. |
@@ -82,6 +82,16 @@ Legend:
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
 | NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | Deducted on Nexus refunds (covers on‑chain cost). |
+
+## Exposure Caps & Alerting
+| Var | Type | Default | Notes |
+|-----|------|---------|-------|
+| MAX_SWAP_USDC | decimal | 0 | Largest single USDC→USDD deposit accepted; larger is refunded. 0 disables. |
+| MAX_SWAP_USDD | decimal | 0 | Largest single USDD→USDC credit accepted; larger is refunded. 0 disables. |
+| DAILY_PAYOUT_CAP_USDC | decimal | 0 | Rolling 24h ceiling on total outbound USDC, enforced at the single send choke point. 0 disables. |
+| ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Without a channel, safety signals only reach stdout. |
+| ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. |
+| ALERT_MIN_INTERVAL_SEC | int | 300 | Per-event dedupe window. |
 
 ## Micro / Advanced Handling Flags
 | Var | Type | Default | Notes |
@@ -98,7 +108,7 @@ Legend:
 | NEXUS_HEARTBEAT_ASSET_NAME | str |  | (Optional) Name; may be used by tooling. |
 | HEARTBEAT_WATERLINE_ENABLED | bool | true | Enforce skipping items older than waterline. |
 | HEARTBEAT_WATERLINE_SOLANA_FIELD | str | last_safe_timestamp_solana | Field name on asset. |
-| HEARTBEAT_WATERLINE_NEXUS_FIELD | str | last_safe_timestamp_usdd | Field name on asset. |
+| HEARTBEAT_WATERLINE_NEXUS_FIELD | str | last_safe_timestamp_nexus | Field name on asset. MUST match the asset (format=basic locks fields at creation); a mismatch makes every heartbeat update fail atomically. |
 
 ## Fee Conversion / Backing (Optional Feature Gate)
 | Var | Type | Default | Notes |

@@ -53,6 +53,7 @@ Note: Creating an asset costs ~1 NXS once. Updates are free if not more often th
 import os
 import sys
 import json
+import re
 import subprocess
 from argparse import ArgumentParser
 
@@ -84,6 +85,9 @@ def run_create(
     solana_vault_address: str,
     solana_vault_token: str,
     solana_vault_mint: str,
+    assume_yes: bool = False,
+    dry_run: bool = False,
+    force: bool = False,
 ) -> int:
     nexus_cli = os.getenv("NEXUS_CLI_PATH", "./nexus")
     pin = os.getenv("NEXUS_PIN")
@@ -126,10 +130,46 @@ def run_create(
     # PIN last
     cmd.append(f"pin={pin}")
 
-    # Print command with masked PIN
+    def _redact_argv(argv):
+        # Redact by KEY. The old code masked cmd[:-1] + ["pin=***"], i.e. it assumed the
+        # PIN was last; any later append would have printed the real PIN in cleartext.
+        return [("pin=***" if a.startswith("pin=") else a) for a in argv]
+
+    def _redact_text(text):
+        return (text or "").replace(pin, "***") if pin else (text or "")
+
     print("Creating heartbeat asset:")
-    print("  " + " \\\n    ".join(cmd[:-1] + ["pin=***"]))
+    print("  " + " \\\n    ".join(_redact_argv(cmd)))
     print()
+
+    # Idempotency: creating a second asset costs another ~1 NXS and leaves two
+    # conflicting heartbeats, so refuse unless the caller insists.
+    if name and not force:
+        try:
+            probe = subprocess.run([nexus_cli, "assets/get/asset", f"name={name}"],
+                                   capture_output=True, text=True, timeout=20)
+            if probe.returncode == 0 and '"address"' in (probe.stdout or ""):
+                print(f"ERROR: an asset named '{name}' already exists.")
+                print("       Creating another would spend ~1 NXS and leave two heartbeats.")
+                print("       Re-run with --force only if you are certain.")
+                return 5
+        except Exception:
+            pass  # probe is best-effort; never block creation on a failed check
+
+    if dry_run:
+        print("--dry-run: no asset created, no NXS spent.")
+        return 0
+
+    if not assume_yes:
+        print("This creates a PERMANENT on-chain asset and spends ~1 NXS.")
+        print("format=basic fixes the field set at creation - fields cannot be added later.")
+        try:
+            if input("Type 'yes' to proceed: ").strip().lower() != "yes":
+                print("Aborted.")
+                return 6
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted (no TTY; pass --yes to run non-interactively).")
+            return 6
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -140,22 +180,29 @@ def run_create(
         return 4
 
     if res.returncode != 0:
-        print("ERROR from Nexus CLI:\n", res.stderr or res.stdout)
+        print("ERROR from Nexus CLI:\n", _redact_text(res.stderr or res.stdout))
         return res.returncode
 
     out = res.stdout.strip()
-    print("Raw output:\n", out)
+    print("Raw output:\n", _redact_text(out))
 
     # Try to extract address from JSON
     address = None
+    data_parsed = None
     try:
         data = json.loads(out)
+        data_parsed = data
         # results may be dict or top-level
         if isinstance(data, dict):
             results = data.get("results") or data
             address = results.get("address") if isinstance(results, dict) else None
     except Exception:
         pass
+
+    if isinstance(data_parsed, dict) and data_parsed.get("error"):
+        print("ERROR: Nexus CLI reported an error despite exit code 0:")
+        print("  ", _redact_text(str(data_parsed.get("error"))))
+        return 7
 
     if address:
         print("\n" + "=" * 60)
@@ -165,15 +212,19 @@ def run_create(
         if name:
             print(f"Asset name:    {name}")
         print("\nAdd to your .env file:")
-        print(f"  NEXUS_HEARTBEAT_ASSET_ADDRESS={address}")
         if name:
-            print(f"  NEXUS_HEARTBEAT_ASSET_NAME={name}")
+            print(f"  NEXUS_HEARTBEAT_ASSET_NAME={name}   # <-- the service resolves BY NAME")
+        else:
+            print("  WARNING: no --name given. The service addresses the heartbeat asset by")
+            print("           NAME, so an unnamed asset is unreachable. Re-create it with --name.")
+        print(f"  # NEXUS_HEARTBEAT_ASSET_ADDRESS={address}   (recorded for reference; not read by the service)")
         print("  HEARTBEAT_ENABLED=true")
         return 0
     else:
-        print("\nNOTE: Could not parse address from output automatically.")
-        print("Please copy it from the raw output above.")
-        return 0
+        print("\nERROR: could not parse an asset address from the CLI output.")
+        print("The asset may or may not have been created - check the raw output above")
+        print("and query it with: assets/get/asset name=<NAME>")
+        return 8
 
 
 def main() -> int:
@@ -276,7 +327,36 @@ def main() -> int:
         help=f"Mint address of Solana vault token (default: {env_mint[:20]}...)",
     )
     
+    ap.add_argument("--yes", "-y", action="store_true",
+                    help="skip the confirmation prompt (required for non-interactive use)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the command that would run; create nothing, spend no NXS")
+    ap.add_argument("--force", action="store_true",
+                    help="create even if an asset with this name already exists")
+
     args = ap.parse_args()
+
+    # A non-numeric timestamp would be written on-chain and then fail every consumer.
+    for label, value in (("--initial-timestamp", args.initial_timestamp),
+                         ("--solana-waterline-initial", args.solana_waterline_initial),
+                         ("--nexus-waterline-initial", args.nexus_waterline_initial)):
+        if value is not None and not str(value).isdigit():
+            print(f"ERROR: {label} must be a non-negative integer (got {value!r})")
+            return 2
+
+    # Field NAMES form the key side of `key=value` CLI tokens, so an unchecked value can
+    # inject an API parameter (e.g. a second `pin=`). Keep them identifier-safe and
+    # refuse names that collide with Nexus API parameters.
+    RESERVED = {"pin", "session", "name", "format", "address", "username", "password"}
+    for label, value in (("--solana-waterline-field", args.solana_waterline_field),
+                         ("--nexus-waterline-field", args.nexus_waterline_field)):
+        text = str(value or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+            print(f"ERROR: {label} must be a plain field name (got {value!r})")
+            return 2
+        if text.lower() in RESERVED:
+            print(f"ERROR: {label}={text!r} collides with a Nexus API parameter")
+            return 2
 
     # Warn if transparency addresses are missing
     if not args.nexus_treasury_address:
@@ -301,6 +381,9 @@ def main() -> int:
         solana_vault_address=args.solana_vault_address,
         solana_vault_token=args.solana_vault_token,
         solana_vault_mint=args.solana_vault_mint,
+        assume_yes=args.yes,
+        dry_run=args.dry_run,
+        force=args.force,
     )
 
 
