@@ -1359,8 +1359,11 @@ def check_timestamp_unpr_sigs() -> int | None:
     This can be used for recovery or waterline adjustment based on unprocessed entries.
     Returns the proposed waterline timestamp (int), or None if no unprocessed sigs found.
     """
-    from . import state_db, state
-    
+    # NOTE: this used to be `from . import state_db, state` - there is no `state` module,
+    # so every call raised ImportError, aborting the poll before the waterline/heartbeat
+    # could be updated. Function-level imports like this are invisible to byte-compilation.
+    from . import state_db
+
     # Fetch the oldest unprocessed sig (limit=1, sorted by timestamp ASC)
     unprocessed = state_db.filter_unprocessed_sigs({'limit': 1})
     if not unprocessed:
