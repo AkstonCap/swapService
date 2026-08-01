@@ -1,6 +1,11 @@
 # Swap Service State Machines
 
-This document provides state machine diagrams for both swap directions in the bidirectional USDC ↔ USDD swap service.
+State machine diagrams for both swap directions in the bidirectional USDC ↔ USDD swap service.
+
+> **Accuracy note (2026-06-15):** this document was re-derived directly from the code. The
+> previous version contained transitions the code does not perform (notably an
+> auto-refund on debit timeout, and a refund on USDC-confirmation timeout) and omitted the
+> ambiguity-resolution states. Status strings below are copied verbatim from the source.
 
 ---
 
@@ -8,54 +13,62 @@ This document provides state machine diagrams for both swap directions in the bi
 
 ```mermaid
 flowchart TD
-    subgraph Normal Flow
-        START((Start)) --> Detected[USDC deposit detected]
-        Detected -->|Valid memo nexus:addr| ReadyForProcessing[Ready For Processing]
-        ReadyForProcessing -->|USDD debit sent| DebitedAwaitingConfirmation[Debited Awaiting Confirmation]
-        DebitedAwaitingConfirmation -->|Nexus confirms| Processed[Processed ✓]
-    end
-    
-    subgraph Micro Deposit
-        ReadyForProcessing -->|Net amount ≤ 0| ProcessedAsFees[Processed As Fees ✓]
-    end
-    
-    subgraph Refund Flow
-        Detected -->|Invalid memo| ToBeRefunded[To Be Refunded]
-        ReadyForProcessing -->|Validation fails| ToBeRefunded
-        DebitedAwaitingConfirmation -->|Timeout| ToBeRefunded
-        ToBeRefunded -->|USDC refund sent| RefundSentAwaitingConfirmation[Refund Sent Awaiting Confirm]
-        RefundSentAwaitingConfirmation -->|Confirmed| RefundConfirmed[Refund Confirmed ✓]
-    end
-    
-    subgraph Quarantine Flow
-        ToBeRefunded -->|Max attempts| ToBeQuarantined[To Be Quarantined]
-        RefundSentAwaitingConfirmation -->|Timeout/fails| ToBeQuarantined
-        ToBeQuarantined -->|Moved to quarantine| QuarantinedConfirmed[Quarantined ✓]
-        ToBeQuarantined -->|Send fails| QuarantineFailed[Quarantine Failed ✗]
-    end
+    START((Start)) --> Detected[USDC deposit fetched at 'finalized']
+    Detected --> ReadyForProcessing["ready for processing"]
+
+    ReadyForProcessing -->|invalid memo / bad Nexus account / over MAX_SWAP_USDC| ToBeRefunded["to be refunded"]
+    ReadyForProcessing -->|"net after fees ≤ 0"| ProcessedAsFees["processed, amount after fees <= 0 ✓"]
+    ReadyForProcessing -->|"reserve + persist reference"| DebitInFlight["debit in flight"]
+
+    DebitInFlight -->|CLI returned a txid| DebitedAwaiting["debited, awaiting confirmation"]
+    DebitInFlight -->|"exception / timeout / unparsable body"| DebitUnverified["debit unverified"]
+
+    DebitUnverified -->|reference FOUND on-chain| DebitedAwaiting
+    DebitUnverified -->|"not found, within grace"| DebitUnverified
+    DebitUnverified -->|"not found past grace, attempts left"| ReadyForProcessing
+    DebitUnverified -->|"not found past grace, attempts spent"| ToBeRefunded
+    DebitUnverified -->|no reference recorded| ToBeQuarantined["to be quarantined"]
+
+    DebitedAwaiting -->|">= min confirmations"| Processed["debit_confirmed ✓"]
+    DebitedAwaiting -->|"tx NEVER appeared and age > USDC_CONFIRM_TIMEOUT_SEC"| ToBeRefunded
+
+    ToBeRefunded -->|"net ≤ 0"| ProcessedAsFees
+    ToBeRefunded -->|"no/invalid sender address"| ToBeQuarantined
+    ToBeRefunded -->|USDC refund sent| RefundSent["refund sent, awaiting confirmation"]
+    ToBeRefunded -->|send failed| ToBeQuarantined
+    RefundSent -->|finalized| RefundConfirmed["refund_confirmed ✓"]
+
+    ToBeQuarantined -->|USDC moved to quarantine| QuarantineSent["quarantine sent, awaiting confirmation"]
+    ToBeQuarantined -->|send failed| QuarantineFailed["quarantine failed ✗"]
+    QuarantineSent -->|finalized| QuarantineConfirmed["quarantine_confirmed ✓"]
+
+    Stale["age > STALE_DEPOSIT_QUARANTINE_SEC<br/>(while 'ready for processing')"] --> ToBeQuarantined
 ```
 
 ### USDC → USDD State Descriptions
 
-| State | Description | DB Table | Status Field Value |
-|-------|-------------|----------|-------------------|
-| **Detected** | USDC deposit signature found during polling | `unprocessed_sigs` | N/A (initial) |
-| **ReadyForProcessing** | Memo parsed, Nexus account validated | `unprocessed_sigs` | `"ready for processing"` |
-| **DebitedAwaitingConfirmation** | USDD debit transaction sent to Nexus | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
-| **Processed** | USDD debit confirmed on Nexus | `processed_sigs` | `"debit_confirmed"` or `"processed"` |
-| **ProcessedAsFees** | Amount after fees ≤ 0 (micro deposit) | `processed_sigs` | `"processed, amount after fees <= 0"` |
-| **ToBeRefunded** | Invalid memo/account, or processing failed | `unprocessed_sigs` | `"to be refunded"` |
-| **RefundSentAwaitingConfirmation** | USDC refund transaction sent back | `unprocessed_sigs` | `"refund sent, awaiting confirmation"` |
-| **RefundConfirmed** | Refund confirmed on Solana | `refunded_sigs` | `"refund_confirmed"` |
-| **ToBeQuarantined** | Refund attempts exhausted | `unprocessed_sigs` | `"to be quarantined"` |
-| **QuarantinedConfirmed** | Funds moved to quarantine account | `quarantined_sigs` | `"quarantine sent, awaiting confirmation"` |
+| State | Description | Table | Status value |
+|-------|-------------|-------|--------------|
+| **Detected** | Deposit fetched from Solana (at `SOLANA_DEPOSIT_COMMITMENT`, default `finalized`) | `unprocessed_sigs` | `"ready for processing"` on insert |
+| **ReadyForProcessing** | Awaiting validation + debit | `unprocessed_sigs` | `"ready for processing"` |
+| **DebitInFlight** | Reference persisted, Nexus debit issued, outcome not yet known | `unprocessed_sigs` | `"debit in flight"` |
+| **DebitUnverified** | Debit outcome **ambiguous** — resolved against the chain, never guessed | `unprocessed_sigs` | `"debit unverified"` |
+| **DebitedAwaiting** | Debit confirmed to exist; awaiting confirmations | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
+| **Processed** | Debit fully confirmed | `processed_sigs` | `"debit_confirmed"` |
+| **ProcessedAsFees** | Amount after fees ≤ 0 | `processed_sigs` | `"processed, amount after fees <= 0"` |
+| **ToBeRefunded** | Validation failed, over cap, or debit provably never landed | `unprocessed_sigs` | `"to be refunded"` |
+| **RefundSent** | USDC refund broadcast | `unprocessed_sigs` | `"refund sent, awaiting confirmation"` |
+| **RefundConfirmed** | Refund finalized | `refunded_sigs` | `"awaiting confirmation"` → `"refund_confirmed"` |
+| **ToBeQuarantined** | Refund impossible or attempts spent | `unprocessed_sigs` | `"to be quarantined"` |
+| **QuarantineSent** | USDC moved to `USDC_QUARANTINE_ACCOUNT` | `unprocessed_sigs` | `"quarantine sent, awaiting confirmation"` |
+| **QuarantineConfirmed** | Quarantine finalized | `quarantined_sigs` | `"awaiting confirmation"` → `"quarantine_confirmed"` |
+| **QuarantineFailed** | Quarantine send failed | `unprocessed_sigs` | `"quarantine failed"` |
 
-### Key Transitions (USDC → USDD)
-
-- **Normal Flow**: Detected → ReadyForProcessing → DebitedAwaitingConfirmation → Processed
-- **Refund Flow**: Any failure → ToBeRefunded → RefundSentAwaitingConfirmation → RefundConfirmed
-- **Quarantine Flow**: Max attempts → ToBeQuarantined → QuarantinedConfirmed
-- **Micro Deposit**: ReadyForProcessing → ProcessedAsFees (if net amount ≤ 0)
+> **Ambiguity is never treated as failure.** `debit_usdd_with_txid()` returns `(False, None)`
+> both when the CLI failed *and* when it succeeded but the response could not be parsed.
+> Refunding on that signal would mint USDD **and** return the USDC. Instead the row goes to
+> `debit unverified` and `resolve_unverified_debits()` asks the chain, keyed on the unique
+> per-attempt `reference` persisted *before* the call.
 
 ---
 
@@ -63,274 +76,226 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph Normal Flow
-        START((Start)) --> PendingReceival[USDD credit to treasury detected]
-        PendingReceival -->|Asset mapping found| ReadyForProcessing[Ready For Processing]
-        ReadyForProcessing -->|Valid Solana account| Sending[Sending USDC]
-        Sending -->|Signature created| AwaitingConfirmation[Awaiting Confirmation]
-        AwaitingConfirmation -->|USDC confirmed| Processed[Processed ✓]
-    end
-    
-    subgraph Micro Credit
-        PendingReceival -->|Amount ≤ fee threshold| ProcessedAsFees[Processed As Fees ✓]
-    end
-    
-    subgraph Timeout Flow
-        PendingReceival -->|Mapping timeout| TradeBalanceCheck[Trade Balance Check]
-        TradeBalanceCheck -->|Asset still missing| RefundPending[Refund Pending]
-        TradeBalanceCheck -->|Ready to refund| CollectingRefund[Collecting Refund]
-    end
-    
-    subgraph Refund Flow
-        ReadyForProcessing -->|Invalid receival_account| RefundPending
-        Sending -->|Send fails| RefundPending
-        AwaitingConfirmation -->|Confirmation timeout| RefundPending
-        Sending -->|Signature recovered| AwaitingConfirmation
-        RefundPending -->|USDD refund sent| Refunded[Refunded ✓]
-        CollectingRefund -->|USDD returned| Refunded
-    end
-    
-    subgraph Quarantine Flow
-        RefundPending -->|Max attempts| Quarantined[Quarantined ✗]
-        CollectingRefund -->|Refund fails| Quarantined
-    end
+    START((Start)) --> Credit[USDD credit to treasury detected]
+
+    Credit -->|"< DUST_CREDIT_USDD"| Ignored["ignored entirely — no row, no accounting"]
+    Credit -->|"dust ≤ amount < MIN_CREDIT_USDD"| FeesRecorded["processed as fees ✓<br/>(recorded: sender, amount, txid)"]
+    Credit -->|"amount ≤ flat + dynamic fee"| FeesRecorded
+    Credit -->|"> MAX_SWAP_USDD"| RefundPending["refund pending"]
+    Credit -->|normal| Pending["pending_receival"]
+
+    Pending -->|"asset found, owner matches, valid USDC account"| Ready["ready for processing"]
+    Pending -->|owner mismatch| Pending
+    Pending -->|"receival_account invalid"| RefundPending
+    Pending -->|"no asset after REFUND_TIMEOUT_SEC"| TradeBal["trade balance to be checked"]
+
+    Ready -->|"vault cannot cover payout"| Ready
+    Ready -->|"net ≤ 0"| FeesRecorded
+    Ready -->|attempt| Sending["sending"]
+    Ready -.->|"paused (backing deficit)"| Ready
+
+    Sending -->|"USDC sent, sig stored"| Awaiting["sig created, awaiting confirmations"]
+    Sending -->|"failed, attempts left"| Sending
+    Sending -->|"failed, attempts spent"| RefundPending
+    Sending -->|"crash recovery: memo found"| Awaiting
+
+    Awaiting -->|"stored sig finalized"| Processed["processed ✓"]
+    Awaiting -->|"not confirmed and age > USDC_CONFIRM_TIMEOUT_SEC"| Quarantined["quarantined — manual review ✗"]
+
+    TradeBal -->|asset appeared| Ready
+    TradeBal -->|still missing| Collecting["collecting refund"]
+
+    Collecting -->|USDD returned| Refunded["refunded ✓"]
+    Collecting -->|"attempts spent / no sender"| Quarantined
+    RefundPending -->|USDD returned| Refunded
+    RefundPending -->|"attempts spent / no sender"| Quarantined
 ```
 
 ### USDD → USDC State Descriptions
 
-| State | Description | DB Table | Status Field Value |
-|-------|-------------|----------|-------------------|
-| **PendingReceival** | USDD credit detected, awaiting asset mapping | `unprocessed_txids` | `"pending_receival"` |
-| **ReadyForProcessing** | Asset mapping resolved with valid receival account | `unprocessed_txids` | `"ready for processing"` |
-| **Sending** | USDC send in progress (before signature) | `unprocessed_txids` | `"sending"` |
-| **AwaitingConfirmation** | USDC signature created, awaiting confirmations | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
-| **Processed** | USDC confirmed on Solana | `processed_txids` | `"processed"` |
-| **ProcessedAsFees** | Amount below threshold (micro credit) | `processed_txids` | `"processed as fees"` |
-| **RefundPending** | Failed processing, refund initiated | `unprocessed_txids` | `"refund pending"` |
-| **TradeBalanceCheck** | Mapping timeout, checking for recovery | `unprocessed_txids` | `"trade balance to be checked"` |
-| **CollectingRefund** | Refund in collection process | `unprocessed_txids` | `"collecting refund"` |
-| **Refunded** | USDD refunded successfully | `refunded_txids` | `"refunded"` |
-| **Quarantined** | All refund attempts failed | `quarantined_txids` | `"quarantined"` |
+| State | Description | Table | Status value |
+|-------|-------------|-------|--------------|
+| **Ignored** | Below `DUST_CREDIT_USDD` — spam floor, deliberately no trace | — | — |
+| **FeesRecorded** | Below `MIN_CREDIT_USDD` or ≤ fees; **recorded** so funds stay traceable | `processed_txids` | `"processed as fees"` |
+| **Pending** | Credit queued, awaiting asset mapping | `unprocessed_txids` | `"pending_receival"` |
+| **Ready** | Mapping resolved and owner-verified | `unprocessed_txids` | `"ready for processing"` |
+| **Sending** | USDC send attempted | `unprocessed_txids` | `"sending"` |
+| **Awaiting** | Signature stored, awaiting finality | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
+| **Processed** | USDC delivered | `processed_txids` | `"processed"` |
+| **TradeBal** | Mapping timed out; one more lookup before refunding | `unprocessed_txids` | `"trade balance to be checked"` |
+| **Collecting** | Refund being collected | `unprocessed_txids` | `"collecting refund"` |
+| **RefundPending** | Refund queued | `unprocessed_txids` | `"refund pending"` |
+| **Refunded** | USDD returned to sender | `refunded_txids` | `"refunded"` |
+| **Quarantined** | Manual review; USDD **moved** to `NEXUS_USDD_QUARANTINE_ACCOUNT` | `quarantined_txids` | `"quarantined"`, or `"quarantined (USDD NOT moved)"` if that account is unset |
 
-### Processing Priority Order (USDD → USDC)
+> **A USDC-confirmation timeout quarantines — it does not refund.** The USDC may in fact
+> have been sent and only the lookup failed; refunding would pay twice.
 
-The `process_unprocessed_txids()` function handles states in priority order:
+### Processing Priority Order (`process_unprocessed_txids`)
 
-| Priority | Status Handled | Action |
-|----------|----------------|--------|
-| 1 | `pending_receival` (confirmed) | Resolve `receival_account` via asset lookup |
-| 2 | `ready for processing` | Send USDC with memo `nexus_txid:<txid>` |
-| 3 | `sig created, awaiting confirmations` | Check for USDC confirmation or timeout |
-| 4 | `trade balance to be checked` | Retry asset lookup or move to `collecting refund` |
-| 5 | `collecting refund` | Execute USDD refund or quarantine |
-| 6 | `refund pending` | Execute USDD refund or quarantine |
-
-### Key Transitions (USDD → USDC)
-
-- **Normal Flow**: PendingReceival → ReadyForProcessing → Sending → AwaitingConfirmation → Processed
-- **Refund Flow**: Any failure → RefundPending → Refunded
-- **Timeout Flow**: PendingReceival → TradeBalanceCheck → CollectingRefund → Refunded
-- **Quarantine Flow**: Max attempts → Quarantined
-- **Micro Credit**: PendingReceival → ProcessedAsFees (if amount ≤ `MIN_CREDIT_USDD`)
+| Priority | Status handled | Action | Skipped while paused |
+|----------|----------------|--------|----------------------|
+| 1 | `pending_receival` (confirmations > 1) | Resolve `receival_account` by (`txid_toService`, `owner`) | No |
+| 2 | `ready for processing` | Liquidity check, then send USDC with memo `nexus_txid:<txid>` | **Yes** |
+| 3 | `sig created, awaiting confirmations` | Confirm the stored signature; memo scan only as fallback | No |
+| 4 | `trade balance to be checked` | Retry lookup, else → `collecting refund` | No |
+| 5 | `collecting refund` | Refund USDD, else quarantine | No |
+| 6 | `refund pending` | Refund USDD, else quarantine | No |
 
 ---
 
-## State Transition Triggers & Timeouts
+## Paused Mode (Backing Deficit)
 
-### USDC → USDD Timeouts
+When `fees.maintain_backing_and_bounds()` reports a deficit (vault USDC below
+`BACKING_DEFICIT_PAUSE_PCT`% of circulating USDD), the loop does **not** skip the cycle.
+It runs both pollers with `paused=True`:
 
-| Timeout | Config Variable | Default | Purpose | Handler |
-|---------|----------------|---------|---------|--------|
-| Refund timeout | `REFUND_TIMEOUT_SEC` | 3600s (1h) | Age before forced refund for unresolved memo | `poll_solana_deposits()` |
-| Confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10m) | Max wait for debit confirmation on Nexus | `check_unconfirmed_debits()` |
-| Stale quarantine | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s (24h) | Age to quarantine stuck deposits | `_process_stale_deposits()` |
+| Continues | Stops |
+|-----------|-------|
+| USDC refunds, quarantine, confirmation checks | New deposit ingestion |
+| USDD refunds, quarantine, ambiguity resolution | USDC→USDD debits |
+| Waterline held (no fetch ⇒ no advance) | USDD→USDC USDC sends |
 
-### USDD → USDC Timeouts
+A failure of the backing check itself also fails safe to paused. A `backing_deficit_pause`
+alert is emitted.
 
-| Timeout | Config Variable | Default | Purpose |
-|---------|----------------|---------|---------|
-| Asset mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s (1h) | Max wait for receival_account asset |
-| USDC confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10m) | Max wait for USDC send confirmation |
+---
 
-### Retry Logic
+## Timeouts & Retry
 
-Both directions use attempt tracking with configurable limits:
-- **Max attempts**: `MAX_ACTION_ATTEMPTS` (default: 3)
-- **Cooldown**: `ACTION_RETRY_COOLDOWN_SEC` (default: 300s / 5m)
+| Timeout | Config | Default | Applies to | Handler |
+|---------|--------|---------|-----------|---------|
+| Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **USDD→USDC only** | `process_unprocessed_txids()` P1 |
+| Debit-confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD (tx never appeared) | `check_unconfirmed_debits()` |
+| USDC-confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
+| Ambiguous-debit grace | `DEBIT_VERIFY_GRACE_SEC` | 300s | USDC→USDD | `resolve_unverified_debits()` |
+| Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | USDC→USDD | `_process_stale_deposits()` |
 
-After max attempts exhausted:
-- USDC → USDD: Funds quarantined to `USDC_QUARANTINE_ACCOUNT`
-- USDD → USDC: Funds quarantined to `NEXUS_USDD_QUARANTINE_ACCOUNT`
-- Event recorded in `quarantined_sigs` or `quarantined_txids` database table
-
+**Retry:** `MAX_ACTION_ATTEMPTS` (3) attempts, with `ACTION_RETRY_COOLDOWN_SEC` (300s)
+enforced between them. `should_attempt()` returns False for *either* reason;
+`attempts_exhausted()` distinguishes them, so a cooldown never causes a premature
+quarantine. After exhaustion, USDC goes to `USDC_QUARANTINE_ACCOUNT` and USDD is
+transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`.
 
 ---
 
 ## State Persistence
 
-### Database Tables
+| Table | Purpose |
+|-------|---------|
+| `unprocessed_sigs` / `processed_sigs` / `refunded_sigs` / `quarantined_sigs` | USDC→USDD lifecycle |
+| `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | USDD→USDC lifecycle |
+| `attempts` | Retry counters + `last_timestamp` (cooldown) |
+| `reservations` | Cross-worker mutual exclusion on money actions |
+| `counters` | Atomic Nexus debit `reference` sequence |
+| `payouts` | Outbound USDC ledger for the rolling 24h cap |
+| `fee_entries` / `fee_summary` | Authoritative fee ledger |
+| `waterline_proposals` / `heartbeat` | Waterline plumbing and last known-good values |
+| `accounts` | Cached balances |
 
-| Table | Purpose | Swap Direction |
-|-------|---------|----------------|
-| `unprocessed_sigs` | Active Solana deposits being processed | USDC → USDD |
-| `processed_sigs` | Completed/confirmed Solana deposits | USDC → USDD |
-| `refunded_sigs` | Refunded Solana deposits | USDC → USDD |
-| `quarantined_sigs` | Quarantined Solana deposits | USDC → USDD |
-| `unprocessed_txids` | Active Nexus credits being processed | USDD → USDC |
-| `processed_txids` | Completed/confirmed Nexus credits | USDD → USDC |
-| `refunded_txids` | Refunded Nexus credits | USDD → USDC |
-| `quarantined_txids` | Quarantined Nexus credits | USDD → USDC |
+SQLite runs in **WAL** mode (set in `init_db()`).
 
 ### Idempotency Guarantees
 
-#### USDC → USDD
-- Solana signature is primary key in database
-- Memo contains unique Nexus address
-- Debit reference counter ensures uniqueness
-- Startup recovery scans memos for `processedTxid:<txid>` patterns
+**USDC → USDD**
+- Solana signature is the primary key; `processed`/`refunded`/`quarantined` sets are checked before acting.
+- A unique `reference` is persisted **before** each debit and is the on-chain lookup key for ambiguity resolution.
+- `reserve_action("usdc_to_usdd_debit", sig)` prevents two workers acting on one deposit.
+- Refund/quarantine sends carry `refundSig:<sig>` / `quarantinedSig:<sig>` memos, checked on-chain before a retry re-sends.
 
-#### USDD → USDC
-- Nexus txid is primary key in database
-- Asset mapping validated by (txid, owner) tuple
-- USDC memo format: `nexus_txid:<txid>` for recovery
-- Startup recovery scans memos to rebuild processed sets
-
----
-
-## Edge Cases & Error Handling
-
-### USDC → USDD Edge Cases
-
-| Scenario | State Transition | Resolution |
-|----------|------------------|------------|
-| Invalid Nexus address format | Detected → ToBeRefunded | Refund with memo explaining error |
-| Nexus account doesn't exist | ReadyForProcessing → ToBeRefunded | Refund minus flat fee |
-| Network failure during debit | DebitedAwaitingConfirmation → ToBeRefunded | Retry with cooldown, then refund |
-| Refund send fails | RefundSentAwaitingConfirmation → ToBeQuarantined | Move to quarantine after max attempts |
-| Amount ≤ fees | ReadyForProcessing → ProcessedAsFees | Treated as donation/fee |
-
-### USDD → USDC Edge Cases
-
-| Scenario | State Transition | Resolution |
-|----------|------------------|------------|
-| No asset mapping published | PendingReceival → TradeBalanceCheck | Wait until timeout, then refund |
-| Invalid Solana address | ReadyForProcessing → RefundPending | Immediate refund minus congestion fee |
-| USDC ATA doesn't exist | ReadyForProcessing → RefundPending | Refund (service won't create ATA) |
-| Asset owner mismatch | PendingReceival (ignored) | No state change, wait for correct owner |
-| USDC send fails | Sending → RefundPending | Retry, then refund after max attempts |
-| Amount ≤ fees | PendingReceival → ProcessedAsFees | No USDC sent, treated as fee |
+**USDD → USDC**
+- Nexus txid is the primary key; mapping validated on (`txid_toService`, `owner`).
+- USDC sends carry `nexus_txid:<txid>`; the resulting signature is stored in `unprocessed_txids.sig`.
+- Startup recovery rebuilds markers from `nexus_txid:`, `refundSig:` and `quarantinedSig:` memos.
 
 ---
 
-## Monitoring State Transitions
+## Waterline Invariant
 
-### Key Metrics to Monitor
+`_advance_solana_waterline()` may only move the Solana waterline to a point proven safe:
 
-1. **State Distribution**: Count of signatures/txids in each state
-2. **Dwell Time**: Average time spent in each state
-3. **Transition Success Rate**: % of deposits reaching `Processed` vs `Refunded`/`Quarantined`
-4. **Backlog Size**: Total `unprocessed_sigs` + `unprocessed_txids` count
-5. **Quarantine Rate**: % of transactions ending in quarantine (should be near 0%)
+| Situation | Waterline |
+|-----------|-----------|
+| Deposit enumeration failed | held entirely |
+| Unprocessed deposits exist | pinned behind the oldest |
+| Deposit withheld pending finalization | pinned behind it |
+| Everything fetched is persisted | `poll_start − HEARTBEAT_WATERLINE_SAFETY_SEC` |
+| Candidate ≤ current | unchanged (never moves backwards) |
 
-### Alerting Thresholds
-
-- **High Refund Rate**: >5% of transactions refunded (investigate validation logic)
-- **Growing Backlog**: Unprocessed count increasing over time (check polling frequency)
-- **Quarantine Events**: Any quarantined transaction (immediate manual review)
-- **Long Dwell Time**: Transactions stuck in `AwaitingConfirmation` >10m (RPC issues?)
-
-### SQL Queries for State Analysis
-
-```sql
--- USDC → USDD state distribution
-SELECT status, COUNT(*) as count 
-FROM unprocessed_sigs 
-GROUP BY status;
-
--- USDD → USDC state distribution
-SELECT status, COUNT(*) as count 
-FROM unprocessed_txids 
-GROUP BY status;
-
--- Oldest unprocessed by state
-SELECT sig, timestamp, status, memo 
-FROM unprocessed_sigs 
-ORDER BY timestamp ASC 
-LIMIT 10;
-
--- Recent quarantines (investigate)
-SELECT sig, timestamp, from_address, amount_usdc_units, memo
-FROM quarantined_sigs
-WHERE timestamp > (strftime('%s', 'now') - 86400)
-ORDER BY timestamp DESC;
-```
+A waterline read ahead of *now* is clamped. **The waterline must never pass a deposit that
+is not durably recorded** — `_fetch_deposits_helius` stops at `ts <= since_ts`, so anything
+left behind it is never seen again.
 
 ---
 
-## Recovery Procedures
+## Code Locations
 
-### After Service Restart
-
-The `startup_recovery.py` module automatically:
-1. Fetches waterlines from heartbeat asset
-2. Scans on-chain transactions since waterline
-3. Rebuilds `processed_*` markers from memo patterns:
-   - `nexus_txid:<txid>` → processed USDD→USDC swap
-   - `refundSig:<sig>` → refunded USDC deposit
-   - `quarantinedSig:<sig>` → quarantined deposit
-4. Seeds reference counter if missing
-
-### Manual State Repair (Rare)
-
-If database corruption occurs:
-1. Stop service
-2. Backup `swap_service.db`
-3. Use waterline-based recovery:
-   ```python
-   from src import startup_recovery
-   result = startup_recovery.perform_startup_recovery()
-   print(result)
-   ```
-4. Review discrepancies before restarting
-
----
-
-## State Machine Implementation Details
-
-### Code Locations
-
-| Component | File | Function/Section |
-|-----------|------|------------------|
+| Component | File | Function |
+|-----------|------|----------|
 | USDC→USDD polling | `src/swap_solana.py` | `poll_solana_deposits()` |
+| Waterline advance | `src/swap_solana.py` | `_advance_solana_waterline()` |
 | USDC→USDD processing | `src/solana_client.py` | `process_unprocessed_usdc_deposits()` |
-| USDC refunds | `src/solana_client.py` | `process_usdc_deposits_refunding()` |
-| USDC quarantine | `src/solana_client.py` | `process_usdc_deposits_quarantine()` |
+| Ambiguity resolution | `src/nexus_client.py` | `resolve_unverified_debits()`, `find_usdd_debit_by_reference()` |
+| USDC refunds / quarantine | `src/solana_client.py` | `process_usdc_deposits_refunding()`, `process_usdc_deposits_quarantine()` |
 | USDD→USDC polling | `src/swap_nexus.py` | `poll_nexus_usdd_deposits()` |
 | USDD→USDC processing | `src/swap_nexus.py` | `process_unprocessed_txids()` |
-| State transitions | `src/state_db.py` | `update_unprocessed_sig()`, `update_unprocessed_txid()` |
+| USDD quarantine transfer | `src/nexus_client.py` | `quarantine_usdd()` |
+| Alerting | `src/alerts.py` | `critical()`, `warning()`, `info()` |
 | Startup recovery | `src/startup_recovery.py` | `perform_startup_recovery()` |
 
-### Status Constants
+### Status Constants (`src/swap_nexus.py`)
 
-Defined in `src/swap_nexus.py`:
 ```python
-USDD_STATUS_PENDING = "pending_receival"
-USDD_STATUS_READY = "ready for processing"
-USDD_STATUS_SENDING = "sending"
-USDD_STATUS_AWAITING = "sig created, awaiting confirmations"
-USDD_STATUS_REFUNDED = "refunded"
-USDD_STATUS_PROCESSED = "processed"
-USDD_STATUS_FEES = "processed as fees"
-USDD_STATUS_REFUND_PENDING = "refund pending"
-USDD_STATUS_QUARANTINED = "quarantined"
+USDD_STATUS_PENDING          = "pending_receival"
+USDD_STATUS_READY            = "ready for processing"
+USDD_STATUS_SENDING          = "sending"
+USDD_STATUS_AWAITING         = "sig created, awaiting confirmations"
+USDD_STATUS_REFUNDED         = "refunded"
+USDD_STATUS_PROCESSED        = "processed"
+USDD_STATUS_FEES             = "processed as fees"
+USDD_STATUS_REFUND_PENDING   = "refund pending"
+USDD_STATUS_QUARANTINED      = "quarantined"
+USDD_STATUS_TRADE_BAL_CHECK  = "trade balance to be checked"
+USDD_STATUS_COLLECTING_REFUND = "collecting refund"
 ```
+
+USDC-side statuses are string literals in `src/solana_client.py` / `src/nexus_client.py`
+(listed in the table above) rather than named constants.
+
+> **Known inconsistency:** `_process_stale_deposits()` also matches a `'memo unresolved'`
+> status that no code path ever writes. Harmless, but it is dead.
+
+---
+
+## Monitoring
+
+```sql
+-- state distribution
+SELECT status, COUNT(*) FROM unprocessed_sigs  GROUP BY status;
+SELECT status, COUNT(*) FROM unprocessed_txids GROUP BY status;
+
+-- ambiguous debits needing chain resolution (should drain quickly)
+SELECT sig, reference, status FROM unprocessed_sigs
+WHERE status IN ('debit in flight','debit unverified');
+
+-- rolling 24h outbound USDC vs cap
+SELECT COALESCE(SUM(amount_usdc_units),0) FROM payouts
+WHERE timestamp >= strftime('%s','now') - 86400;
+
+-- quarantined USDD actually moved?
+SELECT txid, amount_usdd, status FROM quarantined_txids ORDER BY timestamp DESC;
+```
+
+Alerts (`ALERT_WEBHOOK_URL` / `ALERT_COMMAND`) fire on: `backing_deficit_pause`,
+`unbacked_usdd_surplus`, `heartbeat_unreadable`, `heartbeat_asset_invalid`,
+`insufficient_vault_liquidity`, `payout_cap_exceeded`, `swap_over_cap`, `usdd_quarantined`.
 
 ---
 
 ## References
 
-- Full configuration: [CONFIG.md](CONFIG.md)
+- User-facing flow: [SWAP_INITIATOR_STATE_MACHINES.md](SWAP_INITIATOR_STATE_MACHINES.md)
+- Configuration: [CONFIG.md](CONFIG.md)
 - Security hardening: [SECURITY.md](SECURITY.md)
 - Operational setup: [SETUP.md](SETUP.md)
-- User guide: [README.md](README.md)
-- Database schema: [STATE_DB_MIGRATION.md](STATE_DB_MIGRATION.md)
+- Risk assessment: [RISK_ASSESSMENT.md](RISK_ASSESSMENT.md)

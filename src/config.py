@@ -116,7 +116,7 @@ FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 
 # Anti-DoS protections
-MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.100101")  # minimum deposit to process as swap
+MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.2")  # = 2x FLAT_FEE_USDD; nets ~0.0998 USDD
 _MIN_DEPOSIT_USDC_CONFIGURED = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
 # A minimum at or below the flat fee means the user nets ~nothing while the swap is still
 # recorded as successful (0.100101 USDC against a 0.1 fee netted 0.0000009 USDD - below one
@@ -127,7 +127,7 @@ MIN_DEPOSIT_USDC_RAISED = MIN_DEPOSIT_USDC_UNITS > _MIN_DEPOSIT_USDC_CONFIGURED
 # (FLAT_FEE_USDC + dynamic), or the swap nets <= 0 and the whole credit becomes a fee.
 # Keep README.md / CONFIG.md / .env.example in sync with this value: users who follow a
 # documented minimum lower than this one previously had their credit silently destroyed.
-MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.500501")  # minimum credit to process as swap
+MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "1.0")  # = 2x FLAT_FEE_USDC; nets ~0.499 USDC
 _MIN_CREDIT_USDD_CONFIGURED = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
 # Same floor rule as MIN_DEPOSIT_USDC: this direction's flat fee is FLAT_FEE_USDC.
 MIN_CREDIT_USDD_UNITS = max(_MIN_CREDIT_USDD_CONFIGURED, 2 * FLAT_FEE_USDC_UNITS)

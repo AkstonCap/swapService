@@ -76,8 +76,8 @@ Legend:
 | FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **USDD→USDC** path (deducted from the USDC output). Named for the output token, not the input. |
 | FLAT_FEE_USDD | decimal | 0.1 | Tiny USDD threshold / micro gating. |
 | DYNAMIC_FEE_BPS | int | 10 | Applied both directions on success (0 = disable). |
-| MIN_DEPOSIT_USDC | decimal | 0.100101 | Minimum to treat as swap. Below -> fee policy. |
-| MIN_CREDIT_USDD | decimal | 0.500501 | Minimum USDD credit swapped for USDC. Must stay ABOVE the USDD→USDC fee (FLAT_FEE_USDC + dynamic) or the swap nets ≤ 0. Credits below it are recorded and booked as fees. Keep README.md / .env.example in sync. |
+| MIN_DEPOSIT_USDC | decimal | 0.2 | Minimum USDC swapped (= 2x FLAT_FEE_USDD, nets ~0.0998 USDD). Values below 2x the flat fee are raised to it at startup and logged. |
+| MIN_CREDIT_USDD | decimal | 1.0 | Minimum USDD swapped (= 2x FLAT_FEE_USDC, nets ~0.499 USDC). Values below 2x the flat fee are raised to it at startup and logged. Credits below it are recorded and booked as fees. |
 | DUST_CREDIT_USDD | decimal | 0.01 | Anti-DoS dust floor. Credits below this are ignored entirely (no state, no accounting). Credits between this and MIN_CREDIT_USDD are recorded so the funds remain traceable. |
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |

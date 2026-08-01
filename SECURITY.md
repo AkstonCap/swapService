@@ -12,7 +12,7 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 | Item | Guidance |
 |------|----------|
 | Solana Vault Keypair | Store outside repo; restrict permissions (0600). Consider hardware signer if volume grows. |
-| Nexus PIN / Session | Never log. Use environment variable injection (systemd drop‑in / Docker secret). |
+| Nexus PIN / Session | Never log. Use environment variable injection (systemd drop‑in / Docker secret). **Known limitation:** the PIN is currently passed as a Nexus CLI *argument*, so it is visible to any local user via `ps` / `/proc/<pid>/cmdline` for the duration of the call. Treat local shell access to the host as equivalent to holding the PIN. |
 | Backups | Encrypted offsite copy of keypair + state files daily. |
 
 ## File Permissions
@@ -21,7 +21,8 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - State database (`swap_service.db`): writable only by service user (avoid accidental edits).
 
 ## State Integrity
-- SQLite database with WAL mode provides crash-safe persistence.
+- SQLite runs in WAL mode (enabled in `state_db.init_db()`) for crash-safe persistence.
+- A startup `flock` prevents a second instance from sharing the state DB (`SWAP_LOCK_PATH`).
 - Do not manually edit the database unless fully aware of consequences (risk: double payout). Instead, use quarantine tables and reconcile manually.
 - Maintain checksum (optional) of state directory for tamper detection.
 
@@ -38,14 +39,23 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Consider raising `SOLANA_POLL_INTERVAL` or lowering `SOLANA_MAX_TX_FETCH_PER_POLL` under sustained attack.
 
 ## Refund Safety
-- Attempts bounded by `MAX_ACTION_ATTEMPTS` + cooldown; after exhaustion funds move to quarantine accounts for manual review.
+- Attempts bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion USDC moves to `USDC_QUARANTINE_ACCOUNT` and USDD is transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`; if the latter is unset the USDD stays in the treasury and the row records `quarantined (USDD NOT moved)`.
 - Keep quarantine accounts separate from active treasury/vault to simplify reconciliation and avoid accidental reuse.
 
 ## Heartbeat & Liveness
 - Optional heartbeat asset shows last poll timestamp; monitor externally (alert if stale > 3 × max(intervals)).
 - Waterlines: enable to bound historical scan after assured data integrity, reducing time for catchup after downtime.
 
+## Exposure Limits
+- `MAX_SWAP_USDC` / `MAX_SWAP_USDD` cap a single swap; oversized items are refunded.
+- `DAILY_PAYOUT_CAP_USDC` is a rolling 24h ceiling enforced at the one function every USDC
+  payment passes through, so a runaway loop or stolen key cannot drain the vault at once.
+- Deposits are ingested at `finalized` by default; a reorged `confirmed` deposit would
+  otherwise leave permanently unbacked USDD.
+
 ## Logging & Monitoring
+- Configure `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. Without one, backing-deficit pauses,
+  unbacked-mint discrepancies and halted pollers are only visible on stdout.
 - Capture stdout/stderr to log aggregation (with rotation). Remove sensitive env echoing.
 - Monitor: processed swaps per hour, refund counts, micro credit ratio, backlog queue length, RPC error rate.
 - Alerting: high refund failure rate, backing ratio breach (< BACKING_DEFICIT_PAUSE_PCT), stale heartbeat.

@@ -213,13 +213,15 @@ Startup prints vault / treasury balances, recovery results, and begins polling.
 | `FLAT_FEE_USDC` | USDD→USDC (deducted from USDC output) | 0.5 | Flat fee when user receives USDC |
 | `FLAT_FEE_USDD` | USDC→USDD (deducted from swap amount) AND USDC refunds | 0.1 | Flat fee when user receives USDD, also applied to USDC refunds |
 | `DYNAMIC_FEE_BPS` | Both directions | 10 (0.1%) | Percentage-based fee on swap amount |
-| `MIN_DEPOSIT_USDC` | USDC→USDD | 0.100101 | Minimum USDC to process (below = 100% fee) |
-| `MIN_CREDIT_USDD` | USDD→USDC | 0.500501 | Minimum USDD to process (below = 100% fee) |
+| `MIN_DEPOSIT_USDC` | USDC→USDD | 0.2 | Minimum USDC to process (= 2x flat fee; below = 100% fee, no refund) |
+| `MIN_CREDIT_USDD` | USDD→USDC | 1.0 | Minimum USDD to process (= 2x flat fee; below = 100% fee, recorded) |
+| `DUST_CREDIT_USDD` | USDD→USDC | 0.01 | Below this a credit is ignored entirely (no record) |
 
 > **Note on naming:** `FLAT_FEE_USDC` is the fee applied when the *output* is USDC (USDD→USDC path), not when the *input* is USDC. Similarly, `FLAT_FEE_USDD` is applied when the output is USDD (USDC→USDD path).
 
 ## Idempotency & State
 - Solana: memo uniqueness + processed_sigs cache; pre-send crash recovery scans for memo.
+- USDC→USDD debits persist a unique `reference` BEFORE the debit; an unclear CLI response is resolved against the chain (`resolve_unverified_debits`), never assumed to be a failure.
 - Nexus: asset mapping search by txid + owner, processed markers, refund attempt state.
 - References: integer counters used internally (not user-facing) for audit.
 
