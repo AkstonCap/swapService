@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from . import config, state_db, solana_client, nexus_client, fees
+from . import config, state_db, solana_client, nexus_client, fees, alerts
 import time
 
 # Allowed lifecycle comments for unprocessed txids
@@ -57,6 +57,58 @@ def _format_token_amount(amount: Decimal, decimals: int) -> str:
     q = amount.quantize(Decimal(10) ** -int(decimals), rounding=ROUND_DOWN)
     return format(q, 'f')
 
+def _row_amount_units(r: dict) -> int:
+    """Exact credited amount in base units for an unprocessed_txids row.
+
+    Prefers the stored integer `amount_usdd_units`; falls back to the legacy REAL
+    column for rows written before that column existed. The REAL path round-trips
+    through binary float, which can lose the last base unit.
+    """
+    units = r.get("amount_usdd_units")
+    if units is not None:
+        try:
+            return int(units)
+        except Exception:
+            pass
+    amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
+    return int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+
+
+def _quarantine_txid(r: dict, reason: str = "") -> None:
+    """Quarantine a stuck USDD credit: MOVE the funds, then record the full row.
+
+    Two bugs are fixed here. The funds were never actually moved (only a status string
+    was written), so quarantined USDD kept counting toward the backing ratio; and the
+    row was written with only (txid, sig), so every other column stayed NULL and the
+    operator's quarantine viewer always reported 0 USDD.
+    """
+    txid = r.get("txid")
+    try:
+        amt_units = _row_amount_units(r)
+    except Exception:
+        amt_units = 0
+    moved = False
+    try:
+        moved = nexus_client.quarantine_usdd(txid, amt_units, reason)
+    except Exception as e:
+        _log("USDD_QUARANTINE_MOVE_ERROR", txid=txid, error=str(e))
+    state_db.mark_quarantined_txid(
+        txid=txid,
+        sig="",
+        timestamp=r.get("ts"),
+        amount_usdd=float(r.get("amount_usdd") or 0),
+        from_address=r.get("from"),
+        to_address=r.get("to"),
+        owner=r.get("owner"),
+        status=USDD_STATUS_QUARANTINED if moved else "quarantined (USDD NOT moved)",
+    )
+    alerts.warning(
+        "usdd_quarantined",
+        reason or "USDD credit quarantined for manual review",
+        txid=txid, amount_units=amt_units, funds_moved=moved,
+    )
+
+
 def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     """Subtract a fixed Nexus congestion fee (configured in USDD token units)."""
     try:
@@ -66,8 +118,11 @@ def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     out = amount_dec - fee_dec
     return out if out > 0 else Decimal(0)
 
-def process_unprocessed_txids():
+def process_unprocessed_txids(paused: bool = False):
     """Process queued USDD→USDC entries as soon as possible.
+
+    When `paused` (backing deficit) no NEW USDC is sent out, but refunds, quarantine
+    and confirmation passes still run so user funds are never frozen by the pause.
     
     Steps 3-5 from spec:
     - Resolve receival_account via assets
@@ -127,8 +182,7 @@ def process_unprocessed_txids():
                 _log("USDD_OWNER_MISMATCH", txid=txid, recv_owner=asset_owner, expected_owner=owner)
             elif recv:
                 # Invalid token account -> refund path
-                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                amt_units = _row_amount_units(r)
                 sender = r.get("from")
                 if sender:
                     refund_key = f"usdd_refund:{txid}"
@@ -150,9 +204,9 @@ def process_unprocessed_txids():
                             state_db.remove_unprocessed_txid(txid)
                         else:
                             attempts = state_db.get_attempt_count(refund_key)
-                            if attempts >= config.MAX_ACTION_ATTEMPTS:
+                            if state_db.attempts_exhausted(refund_key):
                                 # Quarantine
-                                state_db.mark_quarantined_txid(txid=txid, sig="")
+                                _quarantine_txid(r)
                                 state_db.remove_unprocessed_txid(txid)
                                 _log("USDD_REFUND_QUARANTINED", txid=txid, reason="invalid_receival_account")
                             else:
@@ -164,8 +218,7 @@ def process_unprocessed_txids():
                 if ts_row and (time.time() - ts_row) > getattr(config, "REFUND_TIMEOUT_SEC", 3600):
                     sender = r.get("from")
                     if sender:
-                        amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                        amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                        amt_units = _row_amount_units(r)
                         refund_key = f"usdd_refund_unresolved:{txid}"
                         if state_db.should_attempt(refund_key):
                             state_db.record_attempt(refund_key)
@@ -184,9 +237,9 @@ def process_unprocessed_txids():
                                 state_db.remove_unprocessed_txid(txid)
                             else:
                                 attempts = state_db.get_attempt_count(refund_key)
-                                if attempts >= config.MAX_ACTION_ATTEMPTS:
+                                if state_db.attempts_exhausted(refund_key):
                                     # Quarantine
-                                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                                    _quarantine_txid(r)
                                     state_db.remove_unprocessed_txid(txid)
                                     _log("USDD_REFUND_QUARANTINED", txid=txid, reason="unresolved_timeout")
                                 else:
@@ -197,8 +250,8 @@ def process_unprocessed_txids():
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
             unprocessed = state_db.get_unprocessed_txids_as_dicts()
             
-            # Priority 2: Send USDC for ready entries
-            for r in list(unprocessed):
+            # Priority 2: Send USDC for ready entries (skipped while paused)
+            for r in list(unprocessed) if not paused else []:
                 if time.time() - process_start > PROCESS_BUDGET_SEC:
                     _log("USDD_PROCESS_BUDGET_EXCEEDED", stage="usdc_sending")
                     break
@@ -272,18 +325,37 @@ def process_unprocessed_txids():
                 
                 if net_usdc_units <= 0:
                     continue
-                
+
+                # Liquidity pre-check: do not promise a payout the vault cannot cover.
+                # Previously an underfunded vault only failed at send time, burning
+                # attempts and pushing a good swap into the refund path.
+                try:
+                    vault_units = solana_client.get_token_account_balance(
+                        str(config.VAULT_USDC_ACCOUNT), max_age_sec=5)
+                    if vault_units < net_usdc_units:
+                        alerts.critical(
+                            "insufficient_vault_liquidity",
+                            "vault USDC cannot cover a ready swap; holding it (not failing)",
+                            txid=txid, needed_units=net_usdc_units, vault_units=vault_units,
+                        )
+                        continue  # stay READY; retry when the vault is topped up
+                except Exception as e:
+                    _log("USDD_LIQUIDITY_CHECK_ERROR", txid=txid, error=str(e))
+
                 # Mark as sending before attempting
                 state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_SENDING)
-                
+
                 # Attempt to send USDC
                 send_key = f"usdc_send:{txid}"
                 if not state_db.should_attempt(send_key):
-                    # Max attempts exceeded -> refund path
-                    state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
-                    _log("USDD_SEND_MAX_ATTEMPTS", txid=txid)
+                    if state_db.attempts_exhausted(send_key):
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_REFUND_PENDING)
+                        _log("USDD_SEND_MAX_ATTEMPTS", txid=txid)
+                    else:
+                        # Only cooling down - keep it READY and retry on a later cycle.
+                        state_db.update_unprocessed_txid(txid=txid, status=USDD_STATUS_READY)
                     continue
-                
+
                 state_db.record_attempt(send_key)
                 
                 try:
@@ -389,7 +461,10 @@ def process_unprocessed_txids():
                 owner = r.get("owner")
                 if owner:
                     asset = nexus_client.find_asset_receival_account_by_txid_and_owner(txid, owner)
-                    if asset and asset.get("receival_account"):
+                    # Re-verify the owner explicitly, exactly as Priority 1 does. Relying on
+                    # the query filter alone made the two paths asymmetric.
+                    asset_owner = (asset or {}).get("owner")
+                    if asset and asset.get("receival_account") and asset_owner and str(asset_owner) == str(owner):
                         # Found mapping! Move back to ready for processing
                         recv = asset.get("receival_account")
                         if solana_client.is_valid_usdc_token_account(recv):
@@ -420,13 +495,12 @@ def process_unprocessed_txids():
                 
                 if not sender:
                     # Can't refund without sender address - quarantine
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    _quarantine_txid(r)
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_COLLECT_REFUND_NO_SENDER", txid=txid)
                     continue
                 
-                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                amt_units = _row_amount_units(r)
                 
                 refund_key = f"usdd_collect_refund:{txid}"
                 if state_db.should_attempt(refund_key):
@@ -447,15 +521,14 @@ def process_unprocessed_txids():
                         _log("USDD_COLLECT_REFUND_SUCCESS", txid=txid)
                     else:
                         attempts = state_db.get_attempt_count(refund_key)
-                        if attempts >= config.MAX_ACTION_ATTEMPTS:
-                            state_db.mark_quarantined_txid(txid=txid, sig="")
+                        if state_db.attempts_exhausted(refund_key):
+                            _quarantine_txid(r)
                             state_db.remove_unprocessed_txid(txid)
                             _log("USDD_COLLECT_REFUND_QUARANTINED", txid=txid, attempts=attempts)
                         else:
                             _log("USDD_COLLECT_REFUND_RETRY", txid=txid, attempts=attempts)
-                else:
-                    # Max attempts exceeded during previous calls
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                elif state_db.attempts_exhausted(refund_key):
+                    _quarantine_txid(r, "collect refund attempts exhausted")
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_COLLECT_REFUND_MAX_ATTEMPTS", txid=txid)
         
@@ -473,13 +546,12 @@ def process_unprocessed_txids():
                 sender = r.get("from")
                 
                 if not sender:
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    _quarantine_txid(r)
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_REFUND_PENDING_NO_SENDER", txid=txid)
                     continue
                 
-                amt_dec = _parse_decimal_amount(r.get("amount_usdd"))
-                amt_units = int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                amt_units = _row_amount_units(r)
                 
                 refund_key = f"usdd_refund_pending:{txid}"
                 if state_db.should_attempt(refund_key):
@@ -499,12 +571,12 @@ def process_unprocessed_txids():
                         _log("USDD_REFUND_PENDING_SUCCESS", txid=txid)
                     else:
                         attempts = state_db.get_attempt_count(refund_key)
-                        if attempts >= config.MAX_ACTION_ATTEMPTS:
-                            state_db.mark_quarantined_txid(txid=txid, sig="")
+                        if state_db.attempts_exhausted(refund_key):
+                            _quarantine_txid(r)
                             state_db.remove_unprocessed_txid(txid)
                             _log("USDD_REFUND_PENDING_QUARANTINED", txid=txid)
                 else:
-                    state_db.mark_quarantined_txid(txid=txid, sig="")
+                    _quarantine_txid(r)
                     state_db.remove_unprocessed_txid(txid)
                     _log("USDD_REFUND_PENDING_MAX_ATTEMPTS", txid=txid)
             
@@ -551,17 +623,18 @@ def poll_nexus_usdd_deposits():
         "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
     )
     base_cmd.append(projection)
-    base_cmd.append(f"name=USDD")
+    base_cmd.append(f"name={config.NEXUS_TOKEN_NAME}")
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")
 
     # Proper WHERE clause (Query DSL) for server-side filtering if enabled.
-    # We only want CREDIT contracts where contracts.to=treasury_addr AND contracts.amount >= MIN_CREDIT_USDD
+    # Filter at the DUST floor, not the swap minimum: credits between the two are real
+    # user funds that must still be fetched so they can be recorded (see below).
     # DSL operates over 'results' root; transactions list returns objects where contracts[] nested.
     # We cannot address array members directly with > filter per doc, so we still download all then client-filter by OP/to.
     # However if CLI supports simple amount filter we'll keep backward compatibility.
     # Use WHERE only if flagged to avoid incompatibility on older CLI.
-    where_threshold = getattr(config, "MIN_CREDIT_USDD", None)
+    where_threshold = getattr(config, "DUST_CREDIT_USDD", None)
     if getattr(config, "USE_NEXUS_WHERE_FILTER_USDD", True) and where_threshold:
         # Attempt to filter by amount and OP CREDIT *heuristically*; if unsupported the CLI should ignore or error (logged).
         # Syntax example from docs: command WHERE 'results.balance>10'
@@ -687,12 +760,63 @@ def poll_nexus_usdd_deposits():
                     if amount_dec <= 0:
                         continue
                         
-                    # Anti-DoS: Check minimum credit threshold
-                    min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
-                    if amount_dec < min_credit_threshold:
-                        # Ignore micro credit entirely: no state writes, no fee accounting.
+                    # Dust floor (anti-DoS): below this we ignore the credit entirely.
+                    dust_threshold = Decimal(config.DUST_CREDIT_USDD_UNITS) / (Decimal(10) ** config.USDD_DECIMALS)
+                    if amount_dec < dust_threshold:
+                        # True spam dust: no state writes, no fee accounting.
                         continue
-                        
+
+                    # Below the swap minimum but above dust: this is real user money.
+                    # It must NEVER be dropped silently - record it so the funds are
+                    # accounted for and the sender is traceable for manual resolution.
+                    min_credit_threshold = Decimal(config.MIN_CREDIT_USDD_UNITS) / (Decimal(10) ** config.USDD_DECIMALS)
+                    if amount_dec < min_credit_threshold:
+                        owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        below_min_units = int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                        if below_min_units > 0:
+                            state_db.add_fee_entry(
+                                sig=None,
+                                txid=txid,
+                                kind="below_min_credit_usdd",
+                                amount_usdc_units=None,
+                                amount_usdd_units=below_min_units,
+                            )
+                        state_db.mark_processed_txid(
+                            txid=txid,
+                            timestamp=ts,
+                            amount_usdd=float(amount_dec),
+                            from_address=sender,
+                            to_address=to_addr,
+                            owner=owner or "",
+                            sig="",
+                            status=USDD_STATUS_FEES,
+                        )
+                        processed_txids.add(txid)
+                        processed_count += 1
+                        _log("USDD_BELOW_MIN_CREDIT", txid=txid, amount=str(amount_dec),
+                             minimum=str(min_credit_threshold), sender=sender)
+                        continue
+
+
+                    # Per-swap size cap: queue oversized credits for refund rather than
+                    # committing the vault to a payout that large.
+                    max_swap_usdd = int(getattr(config, "MAX_SWAP_USDD_UNITS", 0) or 0)
+                    credit_units = int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+                    if max_swap_usdd > 0 and credit_units > max_swap_usdd:
+                        owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                        state_db.add_unprocessed_txid(
+                            txid=txid, timestamp=ts, amount_usdd=float(amount_dec),
+                            from_address=sender, to_address=to_addr, owner_from_address=owner,
+                            confirmations_credit=conf, status=USDD_STATUS_REFUND_PENDING,
+                            amount_usdd_units=credit_units,
+                        )
+                        unprocessed_txids.add(txid)
+                        processed_count += 1
+                        alerts.warning("swap_over_cap",
+                                       "USDD credit exceeds MAX_SWAP_USDD; queued for refund",
+                                       txid=txid, amount_units=credit_units, cap_units=max_swap_usdd)
+                        continue
+
                     flat_usdd_dec = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
                     dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
                     dyn_fee_dec = (amount_dec * Decimal(max(0, dyn_bps))) / Decimal(10000)
@@ -734,7 +858,9 @@ def poll_nexus_usdd_deposits():
                         to_address=to_addr,
                         owner_from_address=owner,
                         confirmations_credit=conf,
-                        status=USDD_STATUS_PENDING
+                        status=USDD_STATUS_PENDING,
+                        # Exact base units: refunds are derived from this, not the REAL column.
+                        amount_usdd_units=int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)),
                     )
                     unprocessed_txids.add(txid)
                     processed_count += 1

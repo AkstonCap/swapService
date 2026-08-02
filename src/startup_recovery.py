@@ -16,7 +16,7 @@ Design notes:
  - Reference seeding heuristic: choose max(reference found in database OR Nexus) + 1.
 """
 from __future__ import annotations
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from . import config, solana_client, nexus_client, state_db
 import time
 
@@ -100,7 +100,9 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
                 continue
             
             # Check minimum threshold
-            min_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
+            # Dust floor, matching poll_nexus_usdd_deposits: credits above dust but below
+            # the swap minimum are recorded (as fees) rather than skipped without trace.
+            min_threshold = config.DUST_CREDIT_USDD_UNITS / (10 ** config.USDD_DECIMALS)
             if amount_dec < min_threshold:
                 continue
             
@@ -136,7 +138,9 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
                 to_address=treasury_addr,
                 owner_from_address=owner,
                 confirmations_credit=conf,
-                status="pending_receival"
+                status="pending_receival",
+                # Exact base units: refunds are derived from this, not the REAL column.
+                amount_usdd_units=int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)),
             )
             unprocessed_txids.add(txid)
             added_count += 1
@@ -157,7 +161,7 @@ def _rebuild_solana_from_waterline(waterline_timestamp: int) -> dict:
     Rebuilds:
     - processed_txids markers (from nexus_txid: memos)
     - refunded_txids markers (from refundSig: memos)
-    - quarantined_txids markers (from quarantinedSig: memos)
+    - quarantined_sigs markers (from quarantinedSig: memos - USDC side, keyed by deposit sig)
     
     Returns dict with stats.
     """
@@ -173,8 +177,8 @@ def _rebuild_solana_from_waterline(waterline_timestamp: int) -> dict:
     processed_txids = {row[0] for row in cursor.fetchall()}
     cursor.execute("SELECT sig FROM refunded_sigs")
     refunded_sigs = {row[0] for row in cursor.fetchall()}
-    cursor.execute("SELECT txid FROM quarantined_txids")
-    quarantined_txids = {row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT sig FROM quarantined_sigs")
+    quarantined_sig_set = {row[0] for row in cursor.fetchall()}
     conn.close()
     
     # Rebuild processed markers
@@ -223,11 +227,16 @@ def _rebuild_solana_from_waterline(waterline_timestamp: int) -> dict:
     # Rebuild quarantined markers
     added_quarantine = 0
     for qsig in memo_map.get('quarantined_sigs', {}).keys():
-        if qsig in quarantined_txids:
+        if qsig in quarantined_sig_set:
             continue
         try:
-            state_db.mark_quarantined_txid(txid=qsig, sig="")
-            quarantined_txids.add(qsig)
+            # USDC-side quarantine: belongs in quarantined_sigs, keyed by deposit signature.
+            state_db.mark_quarantined_sig(
+                sig=qsig, timestamp=int(time.time()), from_address="",
+                amount_usdc_units=0, memo=None, quarantine_sig=None,
+                quarantined_units=None, status="reconstructed from on-chain memo",
+            )
+            quarantined_sig_set.add(qsig)
             added_quarantine += 1
         except Exception:
             pass
@@ -257,8 +266,8 @@ def _fallback_recent_scan() -> dict:
     processed_txids = {row[0] for row in cursor.fetchall()}
     cursor.execute("SELECT sig FROM refunded_sigs")
     refunded_sigs = {row[0] for row in cursor.fetchall()}
-    cursor.execute("SELECT txid FROM quarantined_txids")
-    quarantined_txids = {row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT sig FROM quarantined_sigs")
+    quarantined_sig_set = {row[0] for row in cursor.fetchall()}
     conn.close()
     
     added_nexus = 0
@@ -307,10 +316,15 @@ def _fallback_recent_scan() -> dict:
     found_quarantine = len(memo_map.get('quarantined_sigs', {})) if isinstance(memo_map, dict) else 0
     if found_quarantine:
         for qsig in memo_map.get('quarantined_sigs', {}).keys():
-            if qsig in quarantined_txids:
+            if qsig in quarantined_sig_set:
                 continue
             try:
-                state_db.mark_quarantined_txid(txid=qsig, sig="")
+                state_db.mark_quarantined_sig(
+                    sig=qsig, timestamp=int(time.time()), from_address="",
+                    amount_usdc_units=0, memo=None, quarantine_sig=None,
+                    quarantined_units=None, status="reconstructed from on-chain memo",
+                )
+                quarantined_sig_set.add(qsig)
                 added_quarantine += 1
             except Exception:
                 pass

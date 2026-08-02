@@ -1,6 +1,7 @@
+import os
 import time
 import threading
-from . import config, state_db  # switched from JSON state to DB only
+from . import config, state_db, alerts  # switched from JSON state to DB only
 from .swap_solana import poll_solana_deposits
 from .swap_nexus import poll_nexus_usdd_deposits, process_unprocessed_txids
 from .nexus_client import get_heartbeat_asset, update_heartbeat_asset
@@ -32,22 +33,76 @@ def _safe_call(fn, *args, timeout_sec=5, **kwargs):
     return result.get("value")
 
 
+_lock_handle = None
+
+
+def acquire_singleton_lock() -> bool:
+    """Take an exclusive lock so two instances can never share the state DB.
+
+    Without this, a double start (systemd restart that fails to reap, or a manual run
+    alongside the service) puts two processes on one SQLite file with no cross-process
+    mutual exclusion - the same debit can be executed twice. The handle is kept for the
+    process lifetime; the OS releases it on exit.
+    """
+    global _lock_handle
+    lock_path = os.getenv("SWAP_LOCK_PATH") or (str(getattr(state_db, "DB_PATH", "swap_service.db")) + ".lock")
+    try:
+        import fcntl
+    except ImportError:
+        print(f"[lock] fcntl unavailable on this platform; SINGLE-INSTANCE IS NOT ENFORCED. "
+              f"Ensure by other means that only one instance runs.")
+        return True
+    try:
+        handle = open(lock_path, "w")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.write(str(os.getpid()))
+        handle.flush()
+        _lock_handle = handle  # keep open: closing would release the lock
+        print(f"[lock] acquired {lock_path} (pid {os.getpid()})")
+        return True
+    except BlockingIOError:
+        print(f"[lock] another swapService instance already holds {lock_path}; refusing to start. "
+              f"Two instances sharing the state DB can double-spend.")
+        return False
+    except Exception as e:
+        print(f"[lock] could not acquire {lock_path}: {e}; refusing to start.")
+        return False
+
+
+# Threads started by _run_with_watchdog, keyed by label, so a cycle never starts a
+# second copy of a poller that is still running.
+_running_pollers: dict = {}
+
+
 def _run_with_watchdog(func, label, budget_sec):
-    """Run function in thread with timeout watchdog."""
+    """Run `func` in a thread, bounded by `budget_sec`.
+
+    A thread cannot be forcibly cancelled, so exceeding the budget does NOT stop the
+    work - it keeps running. Previously the loop then started another copy each cycle,
+    letting two pollers race the same rows and debit twice. Now an over-budget poller
+    simply blocks its own next run until it finishes.
+    """
+    prev = _running_pollers.get(label)
+    if prev is not None and prev.is_alive():
+        print(f"[watchdog] {label} from a previous cycle is still running; not starting another")
+        return
+
     exc_result = {}
-    
+
     def _wrapper():
         try:
             func()
         except Exception as e:
             exc_result["error"] = e
-    
+
     thread = threading.Thread(target=_wrapper, daemon=True)
+    _running_pollers[label] = thread
     thread.start()
     thread.join(budget_sec)
-    
+
     if thread.is_alive():
-        print(f"[watchdog] {label} exceeded {budget_sec}s budget; skipping remainder this cycle")
+        print(f"[watchdog] {label} exceeded {budget_sec}s budget; still running in background "
+              f"(its next cycle will be skipped until it finishes)")
 
 
 def _process_stale_deposits():
@@ -91,6 +146,11 @@ def _process_stale_deposits():
 def run():
     # Ensure the SQLite schema exists before any state access (idempotent).
     state_db.init_db()
+
+    # Refuse to run a second instance against the same state DB.
+    if not acquire_singleton_lock():
+        return
+
     print("\n")
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
@@ -99,6 +159,29 @@ def run():
     print("   Monitoring:")
     print("   - USDC → USDD: Solana deposits with memo nexus:<USDD_ACCOUNT>")
     print("   - USDD → USDC: USDD deposits mapped via distordiaBridge asset (txid_toService + receival_account)\n")
+
+    # A minimum at or below its flat fee means the user nets ~nothing while the swap is
+    # still recorded as successful. config raises such minimums to 2x the fee; say so.
+    if getattr(config, "MIN_DEPOSIT_USDC_RAISED", False):
+        print(f"   ⚠ MIN_DEPOSIT_USDC was below 2x the flat fee and has been raised to "
+              f"{config.MIN_DEPOSIT_USDC_UNITS} base units. Update your docs/.env to match.")
+    if getattr(config, "MIN_CREDIT_USDD_RAISED", False):
+        print(f"   ⚠ MIN_CREDIT_USDD was below 2x the flat fee and has been raised to "
+              f"{config.MIN_CREDIT_USDD_UNITS} base units. Update your docs/.env to match.")
+    if not (getattr(config, "ALERT_WEBHOOK_URL", None) or getattr(config, "ALERT_COMMAND", None)):
+        print("   ⚠ No ALERT_WEBHOOK_URL/ALERT_COMMAND configured — backing pauses, unbacked-mint "
+              "discrepancies and halted pollers will only appear on stdout.")
+
+    # Fail loudly on a heartbeat asset that cannot accept the fields we write: every
+    # update would fail atomically, silently freezing the heartbeat and both waterlines.
+    try:
+        from . import nexus_client as _nc
+        hb_ok, hb_msg = _safe_call(_nc.validate_heartbeat_asset, timeout_sec=10)
+        print(f"   {'✓' if hb_ok else '⚠'} Heartbeat: {hb_msg}")
+        if not hb_ok:
+            alerts.critical("heartbeat_asset_invalid", hb_msg)
+    except Exception as e:
+        print(f"   ⚠ Heartbeat validation error: {e}")
 
     # Startup balances summary (USDC vault + USDD circulating supply) with timeout protection
     try:
@@ -137,7 +220,10 @@ def run():
         from . import balance_reconciler
         bal_result = balance_reconciler.run_balance_reconciliation(dry_run=True)
         if bal_result.get('discrepancies'):
-            print(f"   ⚠ Balance check: {len(bal_result['discrepancies'])} addresses have surplus USDD (total: {bal_result.get('total_surplus_usdd', 0)} units)")
+            alerts.critical("unbacked_usdd_surplus",
+                            "addresses hold more USDD than their deposits justify (possible double-mint)",
+                            addresses=len(bal_result['discrepancies']),
+                            total_surplus_units=bal_result.get('total_surplus_usdd', 0))
         else:
             print(f"   ✓ Balance check: All {bal_result.get('checked_addresses', 0)} USDD addresses match expected balances")
     except Exception as e:
@@ -165,6 +251,9 @@ def run():
 
     try:
         while not _stop_event.is_set():
+            # Fail safe: if the backing check itself errors we treat the cycle as paused
+            # (no new exposure) rather than assuming everything is fine.
+            should_pause = True
             # Safety and maintenance first with timeout protection
             try:
                 from . import fees, nexus_client, solana_client
@@ -182,16 +271,17 @@ def run():
                         pending_deposits = False
                         try:
                             unproc_rows = state_db.get_unprocessed_sigs()  # DB rows
-                            if any(True for _sig, _ts, _memo, _from, _amt, _status, _txid in unproc_rows if _status in (None, 'ready for processing','memo unresolved','refunded','debited, awaiting confirmations')):
+                            # 'debit in flight'/'debit unverified' MUST count as pending: minting
+                            # a fee surplus while a debit may still land would double-count it.
+                            if any(True for _sig, _ts, _memo, _from, _amt, _status, _txid in unproc_rows if _status in (None, 'ready for processing','memo unresolved','refunded','debited, awaiting confirmation','debited, awaiting confirmations','debit in flight','debit unverified')):
                                 pending_deposits = True
                         except Exception:
                             pending_deposits = True  # fail safe
                         threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS', 0)
                         if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            # surplus is in base units; debit_usdd_with_txid expects token units.
-                            surplus_tokens = surplus / (10 ** config.USDD_DECIMALS)
+                            # Both are base units; debit_usdd_with_txid formats for the CLI.
                             ref = state_db.next_reference()
-                            res = _safe_call(nexus_client.debit_usdd_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, surplus_tokens, ref, timeout_sec=15)
+                            res = _safe_call(nexus_client.debit_usdd_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(surplus), ref, timeout_sec=15)
                             if res and res[0]:
                                 print(f"[reconcile] Minted {surplus} USDD to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()
@@ -205,7 +295,10 @@ def run():
                         from . import balance_reconciler
                         bal_result = _safe_call(balance_reconciler.run_balance_reconciliation, dry_run=True, timeout_sec=15)
                         if bal_result.get('discrepancies'):
-                            print(f"[balance_check] ⚠ Found {len(bal_result['discrepancies'])} addresses with surplus USDD (total: {bal_result.get('total_surplus_usdd', 0)} units)")
+                            alerts.critical("unbacked_usdd_surplus",
+                                            "addresses hold more USDD than their deposits justify (possible double-mint)",
+                                            addresses=len(bal_result['discrepancies']),
+                                            total_surplus_units=bal_result.get('total_surplus_usdd', 0))
                     except Exception as e:
                         print(f"[balance_check] error: {e}")
                 
@@ -238,9 +331,13 @@ def run():
                         print(f"[metrics] error: {e}")
                 
                 if should_pause:
-                    if _stop_event.wait(config.POLL_INTERVAL):
-                        break
-                    continue
+                    # Do NOT skip the cycle. Pausing used to `continue`, freezing refunds
+                    # and quarantine of already-stuck user funds along with new swaps.
+                    # Instead run the pollers in paused mode: no new exposure, but money
+                    # already owed to users keeps moving.
+                    alerts.critical("backing_deficit_pause",
+                                    "vault USDC below the configured floor vs circulating USDD; "
+                                    "new swaps paused, refunds and quarantine still running")
             except Exception as e:
                 print(f"Maintenance error: {e}")
 
@@ -254,7 +351,7 @@ def run():
             
             if _stop_event.is_set():
                 break
-            _run_with_watchdog(poll_solana_deposits, "solana", SOLANA_BUDGET)
+            _run_with_watchdog(lambda: poll_solana_deposits(paused=bool(should_pause)), "solana", SOLANA_BUDGET)
             
             if _stop_event.is_set():
                 break
@@ -267,7 +364,7 @@ def run():
             
             if _stop_event.is_set():
                 break
-            _run_with_watchdog(process_unprocessed_txids, "nexus_process", NEXUS_PROCESS_BUDGET)
+            _run_with_watchdog(lambda: process_unprocessed_txids(paused=bool(should_pause)), "nexus_process", NEXUS_PROCESS_BUDGET)
             
             if _stop_event.is_set():
                 break

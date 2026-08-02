@@ -51,6 +51,16 @@ MAX_ACTION_ATTEMPTS = int(os.getenv("MAX_ACTION_ATTEMPTS", "3"))
 ACTION_RETRY_COOLDOWN_SEC = int(os.getenv("ACTION_RETRY_COOLDOWN_SEC", "300"))
 
 # Timeout and hang prevention
+# Commitment used when INGESTING deposits and when treating our own payouts as settled.
+# 'confirmed' is supermajority-voted but NOT rooted and can still be reorged: minting USDD
+# against a reorged deposit leaves permanently unbacked supply, and Nexus cannot learn of a
+# Solana reorg. Default to 'finalized' (~13s slower, irreversible). Lower it only if you
+# accept that risk, and preferably only below SOLANA_FINALIZED_ABOVE_UNITS.
+SOLANA_DEPOSIT_COMMITMENT = os.getenv("SOLANA_DEPOSIT_COMMITMENT", "finalized")
+# Deposits at or above this size ALWAYS require 'finalized', even if the commitment above
+# is relaxed. 0 disables the carve-out (i.e. the commitment above applies to every amount).
+SOLANA_FINALIZED_ABOVE_UNITS = int(os.getenv("SOLANA_FINALIZED_ABOVE_UNITS", "0"))
+
 SOLANA_RPC_TIMEOUT_SEC = int(os.getenv("SOLANA_RPC_TIMEOUT_SEC", "8"))
 SOLANA_TX_FETCH_TIMEOUT_SEC = int(os.getenv("SOLANA_TX_FETCH_TIMEOUT_SEC", "12"))
 SOLANA_POLL_TIME_BUDGET_SEC = int(os.getenv("SOLANA_POLL_TIME_BUDGET_SEC", "15"))
@@ -65,6 +75,9 @@ METRICS_INTERVAL_SEC = int(os.getenv("METRICS_INTERVAL_SEC", "30"))
 REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
 STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
 USDC_CONFIRM_TIMEOUT_SEC = int(os.getenv("USDC_CONFIRM_TIMEOUT_SEC", "600"))  # 10 minutes default for USDD->USDC confirmations
+# How long to keep verifying an ambiguous USDD debit against the chain before concluding
+# it never executed. Must comfortably exceed Nexus block/propagation time.
+DEBIT_VERIFY_GRACE_SEC = int(os.getenv("DEBIT_VERIFY_GRACE_SEC", "300"))
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")
@@ -74,7 +87,11 @@ HEARTBEAT_MIN_INTERVAL_SEC = max(10, int(os.getenv("HEARTBEAT_MIN_INTERVAL_SEC",
 # Optional waterline fields to bound reprocessing
 HEARTBEAT_WATERLINE_ENABLED = os.getenv("HEARTBEAT_WATERLINE_ENABLED", "true").lower() in ("1","true","yes","on")
 HEARTBEAT_WATERLINE_SOLANA_FIELD = os.getenv("HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
-HEARTBEAT_WATERLINE_NEXUS_FIELD = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_usdd")
+# Must match the field actually present on the heartbeat asset. `format=basic` locks the
+# field set at creation, so a mismatch makes EVERY heartbeat update fail atomically
+# (taking last_poll_timestamp and the Solana waterline with it). Canonical name per
+# ASSET_STANDARD.md and create_heartbeat_asset.py is `last_safe_timestamp_nexus`.
+HEARTBEAT_WATERLINE_NEXUS_FIELD = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
 HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC", "120"))  # safety margin (seconds) subtracted from waterline when filtering
 
 # Fees (optional)
@@ -99,10 +116,27 @@ FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 
 # Anti-DoS protections
-MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.100101")  # minimum deposit to process as swap
-MIN_DEPOSIT_USDC_UNITS = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
-MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "0.500501")  # minimum credit to process as swap
-MIN_CREDIT_USDD_UNITS = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.2")  # = 2x FLAT_FEE_USDD; nets ~0.0998 USDD
+_MIN_DEPOSIT_USDC_CONFIGURED = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
+# A minimum at or below the flat fee means the user nets ~nothing while the swap is still
+# recorded as successful (0.100101 USDC against a 0.1 fee netted 0.0000009 USDD - below one
+# base unit). Enforce a floor of 2x the flat fee so the output is always at least the fee.
+MIN_DEPOSIT_USDC_UNITS = max(_MIN_DEPOSIT_USDC_CONFIGURED, 2 * FLAT_FEE_USDC_UNITS_REFUND)
+MIN_DEPOSIT_USDC_RAISED = MIN_DEPOSIT_USDC_UNITS > _MIN_DEPOSIT_USDC_CONFIGURED
+# Minimum USDD credit that is swapped for USDC. Must stay ABOVE the USDD->USDC fee
+# (FLAT_FEE_USDC + dynamic), or the swap nets <= 0 and the whole credit becomes a fee.
+# Keep README.md / CONFIG.md / .env.example in sync with this value: users who follow a
+# documented minimum lower than this one previously had their credit silently destroyed.
+MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "1.0")  # = 2x FLAT_FEE_USDC; nets ~0.499 USDC
+_MIN_CREDIT_USDD_CONFIGURED = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+# Same floor rule as MIN_DEPOSIT_USDC: this direction's flat fee is FLAT_FEE_USDC.
+MIN_CREDIT_USDD_UNITS = max(_MIN_CREDIT_USDD_CONFIGURED, 2 * FLAT_FEE_USDC_UNITS)
+MIN_CREDIT_USDD_RAISED = MIN_CREDIT_USDD_UNITS > _MIN_CREDIT_USDD_CONFIGURED
+# Anti-DoS dust floor. Credits BELOW this are ignored entirely (no state, no accounting).
+# Credits between this floor and MIN_CREDIT_USDD are real user funds: they are recorded
+# and booked as fees rather than dropped without trace.
+DUST_CREDIT_USDD = os.getenv("DUST_CREDIT_USDD", "0.01")
+DUST_CREDIT_USDD_UNITS = _to_units(DUST_CREDIT_USDD, USDD_DECIMALS)
 MAX_DEPOSITS_PER_LOOP = int(os.getenv("MAX_DEPOSITS_PER_LOOP", "100"))  # batch processing limit
 MAX_CREDITS_PER_LOOP = int(os.getenv("MAX_CREDITS_PER_LOOP", "100"))  # batch processing limit for USDD credits
 MICRO_DEPOSIT_FEE_PCT = int(os.getenv("MICRO_DEPOSIT_FEE_PCT", "100"))  # 100% fee for sub-minimum deposits
@@ -136,6 +170,24 @@ FEES_USDD_MAX = int(os.getenv("FEES_USDD_MAX", "0"))
 
 # Quarantine account for failed refunds (USDC token account we own)
 USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
+
+# --- Exposure caps (defence in depth against a bug or a compromised key) ---
+# Largest single swap accepted. Oversized items are refunded rather than paid out.
+# 0 disables the cap.
+MAX_SWAP_USDC = os.getenv("MAX_SWAP_USDC", "0")
+MAX_SWAP_USDC_UNITS = _to_units(MAX_SWAP_USDC, USDC_DECIMALS)
+MAX_SWAP_USDD = os.getenv("MAX_SWAP_USDD", "0")
+MAX_SWAP_USDD_UNITS = _to_units(MAX_SWAP_USDD, USDD_DECIMALS)
+# Rolling 24h ceiling on total outbound USDC. Enforced independently of the polling loop,
+# so a runaway loop or a stolen key cannot drain the vault in one go. 0 disables.
+DAILY_PAYOUT_CAP_USDC = os.getenv("DAILY_PAYOUT_CAP_USDC", "0")
+DAILY_PAYOUT_CAP_USDC_UNITS = _to_units(DAILY_PAYOUT_CAP_USDC, USDC_DECIMALS)
+
+# --- Alerting (operator notification) ---
+# Without one of these, discrepancies/pauses/halts are only visible on stdout.
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")      # POSTed a JSON body
+ALERT_COMMAND = os.getenv("ALERT_COMMAND")              # argv0; receives JSON on stdin
+ALERT_MIN_INTERVAL_SEC = int(os.getenv("ALERT_MIN_INTERVAL_SEC", "300"))  # per-event dedupe
 
 # Target accumulation ratio: 1 SOL for every 10000 NXS by default
 TARGET_SOL_PER_NXS_NUM = int(os.getenv("TARGET_SOL_PER_NXS_NUM", "1"))

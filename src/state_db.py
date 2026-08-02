@@ -178,6 +178,18 @@ def init_db():
         )
     """)
     
+    # Outbound payout ledger, for rolling exposure caps
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            amount_usdc_units INTEGER NOT NULL,
+            reference TEXT,
+            timestamp INTEGER NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_payouts_ts ON payouts(timestamp)")
+
     # Fee summary (optional aggregated view)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS fee_summary (
@@ -195,6 +207,19 @@ def init_db():
     _utx_cols = {row[1] for row in cursor.fetchall()}
     if "sig" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN sig TEXT")
+    # Exact base-unit amount. `amount_usdd` is REAL, so deriving a refund from it
+    # round-trips through binary float (8.29 -> 8289999 base units, a 1-unit shortfall).
+    if "amount_usdd_units" not in _utx_cols:
+        cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN amount_usdd_units INTEGER")
+
+    # unprocessed_sigs.reference records the Nexus debit reference BEFORE the debit is
+    # attempted, so a crash or an unparsed CLI response can be resolved against the
+    # chain instead of being guessed at (which previously double-minted, or minted
+    # AND refunded).
+    cursor.execute("PRAGMA table_info(unprocessed_sigs)")
+    _usig_cols = {row[1] for row in cursor.fetchall()}
+    if "reference" not in _usig_cols:
+        cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN reference INTEGER")
 
     conn.commit()
     conn.close()
@@ -362,6 +387,40 @@ def update_unprocessed_sig_txid(sig: str, txid: str | None):
     """, (txid, sig))
     conn.commit()
     conn.close()
+
+def set_unprocessed_sig_reference(sig: str, reference: int | None):
+    """Persist the Nexus debit reference for a deposit (written BEFORE the debit)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE unprocessed_sigs SET reference = ? WHERE sig = ?", (reference, sig))
+    conn.commit()
+    conn.close()
+
+
+def get_sigs_pending_debit_verification(statuses: tuple, limit: int = 500) -> List[Tuple]:
+    """Rows whose debit outcome is unknown and must be resolved against the chain.
+
+    Returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference)
+    """
+    if not statuses:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in statuses)
+    cursor.execute(
+        f"""
+        SELECT sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference
+        FROM unprocessed_sigs
+        WHERE status IN ({placeholders})
+        ORDER BY timestamp ASC
+        LIMIT ?
+        """,
+        tuple(statuses) + (limit,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 
 def remove_unprocessed_sig(sig: str):
     conn = sqlite3.connect(DB_PATH)
@@ -587,15 +646,75 @@ def is_refunded_txid(txid: str) -> bool:
 
 ## Quarantined txids
 
-def mark_quarantined_txid(txid: str, sig: str):
+def mark_quarantined_txid(
+    txid: str,
+    sig: str = "",
+    timestamp: int | None = None,
+    amount_usdd: float | None = None,
+    from_address: str | None = None,
+    to_address: str | None = None,
+    owner: str | None = None,
+    status: str | None = None,
+):
+    """Record a quarantined Nexus txid.
+
+    Previously this wrote only (txid, sig), leaving amount/from/to/owner permanently
+    NULL - so quarantine_viewer summed `amount_usdd` and always reported 0 USDD
+    quarantined, however much was actually stuck. Populate the full row.
+    """
+    import time as _time
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO quarantined_txids (txid, sig)
-        VALUES (?, ?)
-    """, (txid, sig))
+    # Preserve any previously-recorded detail if this is a re-mark with fewer fields.
+    cursor.execute("SELECT timestamp, amount_usdd, from_address, to_address, owner, status "
+                   "FROM quarantined_txids WHERE txid = ?", (txid,))
+    prev = cursor.fetchone() or (None, None, None, None, None, None)
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO quarantined_txids
+        (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            txid,
+            timestamp if timestamp is not None else (prev[0] if prev[0] is not None else int(_time.time())),
+            amount_usdd if amount_usdd is not None else prev[1],
+            from_address if from_address is not None else prev[2],
+            to_address if to_address is not None else prev[3],
+            owner if owner is not None else prev[4],
+            sig,
+            status if status is not None else prev[5],
+        ),
+    )
     conn.commit()
     conn.close()
+
+
+## Outbound payout ledger (rolling exposure caps)
+
+def record_payout(kind: str, amount_usdc_units: int, reference: str | None = None):
+    """Log an outbound USDC payment for rolling-cap accounting."""
+    import time as _time
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO payouts (kind, amount_usdc_units, reference, timestamp) VALUES (?, ?, ?, ?)",
+        (kind, int(amount_usdc_units or 0), reference, int(_time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+
+def payouts_since(seconds: int) -> int:
+    """Total outbound USDC base units paid in the last `seconds`."""
+    import time as _time
+    cutoff = int(_time.time()) - int(seconds)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(SUM(amount_usdc_units), 0) FROM payouts WHERE timestamp >= ?", (cutoff,))
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row and row[0] else 0
 
 def is_quarantined_txid(txid: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
@@ -756,27 +875,59 @@ def cleanup_expired_reservations(ttl_sec: int = 300):
 
 ## Attempts tracking (for retry logic)
 
-def should_attempt(action_key: str, max_attempts: int = 3) -> bool:
-    """Check if action should be attempted based on attempt count.
-    
-    Args:
-        action_key: Unique identifier for the action
-        max_attempts: Maximum allowed attempts (default 3)
-    
-    Returns:
-        True if attempt count < max_attempts, False otherwise.
-    """
+def _attempt_row(action_key: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT count FROM attempts WHERE action_key = ?
-    """, (action_key,))
+    cursor.execute("SELECT count, last_timestamp FROM attempts WHERE action_key = ?", (action_key,))
     row = cursor.fetchone()
     conn.close()
-    
+    return row
+
+
+def attempts_exhausted(action_key: str, max_attempts: int | None = None) -> bool:
+    """True when the action has used up its retry budget (terminal - quarantine/refund)."""
+    if max_attempts is None:
+        try:
+            from . import config as _cfg
+            max_attempts = int(getattr(_cfg, "MAX_ACTION_ATTEMPTS", 3))
+        except Exception:
+            max_attempts = 3
+    row = _attempt_row(action_key)
+    return bool(row and row[0] >= max_attempts)
+
+
+def should_attempt(action_key: str, max_attempts: int | None = None,
+                   cooldown_sec: int | None = None) -> bool:
+    """True if the action may be attempted RIGHT NOW.
+
+    Two distinct reasons return False - the retry budget is spent, or the cooldown has
+    not elapsed. Callers must not treat them alike: use attempts_exhausted() for the
+    terminal decision, otherwise simply retry on a later cycle.
+
+    Previously this compared the counter only, so ACTION_RETRY_COOLDOWN_SEC - documented
+    in README/SECURITY.md as the defence against fee-draining retry loops - did nothing,
+    and retries fired every poll interval.
+    """
+    import time as _time
+    try:
+        from . import config as _cfg
+        if max_attempts is None:
+            max_attempts = int(getattr(_cfg, "MAX_ACTION_ATTEMPTS", 3))
+        if cooldown_sec is None:
+            cooldown_sec = int(getattr(_cfg, "ACTION_RETRY_COOLDOWN_SEC", 300))
+    except Exception:
+        max_attempts = max_attempts or 3
+        cooldown_sec = cooldown_sec or 300
+
+    row = _attempt_row(action_key)
     if row is None:
-        return True  # No attempts yet
-    return row[0] < max_attempts
+        return True  # never attempted
+    count, last_ts = row[0], row[1] or 0
+    if count >= max_attempts:
+        return False
+    if last_ts and (int(_time.time()) - int(last_ts)) < int(cooldown_sec):
+        return False  # cooling down, not exhausted
+    return True
 
 
 def record_attempt(action_key: str):
@@ -814,6 +965,16 @@ def get_attempt_count(action_key: str) -> int:
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else 0
+
+
+def get_attempt_last_timestamp(action_key: str) -> int:
+    """Unix time of the most recent recorded attempt (0 if none)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_timestamp FROM attempts WHERE action_key = ?", (action_key,))
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row and row[0] else 0
 
 
 def reset_attempts(action_key: str):
@@ -1120,15 +1281,16 @@ def add_unprocessed_txid(
     status: str | None = None,
     receival_account: str | None = None,
     sig: str | None = None,
+    amount_usdd_units: int | None = None,
 ) -> None:
     """Add or update an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO unprocessed_txids
-        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig))
+        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units))
     conn.commit()
     conn.close()
 
@@ -1142,7 +1304,7 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig
+        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units
         FROM unprocessed_txids
         ORDER BY timestamp ASC
         LIMIT ?
@@ -1274,7 +1436,8 @@ def get_unprocessed_txids_as_dicts(limit: int = 1000) -> list[dict]:
             "confirmations": t[6],  # confirmations_credit
             "comment": t[7],  # status
             "receival_account": t[8] if len(t) > 8 else None,
-            "sig": t[9] if len(t) > 9 else None
+            "sig": t[9] if len(t) > 9 else None,
+            "amount_usdd_units": t[10] if len(t) > 10 else None
         }
         for t in tuples
     ]

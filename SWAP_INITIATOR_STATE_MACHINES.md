@@ -13,7 +13,7 @@ The user sends USDC on Solana and receives USDD on Nexus.
 - A Solana wallet with USDC balance (e.g., Phantom, Solflare, or CLI)
 - The wallet must support attaching a **memo** to SPL token transfers
 - A valid Nexus USDD token account to receive USDD
-- Minimum amount: `0.100101 USDC` (amounts below this are treated as fees)
+- Minimum amount: `0.2 USDC` (= 2x the 0.1 flat fee; amounts below this are treated as fees, no USDC is returned)
 
 ### State Diagram
 
@@ -24,7 +24,7 @@ stateDiagram-v2
     state PrepareTransaction {
         [*] --> ValidateNexusAddress : Look up your Nexus USDD account address
         ValidateNexusAddress --> FormMemo : Format memo as nexus:YOUR_USDD_ADDRESS
-        FormMemo --> SetAmount : Choose amount >= 0.100101 USDC
+        FormMemo --> SetAmount : Choose amount >= 0.2 USDC
         SetAmount --> SetDestination : Set destination to vault USDC token account
     }
 
@@ -62,7 +62,7 @@ stateDiagram-v2
 | 4 | **SolanaConfirmed** | Transaction confirmed on Solana (visible in explorer) | Not yet detected | 1-2 Solana slots (~0.4-0.8s) |
 | 5 | **ServiceDetected** | Waiting — deposit detected by service | `unprocessed_sigs` — `ready for processing` | Up to `POLL_INTERVAL` (default 10s) |
 | 6 | **ServiceValidating** | Waiting — service validating memo and Nexus account | `unprocessed_sigs` — being processed | Seconds |
-| 7 | **USDDMinting** | Waiting — USDD debit sent to Nexus, awaiting confirmation | `unprocessed_sigs` — `debited, awaiting confirmation` | Nexus block time (~50s) |
+| 7 | **USDDMinting** | Waiting — USDD debit issued. If the node's response is unclear the row sits in `debit in flight` / `debit unverified` while the service checks the chain by reference; it is never refunded on an unclear answer | `unprocessed_sigs` — `debit in flight` → `debit unverified` → `debited, awaiting confirmation` | Nexus block time (~50s), up to `DEBIT_VERIFY_GRACE_SEC` if unclear |
 | 8 | **USDDDelivered** | USDD received in Nexus account | `processed_sigs` — `debit_confirmed` | Terminal |
 | 9 | **RefundInitiated** | Waiting for refund | `unprocessed_sigs` — `to be refunded` | Up to `ACTION_RETRY_COOLDOWN_SEC` |
 | 10 | **RefundReceived** | USDC returned to original Solana token account (minus flat fee) | `refunded_sigs` — `refund_confirmed` | Terminal |
@@ -75,7 +75,7 @@ stateDiagram-v2
 | Flat fee | `FLAT_FEE_USDD` (default 0.1 USDC-equivalent) | Deducted from swap amount |
 | Dynamic fee | `DYNAMIC_FEE_BPS` / 10000 of amount (default 0.1%) | Deducted from swap amount |
 | Refund fee | `FLAT_FEE_USDD` (default 0.1 USDC) | Deducted from refund amount |
-| Micro deposit (amount <= fees) | 100% — entire amount kept as fee | No USDD sent |
+| Below minimum (amount < `MIN_DEPOSIT_USDC`) | 100% — entire amount kept as fee | No USDD sent, no refund |
 
 **Net USDD received** = `USDC_amount - flat_fee - (USDC_amount * dynamic_fee_bps / 10000)`
 
@@ -88,7 +88,7 @@ stateDiagram-v2
 | USDD received | Swap complete; verify in Nexus wallet |
 | USDC refunded | Check memo for reason; fix and retry if desired |
 | No USDD and no refund after 1+ hour | Check service heartbeat; contact operator if service appears down |
-| Amount below minimum | Amount is treated as a fee; do not send below `0.100101 USDC` |
+| Amount below minimum | Amount is treated as a fee; do not send below `0.2 USDC` |
 
 ### Step-by-Step Instructions
 
@@ -98,7 +98,7 @@ stateDiagram-v2
    ```
    Destination: <VAULT_USDC_ACCOUNT>  (e.g., Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ)
    Memo:        nexus:<YOUR_NEXUS_USDD_ACCOUNT_ADDRESS>
-   Amount:      >= 0.100101 USDC
+   Amount:      >= 0.2 USDC
    ```
 
    Using Solana CLI:
@@ -137,7 +137,7 @@ The user sends USDD on Nexus and receives USDC on Solana.
   - Most wallets (Phantom, Solflare) auto-create on first receive
   - Power users: `spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
   - **The service will NOT create your USDC ATA** — it must already exist
-- Minimum amount: `0.500501 USDD` (amounts below `MIN_CREDIT_USDD` are treated as fees)
+- Minimum amount: `1.0 USDD` (= 2x the 0.5 flat fee). Credits between `DUST_CREDIT_USDD` (0.01) and this are recorded and treated as fees; below 0.01 they are ignored entirely.
 
 ### State Diagram
 
@@ -209,7 +209,8 @@ stateDiagram-v2
 |-----|--------|--------------|
 | Flat fee | `FLAT_FEE_USDC` (default 0.5 USDC-equivalent) | Deducted from USDC output |
 | Dynamic fee | `DYNAMIC_FEE_BPS` / 10000 of amount (default 0.1%) | Deducted from USDC output |
-| Micro credit (amount <= fees) | 100% — entire amount kept as fee | No USDC sent |
+| Below minimum (`DUST_CREDIT_USDD` ≤ amount < `MIN_CREDIT_USDD`) | 100% — kept as fee, but **recorded** (sender, amount, txid) | No USDC sent |
+| Dust (amount < `DUST_CREDIT_USDD`, 0.01) | Ignored entirely — no record | No USDC sent |
 | Nexus asset creation | 1 NXS (one-time) | Nexus blockchain fee |
 | Nexus asset naming | 1 NXS (optional, one-time) | Nexus blockchain fee |
 | Nexus asset updates | Free (if >= 10s apart) | No cost for subsequent swaps |
@@ -225,7 +226,7 @@ stateDiagram-v2
 | USDC not received after several minutes | Verify asset `txid_toService` matches exactly; check service heartbeat |
 | USDD refunded | Check if asset was published in time and receival_account was valid |
 | No USDC and no refund after 1+ hour | Check service heartbeat; contact operator if service appears down |
-| Amount below minimum | Amount treated as fee; do not send below `0.500501 USDD` |
+| Amount below minimum | Amount treated as fee; do not send below `1.0 USDD` |
 
 ### Step-by-Step Instructions
 
@@ -338,9 +339,9 @@ Look at `last_poll_timestamp` — if `current_time - last_poll_timestamp > 60 se
 | Timeout | Default | What Happens |
 |---------|---------|--------------|
 | `REFUND_TIMEOUT_SEC` | 3600s (1 hour) | USDD→USDC: if no asset mapping found, USDD is refunded |
-| `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10 min) | Maximum wait for USDC transaction confirmation |
+| `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10 min) | USDD→USDC: if the USDC send cannot be confirmed, the swap is **quarantined for manual review**, not auto-refunded (the USDC may already have been sent) |
 | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s (24 hours) | Unresolved deposits are quarantined for manual review |
-| `ACTION_RETRY_COOLDOWN_SEC` | 300s (5 min) | Wait between retry attempts on failures |
+| `ACTION_RETRY_COOLDOWN_SEC` | 300s (5 min) | Minimum wait between retry attempts (enforced) |
 
 ### Verifying Swap Completion
 

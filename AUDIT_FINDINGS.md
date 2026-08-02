@@ -1,4 +1,12 @@
-# Swap Service Audit Findings
+# Swap Service Audit Findings (historical — first audit pass)
+
+> **Status: superseded, retained as audit history.** This was the FIRST audit of the
+> service and predates the work recorded in [`EVALUATION.md`](EVALUATION.md) and
+> [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). Line numbers refer to the code as it stood
+> at the time and no longer match. Statuses below were re-verified against the current
+> code on 2026-06-15; two findings remain open and are flagged as such.
+>
+> For the current state of the service, read `RISK_ASSESSMENT.md` first.
 
 Audit of the swap process for inconsistencies, bugs, and documentation issues. Findings are categorized by severity.
 
@@ -43,6 +51,8 @@ except Exception:
 **Impact:** The `processed_txids` table is also used by the USDD→USDC flow to track real Nexus transaction processing. These synthetic entries with dummy data could interfere with reporting, balance reconciliation, or any logic that iterates all processed_txids rows. The idempotency key format (`nexus_txid:01b88ff8...`) is different from real txids (just `01b88ff8...`), which currently prevents collisions, but this is fragile.
 
 **Recommendation:** Use a separate idempotency table (e.g., `usdc_send_idempotency`) or prefix the keys more explicitly to avoid future collisions.
+
+**⚠️ STILL OPEN (re-verified 2026-06-15)** — `src/solana_client.py` still writes `nexus_txid:<txid>` keys into `processed_txids`. Not currently harmful (the prefix prevents collision with real txids) but still fragile.
 
 ---
 
@@ -117,6 +127,8 @@ The variable names suggest "this fee is denominated in USDC/USDD" but they're ac
 
 **Recommendation:** Add explicit comments in `.env.example` and CONFIG.md clarifying which direction each fee applies to.
 
+**✅ RESOLVED (2026-06-15).** `CONFIG.md`, `SETUP.md` and `.env.example` now state the direction for each fee explicitly. Separately, the published default for `FLAT_FEE_USDC` was wrong (0.1 documented vs 0.5 in code) and has been corrected — see RISK_ASSESSMENT.md B-14.
+
 ---
 
 ### DOC-5: SETUP.md lacks API access requirements (MEDIUM)
@@ -150,6 +162,8 @@ The retry mechanism only applies to the refund itself, not the original debit at
 
 **Recommendation:** Use the attempt tracking system (`should_attempt`/`record_attempt`) for the debit operation, similar to how refunds and USDC sends are handled. Only mark for refund after `MAX_ACTION_ATTEMPTS` debit failures.
 
+**✅ RESOLVED (2026-06-15).** A failed or ambiguous debit is no longer refunded on the spot. The unique `reference` is persisted before the CLI call; `resolve_unverified_debits()` then asks the chain. If the debit provably never landed and attempts remain, the deposit returns to `ready for processing` and is retried with a **new** reference; only after `MAX_ACTION_ATTEMPTS` does it refund. See RISK_ASSESSMENT.md B-3.
+
 ---
 
 ### PROC-2: USDD→USDC confirmation timeout quarantines instead of retrying (LOW)
@@ -165,6 +179,8 @@ The comment (Bug #15 fix) correctly notes that auto-refunding is dangerous becau
 
 **Recommendation:** Before quarantining, attempt one final `find_signature_with_memo` lookup to recover the signature. Only quarantine if that also fails.
 
+**✅ RESOLVED (2026-06-15).** The send signature is now persisted in `unprocessed_txids.sig`, so confirmation checks it directly (one `getSignatureStatuses` instead of a 50-tx memo scan). The memo scan is retained as the fallback when no signature was recorded, and quarantine happens only if that also fails.
+
 ---
 
 ### PROC-3: No validation of memo format before Nexus address extraction (LOW)
@@ -172,6 +188,8 @@ The comment (Bug #15 fix) correctly notes that auto-refunding is dangerous becau
 **File:** `src/solana_client.py`, lines 632-641
 
 **Description:** The memo parsing `memo.split(":", 1)[1].strip()` extracts the Nexus address but doesn't validate the memo contains only `nexus:` as prefix. A memo like `nexus:some:colon:data` would extract `some:colon:data` as the address, which would fail Nexus validation and trigger a refund. While this is not exploitable (it just wastes a refund cycle), stricter parsing would be cleaner.
+
+**⚠️ STILL OPEN (re-verified 2026-06-15)** — unchanged. The address is validated against Nexus before any debit, so a malformed memo costs a refund cycle and nothing more.
 
 ---
 
@@ -206,6 +224,8 @@ Both are valid Solana Memo programs — `Memo111...` is the newer SPL Memo v1, a
 
 **Recommendation:** Check for both memo program IDs when parsing deposits in the Helius path.
 
+**✅ RESOLVED.** The Helius parser checks both (`pid == "MemoSq4g..." or pid.startswith("Memo111")`). The recovery scanners match only `Memo111...`, which is correct — they look for memos the service itself wrote.
+
 ---
 
 ### API-3: Helius `getTransactionsForAddress` is not a standard Solana RPC method
@@ -224,15 +244,15 @@ Both are valid Solana Memo programs — `Memo111...` is the newer SPL Memo v1, a
 |----|----------|------|--------|
 | BUG-1 | MEDIUM | Missing return statement | **Fix applied** |
 | BUG-2 | MEDIUM | Silent exception swallowing | **Fix applied** |
-| BUG-3 | LOW | Table pollution | Documented |
+| BUG-3 | LOW | Table pollution | **Still open** |
 | DOC-1 | HIGH | Wrong user instructions | **Fix applied** |
 | DOC-2 | MEDIUM | Wrong Nexus command | **Fix applied** |
 | DOC-3 | LOW | Default value mismatch | **Fix applied** |
-| DOC-4 | LOW | Confusing naming | Documented |
+| DOC-4 | LOW | Confusing naming | **Fixed** (+ wrong default corrected) |
 | DOC-5 | MEDIUM | Missing API requirements | **Fix applied** (SETUP.md updated) |
-| PROC-1 | MEDIUM | No debit retry | Documented |
-| PROC-2 | LOW | Quarantine without recovery attempt | Documented |
-| PROC-3 | LOW | Loose memo parsing | Documented |
+| PROC-1 | MEDIUM | No debit retry | **Fixed** (see B-3) |
+| PROC-2 | LOW | Quarantine without recovery attempt | **Fixed** (see R-4) |
+| PROC-3 | LOW | Loose memo parsing | **Still open** |
 | API-1 | INFO | Query style | Conformant |
-| API-2 | LOW | Memo program ID inconsistency | Documented |
+| API-2 | LOW | Memo program ID inconsistency | **Fixed** |
 | API-3 | INFO | Non-standard RPC method | Correctly handled with fallback |

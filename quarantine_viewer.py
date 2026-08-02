@@ -12,6 +12,7 @@ import sqlite3
 import os
 import sys
 import argparse
+import re
 from datetime import datetime
 from decimal import Decimal
 
@@ -59,11 +60,45 @@ def format_amount(units: int | None, decimals: int = 6, ticker: str = "") -> str
         return str(units)
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize(s) -> str:
+    """Strip control/ANSI characters from untrusted text.
+
+    `memo` and `from_address` are copied verbatim from depositor-supplied transaction
+    data. Printed raw to a TTY, an embedded ESC/CR sequence can erase or forge rows in
+    the very table an operator uses to authorise manual fund recovery.
+    """
+    if s is None:
+        return ""
+    return _CONTROL_CHARS.sub("", str(s))
+
+
+def csv_safe(value):
+    """Neutralise spreadsheet formula injection (=, +, -, @ and tab/CR leaders)."""
+    text = sanitize(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
+def format_token_amount(amount, ticker: str = "") -> str:
+    """Format a token-unit amount exactly (no float scaling)."""
+    if amount is None:
+        return "N/A"
+    try:
+        q = Decimal(str(amount)).quantize(Decimal("0.000001"))
+        return f"{format(q, 'f').rstrip('0').rstrip('.') or '0'} {ticker}".strip()
+    except Exception:
+        return str(amount)
+
+
 def truncate(s: str | None, max_len: int = 20) -> str:
     """Truncate string with ellipsis."""
     if not s:
         return "N/A"
-    s = str(s)
+    s = sanitize(s)
     if len(s) <= max_len:
         return s
     return s[:max_len-3] + "..."
@@ -97,7 +132,7 @@ def print_table(headers: list[str], rows: list[list[str]], title: str = ""):
     print(color(header_fmt.format(*headers), Colors.BOLD + Colors.HEADER))
     print(separator)
     for row in rows:
-        print(row_fmt.format(*[str(c) for c in row]))
+        print(row_fmt.format(*[sanitize(c) for c in row]))
     print(separator)
     print(f"  Total: {len(rows)} entries\n")
 
@@ -214,7 +249,7 @@ def display_usdd_quarantine():
             truncate(txid, 16),
             format_timestamp(ts),
             truncate(from_addr, 16),
-            format_amount(int(float(amount or 0) * 1_000_000), 6, "USDD"),
+            format_token_amount(amount, "USDD"),
             truncate(owner, 16),
             truncate(status, 20),
         ])
@@ -234,7 +269,7 @@ def display_usdd_quarantine():
                 truncate(txid, 16),
                 format_timestamp(ts),
                 truncate(from_addr, 16),
-                format_amount(int(float(amount or 0) * 1_000_000), 6, "USDD"),
+                format_token_amount(amount, "USDD"),
                 truncate(status, 25),
             ])
         
@@ -301,7 +336,7 @@ def export_to_csv():
         with open("quarantine_usdc.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["sig", "timestamp", "from_address", "amount_usdc_units", "memo", "quarantine_sig", "quarantined_units", "status"])
-            writer.writerows(usdc_rows)
+            writer.writerows([[csv_safe(c) for c in r] for r in usdc_rows])
         print(f"  Exported {len(usdc_rows)} USDC entries to quarantine_usdc.csv")
     
     # Export USDD quarantine
@@ -310,7 +345,7 @@ def export_to_csv():
         with open("quarantine_usdd.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["txid", "timestamp", "amount_usdd", "from_address", "to_address", "owner", "sig", "status"])
-            writer.writerows(usdd_rows)
+            writer.writerows([[csv_safe(c) for c in r] for r in usdd_rows])
         print(f"  Exported {len(usdd_rows)} USDD entries to quarantine_usdd.csv")
     
     # Export pending USDC
@@ -319,7 +354,7 @@ def export_to_csv():
         with open("pending_usdc.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["sig", "timestamp", "from_address", "amount_usdc_units", "memo", "status"])
-            writer.writerows(usdc_pending)
+            writer.writerows([[csv_safe(c) for c in r] for r in usdc_pending])
         print(f"  Exported {len(usdc_pending)} pending USDC entries to pending_usdc.csv")
     
     # Export pending USDD
@@ -328,7 +363,7 @@ def export_to_csv():
         with open("pending_usdd.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["txid", "timestamp", "amount_usdd", "from_address", "status"])
-            writer.writerows(usdd_pending)
+            writer.writerows([[csv_safe(c) for c in r] for r in usdd_pending])
         print(f"  Exported {len(usdd_pending)} pending USDD entries to pending_usdd.csv")
     
     print()
@@ -387,13 +422,13 @@ Manual Handling:
     # Display summary first
     display_summary()
     
-    # Display tables based on filters
-    if args.usdc:
+    # Display tables based on filters. `--usdc --usdd` together previously fell into
+    # the elif and silently showed only USDC, giving a partial view with no warning.
+    show_usdc = args.usdc or not (args.usdc or args.usdd)
+    show_usdd = args.usdd or not (args.usdc or args.usdd)
+    if show_usdc:
         display_usdc_quarantine()
-    elif args.usdd:
-        display_usdd_quarantine()
-    else:
-        display_usdc_quarantine()
+    if show_usdd:
         display_usdd_quarantine()
 
 

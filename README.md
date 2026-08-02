@@ -6,6 +6,19 @@ Operator / setup documentation: see **`SETUP.md`**.
 Security hardening: **`SECURITY.md`**.  
 Configuration reference: **`CONFIG.md`**.
 
+<details>
+<summary><b>Review &amp; audit documents</b> (which one is current?)</summary>
+
+| Document | Status | Read it for |
+|----------|--------|-------------|
+| [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md) | **Current** | Whole-system risk: trust model, solvency, fund-flow correctness, operator tooling. **Start here.** |
+| [`STATE_MACHINES.md`](STATE_MACHINES.md) | **Current** | Server-side state machines, re-derived from the code |
+| [`SWAP_INITIATOR_STATE_MACHINES.md`](SWAP_INITIATOR_STATE_MACHINES.md) | **Current** | The same flows from a user's point of view |
+| [`EVALUATION.md`](EVALUATION.md) | History | Code-level findings and fix history (F/H/L/N/R). Line numbers refer to pre-fix code. |
+| [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) | History | The first audit pass, superseded. Two low-severity items remain open. |
+
+</details>
+
 ---
 
 ## Quick Overview
@@ -14,7 +27,9 @@ The service lets you swap:
 - USDD → USDC: Send USDD to the treasury and publish an asset mapping your USDD transaction `txid` to a Solana receival account.
 
 Thresholds & Fees (defaults – operator may change):
-- Minimum swap amount both directions: `0.100101` of the source token (smaller = treated as fees / ignored).
+- Minimum swap amounts (smaller = treated as fees, **no tokens are sent back**):
+  - USDC → USDD: `0.2 USDC` (nets ~0.0998 USDD after the 0.1 flat fee + 0.1%)
+  - USDD → USDC: `1.0 USDD` (nets ~0.499 USDC after the 0.5 flat fee + 0.1%) — this direction carries a larger flat fee, so its minimum is higher. Sending less will **not** be swapped.
 - Flat fee (USDC path) & dynamic fee (bps) may apply as configured.
 
 ---
@@ -26,10 +41,16 @@ Thresholds & Fees (defaults – operator may change):
 Send USDC from a solana wallet which allow memos in the following format:
 
 - Send to: `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ`
-- Memo/note: `nexus:<USDD receival account>`
-- Amount: minimum `0.100101 USDC`
 
-Fees: 0.1 USDC + 0.1% of amount.
+> ⚠️ **This is the vault address of *this* deployment.** Always verify it against the
+> operator's on-chain heartbeat asset (`solana_vault_address`) before sending funds.
+> **If you deploy a fork, you MUST replace this address and the one in the CLI example
+> below with your own `VAULT_USDC_ACCOUNT`** — otherwise your users' USDC is sent to
+> the original operator's vault.
+- Memo/note: `nexus:<USDD receival account>`
+- Amount: minimum `0.2 USDC`
+
+Fees (USDC→USDD): 0.1 USDC flat + 0.1% of amount. The USDD→USDC direction charges 0.5 USDC flat + 0.1%.
 
 Optionally use the local solana CLI:
 
@@ -71,7 +92,7 @@ Done! The service will detect your credit, verify the asset owner matches, and s
 - Asset owner must match the sender's `owner` field of the USDD credit (security check)
 - The same asset is reused for multiple swaps—just update `txid_toService` each time
 - Your Solana wallet must already have a USDC ATA (most wallets auto-create on first receive)
-- Minimum: `0.100101 USDD`. Smaller amounts are treated as fees
+- Minimum: `1.0 USDD` (`MIN_CREDIT_USDD`). Smaller amounts are recorded and treated as fees — no USDC is sent
 - If no asset mapping within `REFUND_TIMEOUT_SEC` (default 1 hour) → USDD is refunded
 
 High‑level flow:
@@ -91,7 +112,7 @@ Detailed steps:
 
 2) Send USDD to the treasury
   - To: `NEXUS_USDD_TREASURY_ACCOUNT`
-  - Amount: ≥ `MIN_CREDIT_USDD` (default 0.100101). Amounts < threshold are treated as micro credits (100% fee) and no USDC will be sent.
+  - Amount: ≥ `MIN_CREDIT_USDD` (default 1.0). Amounts below the threshold are recorded and treated as micro credits (100% fee); no USDC will be sent.
   - Command example (token debit):
     ```bash
     nexus finance/debit/token from=USDD to=<TREASURY_ACCOUNT> amount=<AMOUNT_IN_BASE_UNITS> pin=<PIN>
@@ -130,7 +151,7 @@ Detailed steps:
 Notes
 - Asset owner must match the sender’s `owner` field of the USDD credit; otherwise it is ignored.
 - You can batch multiple swaps by using multiple assets or updating the same asset sequentially (only the row with matching `txid_toService` is considered).
-- Tiny USDD credits below `MIN_CREDIT_USDD` (default 0.100101) are treated as fees (100% micro fee policy) and skipped.
+- Tiny USDD credits below `MIN_CREDIT_USDD` (default 1.0) are treated as fees (100% micro fee policy). They are recorded in the service database (sender, amount, txid) so they can be traced; credits below `DUST_CREDIT_USDD` (default 0.01) are ignored entirely as spam.
 - Keep the asset published before the refund timeout to avoid unnecessary refunds.
 
 ---
@@ -164,7 +185,7 @@ USDC→USDD:
 ```
 Send USDC to <VAULT_USDC_ACCOUNT>
 Memo: nexus:<YOUR_USDD_ACCOUNT>
-Amount ≥ 0.100101 USDC
+Amount ≥ 0.2 USDC
 ```
 
 USDD→USDC:
@@ -172,7 +193,7 @@ USDD→USDC:
 Send USDD to <NEXUS_USDD_TREASURY_ACCOUNT>
 Grab txid from CLI output
 Publish or update asset with fields: {"txid_toService":"<TXID>","receival_account":"<SOL_OR_USDC_TOKEN_ACCOUNT>"}
-Amount ≥ 0.100101 USDD
+Amount ≥ 1.0 USDD
 ```
 
 ---
@@ -196,7 +217,7 @@ Provided as‑is. Use at your own risk. See `SETUP.md` for extended security not
 2. The same transaction must include a Memo: `nexus:<NEXUS_ADDRESS>`.
 3. Service validates the Nexus address exists and is for the expected token (`NEXUS_TOKEN_NAME`, e.g., USDD).
 4. If valid, the service mints/sends USDD on Nexus to that address (amount normalized by decimals).
-5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDC`) is charged per refund attempt on this path. On successful swaps, a dynamic fee in bps (`DYNAMIC_FEE_BPS`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
+5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDD`, the USDC→USDD fee) is deducted from the refund. On successful swaps, a dynamic fee in bps (`DYNAMIC_FEE_BPS`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
 
 Notes:
 - Amounts are handled in base units and normalized between `USDC_DECIMALS` and `USDD_DECIMALS`.
@@ -336,7 +357,7 @@ ACTION_RETRY_COOLDOWN_SEC=300
 
 # Fees & policy
 # Flat fee for USDC→USDD (charged per refund attempt if refunding)
-FLAT_FEE_USDC=0.1
+FLAT_FEE_USDC=0.5
 # Threshold for tiny USDD deposits; tiny USDD is treated as dust on USDD→USDC
 FLAT_FEE_USDD=0.1
 # Single dynamic fee (bps) applied on successful swaps (both directions)
@@ -504,7 +525,7 @@ Expected startup output:
 - Send USDC to `VAULT_USDC_ACCOUNT` with a Memo in the same transaction:
   - `nexus:<YOUR_NEXUS_ADDRESS>`
 - If the memo is missing/invalid or the Nexus address is not a valid `NEXUS_TOKEN_NAME` account, your USDC is refunded to the source SPL token account with a reason memo. The flat fee is charged per refund attempt on this path. If all attempts fail, the remaining refundable amount is quarantined and the incident is logged for manual review.
-- Tiny USDC deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
+- Tiny USDC deposits ≤ `FLAT_FEE_USDD` (the fee on this direction) are treated as fees and not processed further.
 
 ### Swap USDD → USDC (on Nexus)
 - Send USDD to `NEXUS_USDD_TREASURY_ACCOUNT` with reference:
@@ -546,10 +567,10 @@ How to create your USDC ATA (user-side):
 | REFUND_TIMEOUT_SEC | Age before attempting forced refund | ❌ | 3600 |
 | STALE_DEPOSIT_QUARANTINE_SEC | Age to quarantine unresolved deposits | ❌ | 86400 |
 | USDC_CONFIRM_TIMEOUT_SEC | Max seconds to await USDC send confirmation | ❌ | 600 |
-| FLAT_FEE_USDC | Flat fee (USDC) Solana→Nexus | ❌ | 0.1 |
+| FLAT_FEE_USDC | Flat fee (USDC) on the **USDD→Solana** payout | ❌ | 0.5 |
 | FLAT_FEE_USDD | Tiny threshold (USDD) Nexus→Solana | ❌ | 0.1 |
 | DYNAMIC_FEE_BPS | Dynamic fee bps (both directions) | ❌ | 10 |
-| NEXUS_CONGESTION_FEE_USDD | Fee deducted on invalid USDD→USDC refunds | ❌ | 0.01 |
+| NEXUS_CONGESTION_FEE_USDD | Fee deducted on invalid USDD→USDC refunds | ❌ | 0.001 |
 | FEE_CONVERSION_ENABLED | Enable optional DEX fee conversions | ❌ | false |
 | FEE_CONVERSION_MIN_USDC | Min USDC base units before converting | ❌ | 0 |
 | SOL_TOPUP_MIN_LAMPORTS | Min SOL lamports before top-up | ❌ | 0 |

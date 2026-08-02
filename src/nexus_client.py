@@ -71,7 +71,8 @@ def is_valid_usdd_account(account: str) -> bool:
         return False
     if not info.get("address"):
         return False
-    if info.get("ticker") != "USDD":
+    expected = str(getattr(config, "NEXUS_TOKEN_NAME", "USDD") or "USDD")
+    if str(info.get("ticker") or "").upper() != expected.upper():
         return False
     return True
 
@@ -132,38 +133,52 @@ def _format_usdd_amount(amount_units: int) -> str:
 
 
 
-def get_usdd_send_amount(amount_usdc: int) -> float:
-    """Calculate the USDD amount to send, accounting for fees.
-    
-    Args:
-        amount_usdc: Input amount in USDC base units (e.g., 10500000 for 10.5 USDC)
-    
-    Returns:
-        Net USDD in token units (human-readable, e.g., 10.3 for 10.3 USDD).
-        This can be passed directly to Nexus CLI which expects token units.
+def get_usdd_send_amount_units(amount_usdc_units: int) -> int:
+    """Net USDD to send, in BASE UNITS, for a USDC deposit in base units.
+
+    Exact integer/Decimal arithmetic throughout. The previous float version returned
+    values like 8.989999999847731e-07, which was interpolated straight into the CLI
+    command as `amount=8.989999999847731e-07` - scientific notation a decimal parser
+    will not accept, with 17 significant digits against a 6-decimal token.
     """
-    base_amount = amount_usdc / 10**config.USDC_DECIMALS
-    flat_fee = float(config.FLAT_FEE_USDD)  # Convert string to float
-    fee = base_amount * config.DYNAMIC_FEE_BPS / 10000 + flat_fee
-    return base_amount - fee
+    try:
+        gross = Decimal(int(amount_usdc_units)) / (Decimal(10) ** config.USDC_DECIMALS)
+    except Exception:
+        return 0
+    flat_fee = Decimal(str(config.FLAT_FEE_USDD))
+    dyn_bps = Decimal(max(0, int(config.DYNAMIC_FEE_BPS)))
+    net = gross - (gross * dyn_bps / Decimal(10000)) - flat_fee
+    if net <= 0:
+        return 0
+    # Round DOWN to whole base units: never pay out a fraction we cannot represent.
+    return int((net * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
 
 
-def debit_usdd_with_txid(to_addr: str, amount_usdd: float, reference: int) -> tuple[bool, str | None]:
+def get_usdd_send_amount(amount_usdc: int) -> Decimal:
+    """Deprecated: prefer get_usdd_send_amount_units(). Returns Decimal token units."""
+    return Decimal(get_usdd_send_amount_units(amount_usdc)) / (Decimal(10) ** config.USDD_DECIMALS)
+
+
+def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -> tuple[bool, str | None]:
     """Perform USDD debit and attempt to parse a txid from output.
+
+    `amount_usdd_units` is in BASE UNITS and is formatted for the CLI by
+    _format_usdd_amount(), which emits a plain fixed-point decimal string. Passing a
+    float here previously produced scientific notation in the command line.
     
     Args:
         to_addr: Destination Nexus USDD account address
-        amount_usdd: Amount in token units (human-readable, e.g., 10.5 for 10.5 USDD).
-                     Nexus CLI expects token units, not base units.
+        amount_usdd_units: Amount in BASE units (e.g. 10500000 for 10.5 USDD)
         reference: Unique reference number for this debit
-    
+
     Returns:
         Tuple of (success, txid_or_None)
     """
     if not config.NEXUS_PIN:
         return (False, None)
-    
-    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_usdd}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
+
+    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     # Use a generous, consistent timeout: a debit killed mid-flight may still execute
     # on the node, which would desynchronize state and risk a double payout.
     code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
@@ -181,7 +196,7 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd: float, reference: int) -> tu
 
 def get_transaction_confirmations(txid: str) -> int | None:
     """Fetch transaction details by txid."""
-    cmd = [config.NEXUS_CLI, "finance/transactions/token", f"name=USDD"]
+    cmd = [config.NEXUS_CLI, "finance/transactions/token", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
@@ -238,15 +253,16 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             continue
         
         # Case 3: Transaction fully confirmed
-        # Recalculate USDD amount from USDC (same fee logic as debit)
-        amount_usdd_debited = get_usdd_send_amount(amount_usdc_units or 0)
-        
-        # Bug #10 fix: Track fees when debit is confirmed
-        # Fee = amount_usdc_units (base units) - amount_usdd_debited (token units) * 10^decimals
+        # Recalculate USDD amount from USDC (same fee logic as the debit), in BASE UNITS.
+        usdd_out_base = get_usdd_send_amount_units(amount_usdc_units or 0)
+        amount_usdd_debited = float(Decimal(usdd_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
+
+        # Bug #10 fix: Track fees when debit is confirmed.
+        # Both sides are base units (USDC and USDD share decimals at 1:1 parity), so this
+        # is exact integer arithmetic - no float scaling.
         try:
             usdc_in_base = int(amount_usdc_units or 0)
-            usdd_out_base = int(amount_usdd_debited * (10 ** config.USDD_DECIMALS))
-            fee_usdc_units = max(0, usdc_in_base - usdd_out_base)
+            fee_usdc_units = max(0, usdc_in_base - int(usdd_out_base))
             if fee_usdc_units > 0:
                 state_db.add_fee_entry(
                     sig=sig,
@@ -270,6 +286,102 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             break
 
     return processed_count
+
+
+DEBIT_UNVERIFIED_STATUSES = ("debit in flight", "debit unverified")
+
+
+def resolve_unverified_debits(limit: int = 200) -> int:
+    """Resolve USDD debits whose outcome is unknown, using the chain as the oracle.
+
+    Covers both a crash between intent and state-write, and a CLI response we could not
+    parse. For each row we look up the unique per-attempt reference on-chain:
+
+      found            -> the debit DID execute; record the txid and proceed (never refund)
+      not found + young -> still within the grace window; leave it alone
+      not found + old   -> the debit definitively did not execute with that reference,
+                           so it is safe to retry (a retry allocates a NEW reference).
+                           After MAX_ACTION_ATTEMPTS, fall back to refunding.
+
+    Returns the number of rows whose state was resolved.
+    """
+    rows = state_db.get_sigs_pending_debit_verification(DEBIT_UNVERIFIED_STATUSES, limit=limit)
+    if not rows:
+        return 0
+
+    grace = int(getattr(config, "DEBIT_VERIFY_GRACE_SEC", 300))
+    max_attempts = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
+    now = int(time.time())
+    resolved = 0
+
+    for sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference in rows:
+        try:
+            if reference is None:
+                # Intent was never recorded (pre-upgrade row): fall back to the memo-scan-free
+                # safe option - leave for manual review rather than risk a double action.
+                state_db.update_unprocessed_sig_status(sig, "to be quarantined")
+                print(f"[DEBIT_RESOLVE] sig={sig} has no reference; quarantining for manual review")
+                resolved += 1
+                continue
+
+            found_txid = find_usdd_debit_by_reference(reference)
+            if found_txid:
+                state_db.update_unprocessed_sig_txid(sig, found_txid)
+                state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
+                state_db.release_reservation("usdc_to_usdd_debit", sig)
+                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} CONFIRMED on-chain txid={found_txid}")
+                resolved += 1
+                continue
+
+            attempted_at = state_db.get_attempt_last_timestamp(f"usdd_debit:{sig}") or int(timestamp or 0)
+            if now - attempted_at <= grace:
+                continue  # still settling; check again next cycle
+
+            attempts = state_db.get_attempt_count(f"usdd_debit:{sig}")
+            state_db.release_reservation("usdc_to_usdd_debit", sig)
+            if attempts >= max_attempts:
+                state_db.update_unprocessed_sig_status(sig, "to be refunded")
+                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} not on-chain after "
+                      f"{attempts} attempts; refunding")
+            else:
+                # Safe to retry: this reference provably never landed.
+                state_db.update_unprocessed_sig_status(sig, "ready for processing")
+                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} not on-chain after {grace}s; "
+                      f"retrying (attempt {attempts})")
+            resolved += 1
+        except Exception as e:
+            print(f"[DEBIT_RESOLVE] error for sig={sig}: {e}")
+            continue
+
+    return resolved
+
+
+def quarantine_usdd(txid: str, amount_usdd_units: int, reason: str = "") -> bool:
+    """Actually MOVE quarantined USDD out of the treasury.
+
+    README/CONFIG/SETUP/SECURITY all state that USDD from exhausted refunds is moved to
+    NEXUS_USDD_QUARANTINE_ACCOUNT so it stops counting toward the backing ratio. Nothing
+    ever moved it - only a DB status was written - so the funds stayed in the live
+    treasury and the ratio was overstated by exactly the quarantined amount.
+
+    Returns True if the transfer succeeded (or there was nothing to move).
+    """
+    dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
+    if not dest:
+        print("[quarantine_usdd] NEXUS_USDD_QUARANTINE_ACCOUNT not set; USDD stays in treasury "
+              "and will keep counting toward the backing ratio")
+        return False
+    if int(amount_usdd_units or 0) <= 0:
+        return True
+    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
+    if not treas:
+        print("[quarantine_usdd] NEXUS_USDD_TREASURY_ACCOUNT not set")
+        return False
+    ref = f"quarantine:{txid}" if txid else (reason or "quarantine")
+    ok = transfer_usdd_between_accounts(treas, dest, int(amount_usdd_units), ref[:120])
+    if ok:
+        print(f"[quarantine_usdd] moved {amount_usdd_units} base units to {dest} ({ref})")
+    return ok
 
 
 def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
@@ -347,8 +459,7 @@ def mint_usdd_to_local(amount_units: int, reference: str | int = "REBALANCE") ->
     acct = getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None)
     if not acct or amount_units <= 0:
         return False
-    tokens = amount_units / (10 ** config.USDD_DECIMALS)
-    ok, _txid = debit_usdd_with_txid(acct, tokens, reference)
+    ok, _txid = debit_usdd_with_txid(acct, int(amount_units), reference)
     return ok
 
 
@@ -455,6 +566,54 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
         best = items[0]
         return {"receival_account": best.get("receival_account"), "owner": best.get("owner")}
     except Exception:
+        return None
+
+
+def find_usdd_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
+    """Return the txid of a USDD DEBIT carrying exactly this reference, else None.
+
+    This is the authoritative "did my debit actually execute?" check for the
+    USDC->USDD path. It keys on the per-attempt unique reference, so it is exact.
+
+    NOTE: `was_usdd_debited_to_account_for_amount()` below cannot be used for this.
+    It inspects the TREASURY account, but this path mints via
+    `finance/debit/token from=USDD` (the token supply register), and it compares
+    `int(contract.amount)` - a decimal token amount - against base units, so it never
+    matches. Prefer this function.
+    """
+    if reference is None:
+        return None
+    cmd = [
+        config.NEXUS_CLI,
+        "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.to,contracts.amount",
+        f"name={config.NEXUS_TOKEN_NAME}",
+        "sort=timestamp",
+        "order=desc",
+        f"limit={int(limit)}",
+    ]
+    try:
+        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
+        if code != 0:
+            print("Nexus: debit-by-reference lookup error:", err or out)
+            return None
+        data = _parse_json_lenient(out)
+        txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        target = str(reference).strip()
+        for tx in txs or []:
+            if not isinstance(tx, dict):
+                continue
+            for c in (tx.get("contracts") or []):
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("OP") or "").upper() != "DEBIT":
+                    continue
+                ref = c.get("reference")
+                if ref is not None and str(ref).strip() == target:
+                    txid = tx.get("txid")
+                    return str(txid) if txid else None
+        return None
+    except Exception as e:
+        print("Nexus: debit-by-reference lookup exception:", e)
         return None
 
 
@@ -772,11 +931,13 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
     if last_poll is not None:
         cmd.append(f"last_poll_timestamp={last_poll}")
 
+    # Use the CONFIGURED field names. Hardcoding them here meant a config/asset mismatch
+    # silently failed every update, freezing the heartbeat and both waterlines.
     if wline_nxs is not None:
-        cmd.append(f"last_safe_timestamp_nexus={wline_nxs}")
-    
+        cmd.append(f"{config.HEARTBEAT_WATERLINE_NEXUS_FIELD}={wline_nxs}")
+
     if wline_sol is not None:
-        cmd.append(f"last_safe_timestamp_solana={wline_sol}")
+        cmd.append(f"{config.HEARTBEAT_WATERLINE_SOLANA_FIELD}={wline_sol}")
 
     try:
         code, out, err = _run(cmd, timeout=5)
@@ -784,7 +945,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
             print("Nexus: update heartbeat asset error:", err or out)
             return False
         data = _parse_json_lenient(out)
-        if data.get("success"):
+        if isinstance(data, dict) and data.get("success"):
             state_db.update_heartbeat(
                 name=config.NEXUS_HEARTBEAT_ASSET_NAME,
                 last_beat=last_poll,
@@ -798,6 +959,34 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
         print("Error updating heartbeat asset:", e)
         return False
     
+
+def validate_heartbeat_asset() -> tuple[bool, str]:
+    """Check at startup that the heartbeat asset carries every field we will write.
+
+    `assets/update/asset format=basic` is atomic and the field set is fixed at creation,
+    so writing one unknown field fails the WHOLE update - freezing last_poll_timestamp
+    and both waterlines with no error surfaced anywhere. Returns (ok, message).
+    """
+    if not getattr(config, "HEARTBEAT_ENABLED", True):
+        return (True, "heartbeat disabled")
+    if not config.NEXUS_HEARTBEAT_ASSET_NAME:
+        return (False, "NEXUS_HEARTBEAT_ASSET_NAME is not set; the service addresses the asset by name")
+    asset = get_heartbeat_asset()
+    if not asset:
+        return (False, f"heartbeat asset '{config.NEXUS_HEARTBEAT_ASSET_NAME}' not readable")
+    required = [
+        "last_poll_timestamp",
+        config.HEARTBEAT_WATERLINE_NEXUS_FIELD,
+        config.HEARTBEAT_WATERLINE_SOLANA_FIELD,
+    ]
+    missing = [f for f in required if f not in asset]
+    if missing:
+        return (False,
+                f"heartbeat asset is missing {missing}; every update will fail atomically. "
+                f"Recreate the asset with these fields, or set HEARTBEAT_WATERLINE_*_FIELD "
+                f"to the names it actually has: {sorted(k for k in asset.keys())}")
+    return (True, f"heartbeat asset OK ({', '.join(required)})")
+
 
 def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
     cmd = [config.NEXUS_CLI, "assets/get/asset", f"name={config.NEXUS_HEARTBEAT_ASSET_NAME}"]
@@ -837,12 +1026,14 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
         "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
     )
     base_cmd.append(projection)
-    base_cmd.append("name=USDD")
+    base_cmd.append(f"name={config.NEXUS_TOKEN_NAME}")
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")  # Newest first
     
     # Use WHERE filter if available (may reduce bandwidth)
-    min_credit_threshold = getattr(config, "MIN_CREDIT_USDD_UNITS", 100101) / (10 ** config.USDD_DECIMALS)
+    # Filter at the dust floor, not the swap minimum: credits in between are real user
+    # funds that must still be fetched so they can be recorded rather than lost.
+    min_credit_threshold = config.DUST_CREDIT_USDD_UNITS / (10 ** config.USDD_DECIMALS)
     try:
         base_cmd.append(f"where='contracts.amount>={min_credit_threshold}'")
     except Exception:
@@ -915,7 +1106,7 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
 ## Reference integer fetching
 
 def get_last_reference() -> int | None:
-    cmd = [config.NEXUS_CLI, "finance/transactions/token/timestamp,contracts.OP,contracts.id,contracts.reference", "name=USDD", "sort=timestamp", "order=desc", "limit=50"]
+    cmd = [config.NEXUS_CLI, "finance/transactions/token/timestamp,contracts.OP,contracts.id,contracts.reference", f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc", "limit=50"]
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:

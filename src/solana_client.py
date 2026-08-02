@@ -87,13 +87,23 @@ def _helius_rpc_call(method: str, params=None, timeout_sec: Optional[float] = No
     return js
 
 
+def _deposit_commitment() -> str:
+    """Commitment for ingesting deposits / settling our own payouts.
+
+    Defaults to 'finalized'. 'confirmed' is supermajority-voted but not rooted, so a
+    deposit can be reorged away after we have minted USDD against it - an irreversible
+    loss, since Nexus cannot learn of a Solana reorg.
+    """
+    return str(getattr(config, "SOLANA_DEPOSIT_COMMITMENT", "finalized") or "finalized")
+
+
 def helius_get_transactions_for_address(
     address: str,
     *,
     limit: int = 100,
     before: Optional[str] = None,
     until: Optional[str] = None,
-    commitment: str = "confirmed",
+    commitment: str | None = None,
     encoding: Optional[str] = None,
 ) -> list:
     """Fetch transactions for an address via Helius `getTransactionsForAddress`.
@@ -102,7 +112,7 @@ def helius_get_transactions_for_address(
     is unavailable or fails, callers can catch and fallback to core RPC.
     """
     lim = max(1, min(1000, int(limit)))
-    opts: dict = {"limit": lim, "commitment": commitment}
+    opts: dict = {"limit": lim, "commitment": commitment or _deposit_commitment()}
     if before:
         opts["before"] = before
     if until:
@@ -119,14 +129,14 @@ def core_get_transactions_for_address(
     limit: int = 100,
     before: Optional[str] = None,
     until: Optional[str] = None,
-    commitment: str = "confirmed",
+    commitment: str | None = None,
 ) -> list:
     """Fallback using core RPC: getSignaturesForAddress + getTransaction (jsonParsed).
     Returns a list of transaction JSONs similar to getTransaction results.
     """
     client = _get_client()
     lim = max(1, min(1000, int(limit)))
-    sig_args = {"limit": lim}
+    sig_args = {"limit": lim, "commitment": commitment or _deposit_commitment()}
     if before:
         sig_args["before"] = before
     if until:
@@ -165,7 +175,7 @@ def get_transactions_for_address(
     limit: int = 100,
     before: Optional[str] = None,
     until: Optional[str] = None,
-    commitment: str = "confirmed",
+    commitment: str | None = None,
     prefer: str = "helius",
 ) -> list:
     """Unified helper: try Helius RPC first (if configured), else fallback to core RPC.
@@ -245,7 +255,9 @@ def _fetch_deposits_helius(
                 str(token_account_addr),
                 limit=page_size,
                 before=before,
-                commitment="confirmed",
+                # 'finalized' by default: a 'confirmed' deposit can still be reorged
+                # away after we have already minted USDD against it.
+                commitment=getattr(config, "SOLANA_DEPOSIT_COMMITMENT", "finalized"),
                 encoding=None,
             ) or []
             if not txs:
@@ -333,6 +345,7 @@ def _fetch_deposits_core_rpc(
             client.get_signatures_for_address,
             PublicKey.from_string(token_account_addr),
             limit=min(1000, limit * 2),  # Fetch extra since some may be filtered
+            commitment=_deposit_commitment(),  # reorg safety: see _deposit_commitment()
             timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
         )
         sig_entries = _rpc_get_value(sig_resp) or []
@@ -432,18 +445,46 @@ def _fetch_deposits_core_rpc(
         return []
     
 
-def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
+def process_helius_deposits(deposits: list, db_check: bool = True) -> tuple:
     """Persist enriched deposits from ``fetch_incoming_usdc_deposits_via_helius``.
 
     Each item is a tuple ``(sig, timestamp, memo, from_address, amount_units)`` that
     already contains everything we need, so we write straight to ``unprocessed_sigs``
     with **no per-deposit get_transaction re-fetch** (that would defeat the 1-2 call
-    enriched fast path). Returns the number of new rows added.
+    enriched fast path).
+
+    Returns ``(added, oldest_deferred_ts)``. ``oldest_deferred_ts`` is the block time of
+    the oldest deposit withheld pending finalization, or ``None``. The caller MUST keep
+    the waterline behind it - a deferred deposit is not in the DB, so nothing else would
+    stop the waterline advancing past it and hiding it forever.
     """
     if not deposits:
-        return 0
+        return (0, None)
     from . import state_db
+
+    # Carve-out: when the operator has relaxed ingestion below 'finalized', deposits at
+    # or above SOLANA_FINALIZED_ABOVE_UNITS still require finalization before we mint
+    # against them, so a reorg cannot cost us the large amounts.
+    require_final: set = set()
+    big_threshold = int(getattr(config, "SOLANA_FINALIZED_ABOVE_UNITS", 0) or 0)
+    if big_threshold > 0 and _deposit_commitment() != "finalized":
+        big_sigs = []
+        for it in deposits:
+            try:
+                s, _ts, _memo, _from, amt = it
+            except Exception:
+                continue
+            if s and int(amt or 0) >= big_threshold:
+                big_sigs.append(s)
+        if big_sigs:
+            finalized = get_signatures_confirmation(big_sigs)
+            require_final = {s for s in big_sigs if not finalized.get(s)}
+            if require_final:
+                print(f"[FINALITY_HOLD] {len(require_final)} large deposit(s) not yet finalized; "
+                      f"deferring until they are")
+
     added = 0
+    oldest_deferred_ts = None
     for item in deposits:
         try:
             sig, ts, memo, from_address, amount_units = item
@@ -459,6 +500,16 @@ def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
                 continue
         if not sig:
             continue
+        if sig in require_final:
+            # Large deposit awaiting finalization; picked up on a later poll. Track its
+            # timestamp so the caller pins the waterline behind it.
+            try:
+                ts_i = int(ts or 0)
+                if ts_i and (oldest_deferred_ts is None or ts_i < oldest_deferred_ts):
+                    oldest_deferred_ts = ts_i
+            except Exception:
+                pass
+            continue
         if db_check and (
             state_db.is_processed_sig(sig)
             or state_db.is_unprocessed_sig(sig)
@@ -468,7 +519,7 @@ def process_helius_deposits(deposits: list, db_check: bool = True) -> int:
             continue
         state_db.add_unprocessed_sig(sig, ts, memo or "", from_address, amount_units, "ready for processing", None)
         added += 1
-    return added
+    return (added, oldest_deferred_ts)
 
 
 def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -> list:
@@ -531,8 +582,21 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 proc_count_refund += 1
                 continue
 
+            # 5b. Per-swap size cap: refund oversized deposits rather than minting
+            # against them. Bounds the blast radius of a bug or a hostile deposit.
+            max_swap = int(getattr(config, "MAX_SWAP_USDC_UNITS", 0) or 0)
+            if max_swap > 0 and int(amount_usdc or 0) > max_swap:
+                from . import alerts
+                alerts.warning("swap_over_cap",
+                               "deposit exceeds MAX_SWAP_USDC; refunding instead of swapping",
+                               sig=sig, amount_units=int(amount_usdc or 0), cap_units=max_swap)
+                state_db.update_unprocessed_sig_status(sig, "to be refunded")
+                proc_count_refund += 1
+                continue
+
             # 6. Calculate amount minus fees
-            net_amount = nexus_client.get_usdd_send_amount(amount_usdc)
+            # Base units, exact integer math (no float / scientific-notation hazard).
+            net_amount = nexus_client.get_usdd_send_amount_units(amount_usdc)
             if net_amount <= 0:
                 # Bug #12 fix: Track the fee (entire deposit amount is kept as fee)
                 state_db.add_fee_entry(
@@ -547,26 +611,40 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 proc_count_mic += 1
                 continue
 
-            # 7. Debit USDD if valid
-            # Bug #9 fix: Use next_reference() which atomically increments to prevent duplicate references
+            # 7. Debit USDD if valid.
+            # Cross-cycle/cross-thread guard: only one worker may act on this deposit.
+            if not state_db.reserve_action("usdc_to_usdd_debit", sig, ttl_sec=600):
+                continue
+
+            # Bug #9 fix: next_reference() atomically increments to prevent duplicate references.
             reference = state_db.next_reference()
-            result = nexus_client.debit_usdd_with_txid(nexus_address, net_amount, reference)
-            if result[0]:
+
+            # Persist INTENT before touching the chain. If we crash here, or the CLI
+            # answer is unreadable, the reference is on disk and the outcome can be
+            # resolved against the chain (resolve_unverified_debits) instead of guessed.
+            # Guessing is what previously produced a double mint, or a mint AND a refund.
+            state_db.set_unprocessed_sig_reference(sig, reference)
+            state_db.record_attempt(f"usdd_debit:{sig}")
+            state_db.update_unprocessed_sig_status(sig, "debit in flight")
+
+            try:
+                result = nexus_client.debit_usdd_with_txid(nexus_address, net_amount, reference)
+            except Exception as e:
+                # Timeout or transport failure: the debit may still have executed.
+                state_db.update_unprocessed_sig_status(sig, "debit unverified")
+                print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} error={e} - awaiting chain verification")
+                continue
+
+            if result[0] and result[1]:
                 proc_count_swap += 1
-                txid = str(result[1]) if result[1] else None
-                if txid:
-                    state_db.update_unprocessed_sig_txid(sig, txid)
-                    state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
-                else:
-                    # Debit succeeded but no txid returned - should not happen, mark for refund
-                    state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                    proc_count_refund += 1
-                    print(f"[DEBIT_NO_TXID] sig={sig} - debit succeeded but no txid, marking for refund")
+                state_db.update_unprocessed_sig_txid(sig, str(result[1]))
+                state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
             else:
-                # Debit failed - mark for refund to prevent infinite retry loop
-                state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                proc_count_refund += 1
-                print(f"[DEBIT_FAILED] sig={sig} - Nexus debit failed, marking for refund")
+                # The CLI reported failure OR returned an unparsable body. Both are
+                # AMBIGUOUS - debit_usdd_with_txid returns (False, None) when the call
+                # succeeded but no txid could be parsed. Never refund on this signal.
+                state_db.update_unprocessed_sig_status(sig, "debit unverified")
+                print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} - outcome unknown, awaiting chain verification")
         except Exception as e:
             print(f"Error processing deposit {sig}: {e}")
             continue
@@ -778,6 +856,19 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             # 4. Check quarantine net amount
             net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND  
 
+            # 4b. Nothing left after the fee: there is nothing to move, so finalise here.
+            # Without this, send_usdc() returns (True, None) for a non-positive amount and
+            # the row is marked "awaiting confirmation" with a NULL signature - which the
+            # confirmation pass filters out, leaving it stuck in unprocessed_sigs forever.
+            if net_amount <= 0:
+                state_db.add_fee_entry(sig=sig, txid=None, kind="quarantine_micro_fee",
+                                       amount_usdc_units=int(amount_usdc_units), amount_usdd_units=None)
+                state_db.mark_processed_sig(sig, timestamp, int(amount_usdc_units), None, 0,
+                                            "processed, amount after fees <= 0", None)
+                state_db.remove_unprocessed_sig(sig)
+                processed_count += 1
+                continue
+
             # 5. On-chain idempotency: only scan after a prior attempt (avoids a per-item
             #    scan on the common first attempt). Double-quarantine is not an external
             #    loss, but this keeps state consistent after a crash.
@@ -837,7 +928,26 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
     """
     if amount_base_units <= 0:
         return True, None
-    
+
+    # Rolling 24h exposure cap, enforced at the single choke point every USDC payment
+    # passes through, so a runaway loop or a stolen key cannot drain the vault at once.
+    cap = int(getattr(config, "DAILY_PAYOUT_CAP_USDC_UNITS", 0) or 0)
+    if cap > 0:
+        try:
+            spent = state_db.payouts_since(86400)
+            if spent + int(amount_base_units) > cap:
+                from . import alerts
+                alerts.critical(
+                    "payout_cap_exceeded",
+                    "24h outbound USDC cap would be breached; payment refused",
+                    spent_units=spent, requested_units=int(amount_base_units), cap_units=cap,
+                    destination=str(destination),
+                )
+                return False, None
+        except Exception as e:
+            print(f"[payout_cap] check failed, refusing payment to stay safe: {e}")
+            return False, None
+
     try:
         kp = load_vault_keypair()
         client = _get_client()
@@ -874,10 +984,16 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
         
         # Send transaction
         sig = _build_and_send_legacy_tx(ixs, kp)
-        
+
+        # Record against the rolling cap only after the send actually succeeded.
+        try:
+            state_db.record_payout("usdc_send", int(amount_base_units), sig)
+        except Exception as e:
+            print(f"[payout_ledger] failed to record payout {sig}: {e}")
+
         print(f"Sent USDC tx sig: {sig}")
         return True, sig
-        
+
     except Exception as e:
         print(f"Error sending USDC: {e}")
         return False, None
@@ -915,11 +1031,14 @@ def get_signatures_confirmation(sigs: list, min_confirmations: int = 1) -> dict:
             continue
         if not isinstance(val, list):
             continue
+        # If we ingest at 'finalized', settle our own payouts at 'finalized' too - a
+        # merely 'confirmed' refund can still be reorged away after we mark it done.
+        accepted = ("finalized",) if _deposit_commitment() == "finalized" else ("finalized", "confirmed")
         for s, st in zip(keep, val):
             if isinstance(st, dict):
                 cs = st.get("confirmationStatus")
                 confs = st.get("confirmations")
-                if cs in ("finalized", "confirmed") or (confs is not None and confs >= min_confirmations):
+                if cs in accepted or (confs is not None and confs >= min_confirmations):
                     out[s] = True
     return out
 
@@ -1253,8 +1372,11 @@ def check_timestamp_unpr_sigs() -> int | None:
     This can be used for recovery or waterline adjustment based on unprocessed entries.
     Returns the proposed waterline timestamp (int), or None if no unprocessed sigs found.
     """
-    from . import state_db, state
-    
+    # NOTE: this used to be `from . import state_db, state` - there is no `state` module,
+    # so every call raised ImportError, aborting the poll before the waterline/heartbeat
+    # could be updated. Function-level imports like this are invisible to byte-compilation.
+    from . import state_db
+
     # Fetch the oldest unprocessed sig (limit=1, sorted by timestamp ASC)
     unprocessed = state_db.filter_unprocessed_sigs({'limit': 1})
     if not unprocessed:
