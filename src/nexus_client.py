@@ -71,7 +71,8 @@ def is_valid_usdd_account(account: str) -> bool:
         return False
     if not info.get("address"):
         return False
-    if info.get("ticker") != "USDD":
+    expected = str(getattr(config, "NEXUS_TOKEN_NAME", "USDD") or "USDD")
+    if str(info.get("ticker") or "").upper() != expected.upper():
         return False
     return True
 
@@ -195,7 +196,7 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -
 
 def get_transaction_confirmations(txid: str) -> int | None:
     """Fetch transaction details by txid."""
-    cmd = [config.NEXUS_CLI, "finance/transactions/token", f"name=USDD"]
+    cmd = [config.NEXUS_CLI, "finance/transactions/token", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
@@ -944,7 +945,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
             print("Nexus: update heartbeat asset error:", err or out)
             return False
         data = _parse_json_lenient(out)
-        if data.get("success"):
+        if isinstance(data, dict) and data.get("success"):
             state_db.update_heartbeat(
                 name=config.NEXUS_HEARTBEAT_ASSET_NAME,
                 last_beat=last_poll,
@@ -1025,7 +1026,7 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
         "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
     )
     base_cmd.append(projection)
-    base_cmd.append("name=USDD")
+    base_cmd.append(f"name={config.NEXUS_TOKEN_NAME}")
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")  # Newest first
     
@@ -1105,7 +1106,7 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
 ## Reference integer fetching
 
 def get_last_reference() -> int | None:
-    cmd = [config.NEXUS_CLI, "finance/transactions/token/timestamp,contracts.OP,contracts.id,contracts.reference", "name=USDD", "sort=timestamp", "order=desc", "limit=50"]
+    cmd = [config.NEXUS_CLI, "finance/transactions/token/timestamp,contracts.OP,contracts.id,contracts.reference", f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc", "limit=50"]
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:

@@ -461,7 +461,10 @@ def process_unprocessed_txids(paused: bool = False):
                 owner = r.get("owner")
                 if owner:
                     asset = nexus_client.find_asset_receival_account_by_txid_and_owner(txid, owner)
-                    if asset and asset.get("receival_account"):
+                    # Re-verify the owner explicitly, exactly as Priority 1 does. Relying on
+                    # the query filter alone made the two paths asymmetric.
+                    asset_owner = (asset or {}).get("owner")
+                    if asset and asset.get("receival_account") and asset_owner and str(asset_owner) == str(owner):
                         # Found mapping! Move back to ready for processing
                         recv = asset.get("receival_account")
                         if solana_client.is_valid_usdc_token_account(recv):
@@ -620,7 +623,7 @@ def poll_nexus_usdd_deposits():
         "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
     )
     base_cmd.append(projection)
-    base_cmd.append(f"name=USDD")
+    base_cmd.append(f"name={config.NEXUS_TOKEN_NAME}")
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")
 

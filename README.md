@@ -6,6 +6,19 @@ Operator / setup documentation: see **`SETUP.md`**.
 Security hardening: **`SECURITY.md`**.  
 Configuration reference: **`CONFIG.md`**.
 
+<details>
+<summary><b>Review &amp; audit documents</b> (which one is current?)</summary>
+
+| Document | Status | Read it for |
+|----------|--------|-------------|
+| [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md) | **Current** | Whole-system risk: trust model, solvency, fund-flow correctness, operator tooling. **Start here.** |
+| [`STATE_MACHINES.md`](STATE_MACHINES.md) | **Current** | Server-side state machines, re-derived from the code |
+| [`SWAP_INITIATOR_STATE_MACHINES.md`](SWAP_INITIATOR_STATE_MACHINES.md) | **Current** | The same flows from a user's point of view |
+| [`EVALUATION.md`](EVALUATION.md) | History | Code-level findings and fix history (F/H/L/N/R). Line numbers refer to pre-fix code. |
+| [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) | History | The first audit pass, superseded. Two low-severity items remain open. |
+
+</details>
+
 ---
 
 ## Quick Overview
@@ -28,6 +41,12 @@ Thresholds & Fees (defaults – operator may change):
 Send USDC from a solana wallet which allow memos in the following format:
 
 - Send to: `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ`
+
+> ⚠️ **This is the vault address of *this* deployment.** Always verify it against the
+> operator's on-chain heartbeat asset (`solana_vault_address`) before sending funds.
+> **If you deploy a fork, you MUST replace this address and the one in the CLI example
+> below with your own `VAULT_USDC_ACCOUNT`** — otherwise your users' USDC is sent to
+> the original operator's vault.
 - Memo/note: `nexus:<USDD receival account>`
 - Amount: minimum `0.2 USDC`
 

@@ -8,6 +8,10 @@ This document is a fresh, independent assessment. It complements—rather than r
 
 > **Update (2026-06-14):** Most findings below have since been remediated in code. See [§8 Resolution Status](#8-resolution-status-2026-06-14) for the per-finding state and what remains open. The body of the report (§3–§4) preserves the original findings for context.
 >
+> **Reading order (2026-06-15):** this document is the **code-level** history (F/H/L/N/R
+> findings, §1–§11). Line numbers in §3–§4 refer to the pre-fix code and no longer match.
+> For the current state of the service, start with `RISK_ASSESSMENT.md`.
+>
 > **See also (2026-06-15):** [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md) — a whole-system risk assessment (trust model, solvency, availability, economics, operator tooling). It reports **five further Critical fund-loss / unbacked-mint defects** not covered here, and is the document to read before any mainnet deployment.
 
 ---
@@ -189,10 +193,10 @@ Store the key outside the working tree (the documented `0600` guidance is good b
 
 - **L-1 (NEW) — Broad exception swallowing reduces visibility.** Many fund-path helpers (`get_account_info`, `find_asset_*`, the confirmation checkers, `maintain_backing_and_bounds`) catch `Exception` and return a benign default. This is what allowed F-2/F-3/F-5 to hide. Log at `WARNING`/`ERROR` with the exception type, and let truly unexpected errors surface.
 - **L-2 (NEW) — Argument-injection defense-in-depth.** User-influenced values (the `nexus:<addr>` memo, asset `receival_account`) are passed as `key=value` argv tokens to the Nexus CLI. The no-shell design makes classic injection unlikely, and validators (`is_valid_usdd_account`, `is_valid_usdc_token_account`) gate most uses, but the address is interpolated into argv *before* some validations. Validate against a strict base58/charset+length whitelist immediately on extraction.
-- **L-3 (NEW) — `update_heartbeat_asset` may dereference `None`.** `data.get("success")` runs on the result of `_parse_json_lenient`, which can return `None` (`nexus_client.py:741`); it's inside a `try`, so it degrades to "False" rather than crashing, but it's fragile.
+- **L-3 — ✅ FIXED.** `update_heartbeat_asset` may dereference `None`. `data.get("success")` runs on the result of `_parse_json_lenient`, which can return `None` (`nexus_client.py:741`); it's inside a `try`, so it degrades to "False" rather than crashing, but it's fragile.
 - **L-4 (NEW) — Type/contract sloppiness.** `balance_reconciler._fee_net_usdd()` is annotated `-> int` but returns a float division result (`balance_reconciler.py:65-71`); `mark_quarantined_sig` returns nothing. These small mismatches make the code harder to reason about.
 - **L-5 — Logging is `print`-based.** No levels, no rotation, no structured fields; secrets could appear in tracebacks. Adopt the `logging` module with redaction (aligns with `SECURITY.md` "Logging & Monitoring").
-- **L-6 — No automated tests.** There is no test suite; every finding above (especially the dead-code calls F-2/F-3/F-5) would be caught by even minimal smoke/import tests or a `python -c "import src.main"` CI step plus a devnet end-to-end run.
+- **L-6 — 🟡 PARTIALLY ADDRESSED (`tests/test_smoke.py` added; no CI yet).** No automated tests. There is no test suite; every finding above (especially the dead-code calls F-2/F-3/F-5) would be caught by even minimal smoke/import tests or a `python -c "import src.main"` CI step plus a devnet end-to-end run.
 
 ---
 

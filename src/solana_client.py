@@ -856,6 +856,19 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             # 4. Check quarantine net amount
             net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND  
 
+            # 4b. Nothing left after the fee: there is nothing to move, so finalise here.
+            # Without this, send_usdc() returns (True, None) for a non-positive amount and
+            # the row is marked "awaiting confirmation" with a NULL signature - which the
+            # confirmation pass filters out, leaving it stuck in unprocessed_sigs forever.
+            if net_amount <= 0:
+                state_db.add_fee_entry(sig=sig, txid=None, kind="quarantine_micro_fee",
+                                       amount_usdc_units=int(amount_usdc_units), amount_usdd_units=None)
+                state_db.mark_processed_sig(sig, timestamp, int(amount_usdc_units), None, 0,
+                                            "processed, amount after fees <= 0", None)
+                state_db.remove_unprocessed_sig(sig)
+                processed_count += 1
+                continue
+
             # 5. On-chain idempotency: only scan after a prior attempt (avoids a per-item
             #    scan on the common first attempt). Double-quarantine is not an external
             #    loss, but this keeps state consistent after a crash.

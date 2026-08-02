@@ -19,13 +19,26 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 
 **Recommendation: do not run this against mainnet funds until Tier 1 is resolved.** B-1, B-2 and B-4 trigger during normal traffic, not under attack.
 
-> **Status update (2026-06-15): every finding B-1 through B-21 has been fixed in code and
-> unit-tested.** The systemic "documented but not implemented" gap in §7 is closed: the
-> retry cooldown, USDD quarantine, action reservations and on-chain debit verification now
-> actually run, and the fee/minimum documentation matches the code. The remaining blocker
-> is **evidence, not code** — none of it has been exercised against a live Solana or Nexus
-> node. See §9. B-27 (no test suite / CI) also remains open: the verification so far is
-> ad-hoc scripts, not a committed regression suite.
+> ### Status update (2026-06-15)
+>
+> **All findings B-1 through B-26 are now fixed or mitigated in code**, and the systemic
+> "documented but not implemented" gap in §7 is closed: the retry cooldown, USDD
+> quarantine, action reservations and on-chain debit verification now actually run, and the
+> fee/minimum documentation matches the code.
+>
+> **B-27 (no tests/CI) is partially addressed.** `tests/test_smoke.py` imports every module,
+> calls 22 real functions against a temp DB, and AST-checks call-site arity. It exists
+> because a genuine `ImportError` (`from . import state_db, state` — no `state` module)
+> survived both byte-compilation and stubbed unit tests, sitting on the critical path of
+> the B-1 fix. **There is still no CI runner and no behavioural test suite.**
+>
+> **The remaining blocker is evidence, not code.** None of this has been exercised against
+> a live Solana or Nexus node, and three fixes depend on external API behaviour read from
+> documentation but never observed: that the Nexus CLI returns `contracts.reference` on
+> `finance/transactions/token` (the whole B-3 resolver rests on it), that it accepts the
+> configured heartbeat field names, and that Helius honours `commitment` on
+> `getTransactionsForAddress`. Treat the correct claim as **"no known defects remain"**,
+> not "verified correct". See §9.
 
 | Tier | Theme | Count |
 |------|-------|-------|
@@ -328,11 +341,11 @@ No lockfile, PID file or `flock` anywhere. A double `systemd` start, a manual ru
 
 | ID | Detail |
 |----|--------|
-| **B-22** | **Quarantine lacks the `net_amount <= 0` guard** the refund path has. `send_usdc()` returns `(True, None)` for a non-positive amount, so the row is marked `quarantine sent, awaiting confirmation` with a `NULL` signature and **never confirms — stuck in `unprocessed_sigs` forever**. Note the R-5 batching change (EVALUATION §11) filters `quarantine_sig IS NOT NULL`, which made this failure *silent* rather than log-spamming; the row was stuck before and after, but it now needs the guard to be visible. |
-| **B-23** | **Inconsistent owner verification.** Priority 1 explicitly re-checks `str(asset_owner) == str(owner)` before payout (`swap_nexus.py:117`); the Priority 4 recovery path pays out relying only on the query filter, with no explicit re-check. Not currently exploitable, but the defence-in-depth is asymmetric. |
-| **B-24** | **Hardcoded ticker.** `is_valid_usdd_account()` compares `info.get("ticker") != "USDD"` literally (`nexus_client.py:74`) rather than `config.NEXUS_TOKEN_NAME`, so the token name is not actually configurable. |
-| **B-25** | **README publishes a live vault address.** `README.md:30,36` hardcode `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ` in the user instructions where every other doc uses `<VAULT_USDC_ACCOUNT>`. Not a secret, but anyone deploying a fork ships instructions that send user funds to the **original operator's vault**. |
-| **B-26** | **Broad exception swallowing** throughout the money paths is what allowed B-2, B-3 and the previously-found dead-code calls to persist unnoticed. Money-path errors should be logged with type and context, not silently defaulted. |
+| **B-22** ✅ | **FIXED** — quarantine now finalises a non-positive net as a fee instead of marking the row `awaiting confirmation` with a NULL signature (which the confirmation pass filters out, leaving it stuck forever). Original text: **quarantine lacks the `net_amount <= 0` guard** the refund path has. `send_usdc()` returns `(True, None)` for a non-positive amount, so the row is marked `quarantine sent, awaiting confirmation` with a `NULL` signature and **never confirms — stuck in `unprocessed_sigs` forever**. Note the R-5 batching change (EVALUATION §11) filters `quarantine_sig IS NOT NULL`, which made this failure *silent* rather than log-spamming; the row was stuck before and after, but it now needs the guard to be visible. |
+| **B-23** ✅ | **FIXED** — Priority 4 now re-checks `asset_owner == owner` explicitly, matching Priority 1. Original text: **inconsistent owner verification.** Priority 1 explicitly re-checks `str(asset_owner) == str(owner)` before payout (`swap_nexus.py:117`); the Priority 4 recovery path pays out relying only on the query filter, with no explicit re-check. Not currently exploitable, but the defence-in-depth is asymmetric. |
+| **B-24** ✅ | **FIXED** — `is_valid_usdd_account()` and all four `name=USDD` CLI arguments now use `config.NEXUS_TOKEN_NAME`. Original text: **hardcoded ticker.** `is_valid_usdd_account()` compares `info.get("ticker") != "USDD"` literally (`nexus_client.py:74`) rather than `config.NEXUS_TOKEN_NAME`, so the token name is not actually configurable. |
+| **B-25** ✅ | **MITIGATED** — the address is kept (users of *this* deployment need it) but now carries an explicit warning to verify it against the on-chain heartbeat and to replace it when forking. Original text: **README publishes a live vault address.** `README.md:30,36` hardcode `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ` in the user instructions where every other doc uses `<VAULT_USDC_ACCOUNT>`. Not a secret, but anyone deploying a fork ships instructions that send user funds to the **original operator's vault**. |
+| **B-26** 🟡 | **PARTIALLY ADDRESSED** — money-path failures now raise operator alerts (`src/alerts.py`) rather than only printing, and `update_heartbeat_asset` no longer dereferences a possibly-`None` parse result. A general move to the `logging` module with levels is still outstanding. Original text: **broad exception swallowing** throughout the money paths is what allowed B-2, B-3 and the previously-found dead-code calls to persist unnoticed. Money-path errors should be logged with type and context, not silently defaulted. |
 
 ---
 
@@ -358,7 +371,7 @@ The single most important systemic finding is that a large set of advertised saf
 
 **Documented but entirely absent from the template:** `HELIUS_RPC_URL` / `HELIUS_API_KEY` — the code's preferred fast path and prominent in `SETUP.md`, yet nowhere in `.env.example`, `CONFIG.md` or `config.py`. An operator copying the template silently gets the slow fallback.
 
-**Root cause — B-27: there is no test suite and no CI.** `.github/` contains only `copilot-instructions.md`; there are no test files. Every Critical defect here and in EVALUATION §8–§11 — especially the calls to functions that do not exist — would be caught by an import smoke test plus modest unit tests. This is the underlying cause of the defect density, not merely a hygiene gap.
+**Root cause — B-27 (🟡 partially addressed): there is now `tests/test_smoke.py`** — it imports every module, calls 22 real functions against a temp DB, and AST-checks call-site arity against changed signatures. It was written after a real `ImportError` (`from . import state_db, state`, where no `state` module exists) survived byte-compilation and stubbed unit tests. **There is still no CI runner and no behavioural test suite.** Originally: `.github/` contains only `copilot-instructions.md`; there are no test files. Every Critical defect here and in EVALUATION §8–§11 — especially the calls to functions that do not exist — would be caught by an import smoke test plus modest unit tests. This is the underlying cause of the defect density, not merely a hygiene gap.
 
 **Compliance/governance (flagged, not assessed):** no sanctions/blocklist screening, no per-address limits, no exportable audit trail, and no documented key-rotation, incident-response or emergency-stop procedure. Material regulatory exposure for a custodial service, and out of scope for a code review.
 
