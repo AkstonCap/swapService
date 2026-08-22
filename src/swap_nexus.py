@@ -684,7 +684,7 @@ def poll_nexus_usdd_deposits():
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
                 res = subprocess.run(
-                    cmd,
+                    nexus_client.apply_session(cmd),
                     capture_output=True,
                     text=True,
                     timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12),

@@ -172,6 +172,16 @@ def run():
         print("   ⚠ No ALERT_WEBHOOK_URL/ALERT_COMMAND configured — backing pauses, unbacked-mint "
               "discrepancies and halted pollers will only appear on stdout.")
 
+    # Nexus session/multiuser configuration. Wrong here means every money operation fails.
+    try:
+        from . import nexus_client as _nc0
+        sess_ok, sess_msg = _nc0.validate_session_config()
+        print(f"   {'✓' if sess_ok else '⚠'} Nexus session: {sess_msg}")
+        if not sess_ok:
+            alerts.critical("nexus_session_misconfigured", sess_msg)
+    except Exception as e:
+        print(f"   ⚠ Nexus session validation error: {e}")
+
     # Fail loudly on a heartbeat asset that cannot accept the fields we write: every
     # update would fail atomically, silently freezing the heartbeat and both waterlines.
     try:

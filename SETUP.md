@@ -234,6 +234,36 @@ spl-token balance <VAULT_USDC_ACCOUNT>
 ```
 The session must stay active while the service runs; re-create it if the daemon restarts.
 
+**Single-user vs multiuser nodes.** If `nexus.conf` has `multiuser=1`, the login response
+returns a **session id** that must accompany every user-scoped API call. Set both:
+
+```env
+NEXUS_MULTIUSER=true
+NEXUS_SESSION=<session id from sessions/create/local>
+```
+
+If your node is single-user (`multiuser=0`, the default), leave `NEXUS_MULTIUSER=false`.
+The session must **not** be sent on a single-user node — the API rejects it — so the
+service adds or omits it automatically from this one flag; you never pass `session=`
+by hand.
+
+Which calls are affected, per the bundled API docs:
+
+| API family | Session in multiuser mode | Used by |
+|------------|---------------------------|---------|
+| `finance/*` | **Required** | USDD debits, refunds, supply and balance reads |
+| `assets/*` | **Required** | Heartbeat create/read/update |
+| `market/*` | **Required** | Optional DEX fee conversions |
+| `register/*` | Not used | Deposit scanning, asset mapping lookups, account validation |
+
+The service validates this at startup and refuses to proceed quietly if
+`NEXUS_MULTIUSER=true` with an empty `NEXUS_SESSION` — otherwise every debit, refund and
+heartbeat update would fail and it would look like a total Nexus outage.
+
+> The session id is a credential: combined with the PIN it authorises spending. It is
+> redacted from logs and alerts, but like the PIN it is passed as a CLI argument and is
+> therefore visible to local users via `ps`. See [SECURITY.md](SECURITY.md).
+
 **2. Accounts**
 
 | Account | `.env` variable | Required | Purpose |
