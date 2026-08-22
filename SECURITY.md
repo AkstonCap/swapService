@@ -12,7 +12,7 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 | Item | Guidance |
 |------|----------|
 | Solana Vault Keypair | Store outside repo; restrict permissions (0600). Consider hardware signer if volume grows. |
-| Nexus PIN / Session | Never log. Use environment variable injection (systemd drop‑in / Docker secret). **Known limitation:** the PIN is currently passed as a Nexus CLI *argument*, so it is visible to any local user via `ps` / `/proc/<pid>/cmdline` for the duration of the call. Treat local shell access to the host as equivalent to holding the PIN. |
+| Nexus PIN / Session | Both are credentials — on a `multiuser=1` node the session id plus the PIN authorises spending. Both are redacted from logs and alerts. Never log. Use environment variable injection (systemd drop‑in / Docker secret). **Known limitation:** the PIN is currently passed as a Nexus CLI *argument*, so it is visible to any local user via `ps` / `/proc/<pid>/cmdline` for the duration of the call. Treat local shell access to the host as equivalent to holding the PIN. |
 | Backups | Encrypted offsite copy of keypair + state files daily. |
 
 ## File Permissions

@@ -40,6 +40,15 @@ NEXUS_USDD_QUARANTINE_ACCOUNT = os.getenv("NEXUS_USDD_QUARANTINE_ACCOUNT")
 # Optional USDD fees account (if you separately account for accrued fees on Nexus)
 NEXUS_USDD_FEES_ACCOUNT = os.getenv("NEXUS_USDD_FEES_ACCOUNT")
 NEXUS_PIN = os.getenv("NEXUS_PIN", "")
+# Nexus multiuser mode. With `multiuser=1` in nexus.conf the node supports several
+# signature chains at once, and EVERY call to a user-scoped API (finance/*, assets/*,
+# market/*, supply/*) must carry `session=<id>`. In single-user mode the session must
+# NOT be supplied at all - the API docs are explicit about this - so it cannot simply be
+# sent unconditionally. `register/*` is a public register read and never takes a session.
+NEXUS_MULTIUSER = os.getenv("NEXUS_MULTIUSER", "false").lower() in ("1", "true", "yes", "on")
+# Session id returned by `sessions/create/local` when multiuser=1. Treat as a credential:
+# combined with the PIN it authorises spending.
+NEXUS_SESSION = os.getenv("NEXUS_SESSION", "")
 USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # deprecated: USDC fees remain in vault
 
 # Polling & State

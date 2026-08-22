@@ -95,6 +95,16 @@ def run_create(
         print("ERROR: NEXUS_PIN is required in environment or .env")
         return 2
 
+    # assets/create and assets/get are session-scoped: on a multiuser=1 node they need
+    # session=<id>, and on a single-user node the session must NOT be supplied.
+    multiuser = os.getenv("NEXUS_MULTIUSER", "false").lower() in ("1", "true", "yes", "on")
+    session = (os.getenv("NEXUS_SESSION") or "").strip()
+    if multiuser and not session:
+        print("ERROR: NEXUS_MULTIUSER is set but NEXUS_SESSION is empty; assets/create "
+              "requires session=<id> on a multiuser node.")
+        return 2
+    session_args = [f"session={session}"] if (multiuser and session) else []
+
     # Build command with all fields
     cmd = [
         nexus_cli,
@@ -127,16 +137,22 @@ def run_create(
     if solana_vault_mint:
         cmd.append(f"solana_vault_mint={solana_vault_mint}")
     
+    cmd.extend(session_args)
     # PIN last
     cmd.append(f"pin={pin}")
 
     def _redact_argv(argv):
         # Redact by KEY. The old code masked cmd[:-1] + ["pin=***"], i.e. it assumed the
         # PIN was last; any later append would have printed the real PIN in cleartext.
-        return [("pin=***" if a.startswith("pin=") else a) for a in argv]
+        return [("pin=***" if a.startswith("pin=") else
+                 "session=***" if a.startswith("session=") else a) for a in argv]
 
     def _redact_text(text):
-        return (text or "").replace(pin, "***") if pin else (text or "")
+        out = text or ""
+        for secret in (pin, session):
+            if secret:
+                out = out.replace(secret, "***")
+        return out
 
     print("Creating heartbeat asset:")
     print("  " + " \\\n    ".join(_redact_argv(cmd)))
@@ -146,7 +162,7 @@ def run_create(
     # conflicting heartbeats, so refuse unless the caller insists.
     if name and not force:
         try:
-            probe = subprocess.run([nexus_cli, "assets/get/asset", f"name={name}"],
+            probe = subprocess.run([nexus_cli, "assets/get/asset", f"name={name}"] + session_args,
                                    capture_output=True, text=True, timeout=20)
             if probe.returncode == 0 and '"address"' in (probe.stdout or ""):
                 print(f"ERROR: an asset named '{name}' already exists.")

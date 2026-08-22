@@ -7,7 +7,50 @@ from . import state_db, nexus_client
 import time
 
 
+# API families whose endpoints operate under a logged-in signature chain. Per the Nexus
+# docs these require `session=<id>` when the node runs with `multiuser=1`, and require the
+# session to be ABSENT in single-user mode ("For single-user API mode the session should
+# not be supplied"). `register/*` is a public register read and never takes a session.
+_SESSION_SCOPED_APIS = ("finance/", "assets/", "market/", "supply/", "invoices/", "names/", "profiles/")
+
+
+def needs_session(cmd: list[str]) -> bool:
+    """True if this CLI invocation targets a session-scoped API."""
+    for arg in cmd[1:]:
+        a = str(arg)
+        if a.startswith("-") or "=" in a:
+            continue  # flags / key=value params, not the endpoint
+        return a.startswith(_SESSION_SCOPED_APIS)
+    return False
+
+
+def apply_session(cmd: list[str]) -> list[str]:
+    """Append `session=<id>` when the node is in multiuser mode and the API needs it.
+
+    Applied centrally rather than at each call site: there are ~15 of them and missing
+    one would fail only that operation, at runtime, in production.
+    """
+    if not getattr(config, "NEXUS_MULTIUSER", False):
+        return cmd  # single-user: the session must NOT be supplied
+    session = getattr(config, "NEXUS_SESSION", "") or ""
+    if not session or not needs_session(cmd):
+        return cmd
+    if any(str(a).startswith("session=") for a in cmd):
+        return cmd  # already explicit
+    return list(cmd) + [f"session={session}"]
+
+
+def redact(text: str) -> str:
+    """Strip the PIN and session id from anything we log or forward."""
+    out = str(text or "")
+    for secret in (getattr(config, "NEXUS_PIN", ""), getattr(config, "NEXUS_SESSION", "")):
+        if secret:
+            out = out.replace(str(secret), "***")
+    return out
+
+
 def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
+    cmd = apply_session(cmd)
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res.returncode, res.stdout, res.stderr
 
@@ -450,7 +493,7 @@ def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_uni
     try:
         code, out, err = _run(cmd, timeout=30)
         if code != 0:
-            print("Nexus transfer error:", err or out)
+            print("Nexus transfer error:", redact(err or out))
             return False
         return True
     except Exception as e:
@@ -680,7 +723,7 @@ def find_usdd_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
     try:
         code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
         if code != 0:
-            print("Nexus: debit-by-reference lookup error:", err or out)
+            print("Nexus: debit-by-reference lookup error:", redact(err or out))
             return None
         data = _parse_json_lenient(out)
         txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
@@ -761,7 +804,7 @@ def list_market_bids(market: str = "USDD/NXS", limit: int = 20) -> list[Dict[str
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus market list error:", err or out)
+            print("Nexus market list error:", redact(err or out))
             return []
         data = _parse_json_lenient(out)
         if isinstance(data, list):
@@ -780,7 +823,7 @@ def list_market_asks(market: str = "NXS/USDD", limit: int = 20) -> list[Dict[str
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus market list error:", err or out)
+            print("Nexus market list error:", redact(err or out))
             return []
         data = _parse_json_lenient(out)
         if isinstance(data, list):
@@ -809,7 +852,7 @@ def execute_market_order(txid: str) -> bool:
     try:
         code, out, err = _run(cmd, timeout=30)
         if code != 0:
-            print("Nexus market execute error:", err or out)
+            print("Nexus market execute error:", redact(err or out))
             return False
         print("Nexus market execute ok:", (out or "").strip())
         return True
@@ -917,7 +960,7 @@ def get_circulating_usdd() -> int:
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus USDD current supply error:", err or out)
+            print("Nexus USDD current supply error:", redact(err or out))
             return 0
         data = _parse_json_lenient(out)
         # Accept either raw number or an object containing value/amount
@@ -947,7 +990,7 @@ def get_circulating_usdd_units() -> int:
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus USDD current supply error:", err or out)
+            print("Nexus USDD current supply error:", redact(err or out))
             return 0
         data = _parse_json_lenient(out)
         if isinstance(data, (int, float, str)):
@@ -1028,7 +1071,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: update heartbeat asset error:", err or out)
+            print("Nexus: update heartbeat asset error:", redact(err or out))
             return False
         data = _parse_json_lenient(out)
         if isinstance(data, dict) and data.get("success"):
@@ -1045,6 +1088,31 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
         print("Error updating heartbeat asset:", e)
         return False
     
+
+def validate_session_config() -> tuple[bool, str]:
+    """Check the multiuser/session configuration before any money operation runs.
+
+    With multiuser=1 every finance/* and assets/* call needs `session=<id>`; without it
+    they all fail, which would look like a total Nexus outage. With multiuser=0 a session
+    must NOT be sent, so a stray value is worth flagging too.
+    """
+    multiuser = bool(getattr(config, "NEXUS_MULTIUSER", False))
+    session = (getattr(config, "NEXUS_SESSION", "") or "").strip()
+    if multiuser and not session:
+        return (False,
+                "NEXUS_MULTIUSER=true but NEXUS_SESSION is empty. Every finance/* and "
+                "assets/* call requires session=<id> on a multiuser node, so debits, "
+                "refunds and heartbeat updates will all fail. Create one with "
+                "`sessions/create/local` and set NEXUS_SESSION.")
+    if not multiuser and session:
+        return (True,
+                "NEXUS_SESSION is set but NEXUS_MULTIUSER is false; the session will NOT "
+                "be sent (single-user nodes reject it). Set NEXUS_MULTIUSER=true if your "
+                "node runs multiuser=1.")
+    if multiuser:
+        return (True, f"multiuser mode, session configured ({session[:6]}…)")
+    return (True, "single-user mode (no session sent)")
+
 
 def validate_heartbeat_asset() -> tuple[bool, str]:
     """Check at startup that the heartbeat asset carries every field we will write.
@@ -1079,7 +1147,7 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: get heartbeat asset error:", err or out)
+            print("Nexus: get heartbeat asset error:", redact(err or out))
             return None
         data = _parse_json_lenient(out)
         if not isinstance(data, dict) or not data.get("address"):
@@ -1196,7 +1264,7 @@ def get_last_reference() -> int | None:
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: get last reference error:", err or out)
+            print("Nexus: get last reference error:", redact(err or out))
             return None
         data = _parse_json_lenient(out)
         txs = data if isinstance(data, list) else [data]
