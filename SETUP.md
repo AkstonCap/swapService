@@ -42,7 +42,7 @@ A Python service that automates swaps between USDC (Solana) and USDD (Nexus). It
 
 ### State & Database
 - SQLite database (`swap_service.db`) for all state persistence.
-- Tables: `processed_sigs`, `unprocessed_sigs`, `refunded_sigs`, `quarantined_sigs`, `processed_txids`, `unprocessed_txids`, `fee_entries`, `attempts`, `waterline_proposals`.
+- Tables: `processed_sigs`, `unprocessed_sigs`, `refunded_sigs`, `quarantined_sigs`, `processed_txids`, `unprocessed_txids`, `refunded_txids`, `quarantined_txids`, `fee_entries`, `fee_summary`, `attempts`, `reservations`, `counters`, `payouts`, `waterline_proposals`, `heartbeat`, `accounts`. Created and migrated automatically by `init_db()` at startup (WAL mode).
 - Heartbeat asset optionally stores `last_poll_timestamp` and per-chain waterlines.
 
 ---
@@ -176,33 +176,157 @@ Key required:
 - `NEXUS_PIN` — PIN for the Nexus signature chain
 - `NEXUS_USDD_TREASURY_ACCOUNT` — Nexus USDD treasury account address
 
+Also required in practice:
+- `NEXUS_HEARTBEAT_ASSET_NAME` — without the heartbeat asset the Solana poller cannot start
+
 Optional but recommended:
-- `HELIUS_RPC_URL` or `HELIUS_API_KEY` — For optimized Solana deposit polling
-- `NEXUS_USDD_QUARANTINE_ACCOUNT` — For isolating failed refunds
-- `USDC_QUARANTINE_ACCOUNT` — Self-owned USDC token account for quarantine
+- `HELIUS_RPC_URL` or `HELIUS_API_KEY` — optimized Solana deposit polling (1-2 calls vs N+1)
+- `ALERT_WEBHOOK_URL` or `ALERT_COMMAND` — **without one, safety alerts only reach stdout**
+- `NEXUS_USDD_QUARANTINE_ACCOUNT` / `USDC_QUARANTINE_ACCOUNT` — isolating failed refunds
+- `MAX_SWAP_USDC` / `MAX_SWAP_USDD` / `DAILY_PAYOUT_CAP_USDC` — exposure caps (0 = disabled)
+- `SOLANA_DEPOSIT_COMMITMENT` — leave at `finalized`; `confirmed` can be reorged after you have minted
 
 Optional chain-specific intervals: `SOLANA_POLL_INTERVAL`, `NEXUS_POLL_INTERVAL`.
 
 ## Solana Setup
-1. Create vault keypair.
-2. Create USDC ATA for vault.
-3. Fund SOL for fees + initial USDC liquidity.
-4. (Optional) Quarantine account for failed refunds.
 
-See `README.md` "Set up Solana accounts" section for step-by-step commands.
+Creates the service's Solana keypair and the USDC token account (ATA) that holds vault liquidity.
+
+**1. Create the vault keypair**
+```bash
+solana-keygen new -o ./vault-keypair.json
+chmod 600 ./vault-keypair.json          # this key controls the entire vault
+solana config set -k ./vault-keypair.json -u https://api.mainnet-beta.solana.com
+solana address                          # -> set as SOL_MAIN_ACCOUNT in .env
+```
+Fund this address with SOL for transaction fees.
+
+**2. Create the vault USDC token account (ATA)**
+```bash
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+# Devnet mint instead: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+```
+The printed token account address goes in `.env` as `VAULT_USDC_ACCOUNT`.
+**It is a token account, not a wallet address** — a common misconfiguration.
+
+**3. Create the USDC quarantine account** (strongly recommended)
+```bash
+spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --owner $(solana address)
+```
+Set as `USDC_QUARANTINE_ACCOUNT`. Without it, funds from failed refunds have nowhere to go.
+
+**4. Fund the vault with USDC** — transfer to `VAULT_USDC_ACCOUNT`. This is the liquidity
+that backs outgoing USDD→USDC swaps; the service pauses new swaps if it falls below
+`BACKING_DEFICIT_PAUSE_PCT`% of circulating USDD.
+
+**5. Verify**
+```bash
+spl-token accounts --owner "$(solana address)"
+spl-token balance <VAULT_USDC_ACCOUNT>
+```
 
 ## Nexus Setup & Asset Mapping
-- Start Nexus daemon with API enabled (`apiauth=0` or credentials configured).
-- Create a session: `./nexus sessions/create/local username=<USER> password=<PASS> pin=<PIN>`
-- Treasury account (USDD) configured as `NEXUS_USDD_TREASURY_ACCOUNT`.
-- (Optional) Create heartbeat asset — see `ASSET_STANDARD.md` for the provider heartbeat specification, or use `create_heartbeat_asset.py`.
-- For USDD→USDC swaps, users publish assets with mapping fields; service uses `register/list/assets` queries.
+
+**1. Daemon + session**
+```bash
+# nexus.conf must have apiauth=0 (local only) or apiuser/apipassword set
+./nexus sessions/create/local username=<USER> password=<PASS> pin=<PIN>
+```
+The session must stay active while the service runs; re-create it if the daemon restarts.
+
+**2. Accounts**
+
+| Account | `.env` variable | Required | Purpose |
+|---------|-----------------|----------|---------|
+| USDD treasury | `NEXUS_USDD_TREASURY_ACCOUNT` | **Yes** | Receives user USDD; pays USDD refunds |
+| USDD quarantine | `NEXUS_USDD_QUARANTINE_ACCOUNT` | Strongly recommended | Receives USDD from exhausted refunds. **If unset the USDD stays in the treasury and keeps counting toward the backing ratio**, overstating your reserves |
+| USDD local | `NEXUS_USDD_LOCAL_ACCOUNT` | Optional | Micro-credit handling |
+| USDD fees | `NEXUS_USDD_FEES_ACCOUNT` | Optional | Fee accrual target for the backing reconcile |
+
+```bash
+./nexus finance/create/account name=usddTreasury token=USDD pin=<PIN>
+./nexus finance/create/account name=usddQuarantine token=USDD pin=<PIN>
+```
+The service mints with `finance/debit/token from=USDD`, so **its signature chain must own
+the USDD token**.
+
+**3. Create the heartbeat asset — REQUIRED, not optional**
+
+The Solana poller reads its waterline from this asset. On a fresh install there is no
+asset and no local fallback, so **`poll_solana_deposits()` returns immediately and no USDC
+deposit is ever ingested.** Create it before first start:
+
+```bash
+python3 create_heartbeat_asset.py --name distordiaBridgeHeartbeat --dry-run   # preview, spends nothing
+python3 create_heartbeat_asset.py --name distordiaBridgeHeartbeat            # ~1 NXS, asks to confirm
+```
+Then set `NEXUS_HEARTBEAT_ASSET_NAME` in `.env` — **the service resolves the asset by NAME**,
+so an asset created without `--name` is unreachable.
+
+`format=basic` fixes the field set at creation: an asset missing a field the service writes
+makes **every** heartbeat update fail atomically, freezing both waterlines. The service
+validates this at startup and prints the field names the asset actually has. Keep
+`HEARTBEAT_WATERLINE_NEXUS_FIELD` / `_SOLANA_FIELD` matching the asset.
+
+**4. User-side asset mapping** — for USDD→USDC, users publish an asset with
+`txid_toService` + `receival_account`; the service matches on (txid, owner). See
+[`ASSET_STANDARD.md`](ASSET_STANDARD.md) and the user guide in [`README.md`](README.md).
 
 ## Running
+
+**Pre-flight check** — run before first start and after any config change:
+```bash
+python3 tests/test_smoke.py
+```
+It imports every module, exercises the real functions against a temporary database and
+verifies call-site signatures. It catches configuration and schema faults that a syntax
+check cannot.
+
+**Start**
 ```bash
 python3 swapService.py
 ```
-Startup prints vault / treasury balances, recovery results, and begins polling.
+Startup prints, in order: the singleton lock, heartbeat validation, any minimums that were
+raised above their fee, a warning if no alert channel is configured, vault/treasury
+balances, recovery results — then begins polling. **Read these lines**; each is a
+pre-flight result.
+
+Only one instance may run per database — an exclusive `flock` (override with
+`SWAP_LOCK_PATH`) refuses a second start, because two instances can double-spend.
+
+**Production supervision (systemd)**
+```ini
+[Unit]
+Description=USDC/USDD swap service
+After=network-online.target
+
+[Service]
+Type=simple
+User=swapsvc
+WorkingDirectory=/opt/swapService
+EnvironmentFile=/opt/swapService/.env
+ExecStart=/opt/swapService/.venv/bin/python3 swapService.py
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+Keep `.env` at mode `600` owned by the service user; it holds the Nexus PIN.
+
+**Verify the first swap end-to-end** (do this on devnet before mainnet):
+1. Send the minimum USDC with memo `nexus:<YOUR_USDD_ACCOUNT>`.
+2. Watch for `[metrics]` and a row in `unprocessed_sigs` moving
+   `ready for processing` → `debit in flight` → `debited, awaiting confirmation`.
+3. Confirm the USDD arrives, and that `processed_sigs` shows `debit_confirmed`.
+4. Repeat the other direction using the asset mapping.
+5. Deliberately send an invalid memo and confirm the refund path completes.
+
+**Set up alerting before going live.** Without `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`,
+backing-deficit pauses, unbacked-mint discrepancies and halted pollers only ever reach
+stdout. See [CONFIG.md § Exposure Caps & Alerting](CONFIG.md).
 
 ## Fees & Economics
 
