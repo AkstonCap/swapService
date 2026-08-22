@@ -246,11 +246,21 @@ vault address before sending funds.
 - One-time cost: create an Asset (1 NXS fee for asset creation, + optionally 1 NXS for adding a local name). Updates are free as long as they are not more frequent than every 10 seconds (there's a congestion fee of 0.01 NXS for more frequent transactions).
 - Fields published: `last_poll_timestamp`, `last_safe_timestamp_solana`, `last_safe_timestamp_nexus`, plus transparency fields (treasury and vault addresses) per [ASSET_STANDARD.md](ASSET_STANDARD.md).
 
-Setup steps:
-1. Create an asset with a mutable attribute named `last_poll_timestamp` (unix seconds). You can also add optional per-chain waterline fields. Use Nexus CLI (example):
-  - `assets/create/asset name=swapServiceHeartbeat mutable=last_poll_timestamp`
-  - Optionally add fields `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` for waterlines.
-2. Put the asset’s address in `.env` as `NEXUS_HEARTBEAT_ASSET_ADDRESS` and ensure `HEARTBEAT_ENABLED=true`.
+Setup steps (operators) — use the helper, which validates input and confirms before spending:
+```bash
+python3 create_heartbeat_asset.py --name distordiaBridgeHeartbeat --dry-run   # preview, spends nothing
+python3 create_heartbeat_asset.py --name distordiaBridgeHeartbeat            # ~1 NXS
+```
+Then set **`NEXUS_HEARTBEAT_ASSET_NAME`** in `.env` (plus `HEARTBEAT_ENABLED=true`).
+
+> The service looks the asset up **by name**, not by address — `NEXUS_HEARTBEAT_ASSET_ADDRESS`
+> is recorded for reference only and is not read. An asset created without `--name` is
+> unreachable by the service.
+>
+> The asset must carry `last_poll_timestamp`, `last_safe_timestamp_solana` and
+> `last_safe_timestamp_nexus`. `format=basic` fixes the field set at creation, so a missing
+> field makes **every** heartbeat update fail atomically. The service validates this at
+> startup and prints the fields the asset actually has.
 
 How clients check status:
 - Read the asset throught the `register` api: `register/get/assets:asset address=<ASSET_ADDRESS>`
@@ -260,7 +270,7 @@ How clients check status:
 
 Waterline (optional):
 - The service can also honor per-chain “waterline” timestamps stored on the same asset to bound how far back it scans:
-  - Default field names: `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` (configurable via env `HEARTBEAT_WATERLINE_SOLANA_FIELD` / `HEARTBEAT_WATERLINE_NEXUS_FIELD` or helper flags)
+  - Default field names: `last_safe_timestamp_solana` and `last_safe_timestamp_nexus` (configurable via `HEARTBEAT_WATERLINE_SOLANA_FIELD` / `HEARTBEAT_WATERLINE_NEXUS_FIELD` — these **must** match the asset, since `format=basic` fixes its fields at creation)
   - Pollers skip on-chain items strictly older than their respective waterline (with a small safety margin). Idempotency still prevents double-processing if you later move the waterline.
 
 ## Setting Up Your Own Swap Service (Operators)
@@ -281,6 +291,46 @@ documented in one place — **[`SETUP.md`](SETUP.md)** — so there is a single 
 
 > This README previously duplicated the whole setup guide and its own `.env` template.
 > Both had drifted out of sync with the code, so they were removed rather than maintained twice.
+
+### Operator Dashboard (web UI)
+
+A read-only web UI for watching swaps, spotting problems and checking that the vault is
+fully backed. It runs as a **separate process** from the swap service:
+
+```bash
+python3 dashboard.py            # then open http://127.0.0.1:8787
+```
+
+It binds to localhost only. To view it from your laptop, tunnel rather than exposing it:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 operator@your-host
+```
+
+**At a glance**
+
+| Panel | Tells you |
+|-------|-----------|
+| Backing ratio | Vault USDC ÷ circulating USDD. Turns red below 1.0 — you are under-collateralised |
+| Vault / Circulating | Current balances on each chain |
+| Open items · Quarantined | How much is in flight, and how much needs a human |
+| 24h payouts | Outbound USDC against `DAILY_PAYOUT_CAP_USDC`, with a utilisation bar |
+| Heartbeat | Age of the last on-chain beat — your liveness signal |
+| **Issues** tab | Everything needing action: unverified debits, pending refunds, quarantined items, USDD marked quarantined but *not actually moved*, and actions that used up their retries |
+| Transaction tabs | Pending / completed / refunded / quarantined per direction, plus payouts and the fee ledger |
+
+Banners appear on their own for a **backing-deficit pause**, **stale metrics** (the service
+has stopped writing — likely down or wedged) and **under-collateralisation**.
+
+**It cannot touch your funds.** The dashboard opens the database read-only, has no
+mutating endpoints and no retry/refund buttons, and holds no vault keypair, Nexus PIN or
+RPC key. Manual intervention stays on the CLI. Full configuration, the token/TLS rules for
+non-localhost binds, and the reasoning behind those choices are in
+[SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard).
+
+```bash
+python3 tests/test_dashboard.py   # verify read-only, XSS-safe and auth before exposing it
+```
 
 ## Nexus API Docs
 Official Nexus API docs are included in the `Nexus API docs/` folder for reference.
