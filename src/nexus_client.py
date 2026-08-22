@@ -194,15 +194,50 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -
     return (True, str(txid) if txid else None)
 
 
-def get_transaction_confirmations(txid: str) -> int | None:
-    """Fetch transaction details by txid."""
-    cmd = [config.NEXUS_CLI, "finance/transactions/token", f"name={config.NEXUS_TOKEN_NAME}"]
+def get_transactions_confirmations(txids, limit: int = 200) -> dict:
+    """Batch: {txid: confirmations} in ONE CLI call.
+
+    The per-txid version below fetched the *entire* USDD transaction history (no limit)
+    and did so once per unconfirmed row, so N pending debits meant N unbounded fetches.
+    """
+    wanted = {str(t) for t in txids if t}
+    out: dict = {}
+    if not wanted:
+        return out
+    cmd = [config.NEXUS_CLI, "finance/transactions/token/txid,confirmations",
+           f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc", f"limit={int(limit)}"]
     try:
-        code, out, err = _run(cmd, timeout=5)
+        code, cli_out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
+        if code != 0:
+            return out
+        data = _parse_json_lenient(cli_out)
+        txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        for tx in txs or []:
+            if not isinstance(tx, dict):
+                continue
+            t = str(tx.get("txid") or "")
+            if t in wanted and tx.get("confirmations") is not None:
+                try:
+                    out[t] = int(tx.get("confirmations"))
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"Error batch-fetching confirmations: {e}")
+    return out
+
+
+def get_transaction_confirmations(txid: str) -> int | None:
+    """Confirmations for a single txid (bounded). Prefer get_transactions_confirmations()."""
+    cmd = [config.NEXUS_CLI, "finance/transactions/token/txid,confirmations",
+           f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc", "limit=200"]
+    try:
+        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
         if code != 0:
             return None
         res = _parse_json_lenient(out)
-        res = [tx for tx in res if tx.get("txid") == txid]
+        if not isinstance(res, list):
+            res = [res] if isinstance(res, dict) else []
+        res = [tx for tx in res if isinstance(tx, dict) and tx.get("txid") == txid]
         return int(res[0].get("confirmations")) if res else None
     except Exception as e:
         print(f"Error fetching transaction {txid}: {e}")
@@ -229,11 +264,13 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     time_start = time.monotonic()
     current_time = time_start
     confirm_timeout_sec = int(getattr(config, "USDC_CONFIRM_TIMEOUT_SEC", 600))
+    # One bounded lookup for the whole batch instead of an unbounded fetch per row.
+    conf_map = get_transactions_confirmations([row[6] for row in sigs if row[6]])
 
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         
-        confirmations = get_transaction_confirmations(txid)
+        confirmations = conf_map.get(str(txid)) if txid else None
         
         # Case 1: Transaction NOT found at all - may have been dropped or failed silently
         if confirmations is None:
@@ -309,6 +346,9 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     if not rows:
         return 0
 
+    # One lookup for the whole batch instead of one subprocess per row.
+    found_map = find_usdd_debits_by_references([r[7] for r in rows if r[7] is not None])
+
     grace = int(getattr(config, "DEBIT_VERIFY_GRACE_SEC", 300))
     max_attempts = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
     now = int(time.time())
@@ -324,7 +364,7 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 resolved += 1
                 continue
 
-            found_txid = find_usdd_debit_by_reference(reference)
+            found_txid = found_map.get(str(reference).strip())
             if found_txid:
                 state_db.update_unprocessed_sig_txid(sig, found_txid)
                 state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
@@ -567,6 +607,52 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
         return {"receival_account": best.get("receival_account"), "owner": best.get("owner")}
     except Exception:
         return None
+
+
+def find_usdd_debits_by_references(references, limit: int = 100) -> dict:
+    """Batch form of find_usdd_debit_by_reference: {reference_str: txid} for those found.
+
+    One CLI invocation for the whole set. The per-row version spawned a Nexus CLI
+    subprocess for each unverified debit, each pulling the same page of transactions.
+    """
+    wanted = {str(r).strip() for r in references if r is not None}
+    out: dict = {}
+    if not wanted:
+        return out
+    cmd = [
+        config.NEXUS_CLI,
+        "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.to,contracts.amount",
+        f"name={config.NEXUS_TOKEN_NAME}",
+        "sort=timestamp",
+        "order=desc",
+        f"limit={int(limit)}",
+    ]
+    try:
+        code, cli_out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
+        if code != 0:
+            print("Nexus: batch debit-by-reference lookup error:", err or cli_out)
+            return out
+        data = _parse_json_lenient(cli_out)
+        txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        for tx in txs or []:
+            if not isinstance(tx, dict):
+                continue
+            for c in (tx.get("contracts") or []):
+                if not isinstance(c, dict):
+                    continue
+                if str(c.get("OP") or "").upper() != "DEBIT":
+                    continue
+                ref = c.get("reference")
+                if ref is None:
+                    continue
+                key = str(ref).strip()
+                if key in wanted and key not in out:
+                    txid = tx.get("txid")
+                    if txid:
+                        out[key] = str(txid)
+    except Exception as e:
+        print("Nexus: batch debit-by-reference lookup exception:", e)
+    return out
 
 
 def find_usdd_debit_by_reference(reference, limit: int = 100) -> Optional[str]:

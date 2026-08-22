@@ -415,3 +415,67 @@ The single most important systemic finding is that a large set of advertised saf
 This is a static assessment. Runtime claims — the scientific-notation CLI string, the concurrency race, the reorg exposure, the waterline skip, the heartbeat field mismatch — follow from reading the code together with documented Solana, Nexus and SQLite semantics; the arithmetic and SQL were executed in isolation to confirm the values shown. They were **not** observed against a live node, because the runtime dependencies and RPC/Nexus access are unavailable in this environment.
 
 A devnet/testnet run exercising both directions plus refund, quarantine, restart-recovery and deliberately overlapping pollers remains the essential final gate, and would likely surface further edge cases in the multi-stage state machines.
+
+---
+
+## 10. Audit — Functionality, Performance & Security (2026-06-15, current code)
+
+**Conflict of interest, stated up front.** Nearly all of the money-path code reviewed here
+was written or rewritten during the same engagement that produced this document. This is
+therefore **partly self-review, and weaker evidence than an independent audit.** To reduce
+reliance on my own judgement this pass leaned on checks that do not depend on it: `pyflakes`,
+an AST call-site arity check, a real-function smoke test, and **measured** benchmarks rather
+than asserted ones. An independent reviewer should still go over the diff.
+
+### 10.1 Functionality — 2 defects found, both fixed
+
+| ID | Severity | Finding |
+|----|----------|---------|
+| **A-1** | 🟠 High | **A transient payout-cap breach permanently quarantined a user's refund.** *(Introduced by the B-9 cap work — my own regression.)* `send_usdc()` returned `False` both when a send genuinely failed and when it was refused by the rolling 24h cap. The refund path maps `False` → `to be quarantined`, so hitting the cap converted a routine refund into a manual-intervention event. **Fixed:** the cap now raises `PayoutCapExceeded`, which callers treat as *defer and retry later*, leaving the status untouched. Verified by test: with the cap deliberately breached the row stays `to be refunded`. A follow-on flaw in that same fix — the generic `except` swallowing and re-wrapping the new exception, hiding whether the cap tripped or the check itself broke — was also corrected. |
+| **A-2** | 🟠 High | **`quarantine failed` was a dead-end state.** The status was written on a failed quarantine send, but the quarantine pass selects `status_like '%to be quarantined%'`, which does not match it, and nothing else reads it. Affected rows sat in `unprocessed_sigs` forever — funds neither refunded nor quarantined, and no alert. *(Pre-existing.)* **Fixed:** added a `status_in` filter; the pass now picks up both states, with `should_attempt()` bounding the retry. |
+
+### 10.2 Performance — measured, not assumed
+
+Benchmarked against a seeded 20,000-row `unprocessed_sigs` table:
+
+| ID | Finding | Measured | Status |
+|----|---------|----------|--------|
+| **P-1** | **No indexes on any hot column.** Every poll filters by `status` and orders by `timestamp`; only `payouts` had an index. | status filter **4.29 → 1.62 ms** (2.6×), pending-verification **3.73 → 1.20 ms** (3.1×), full `get_unprocessed_sigs()` scan **34 ms** | ✅ Fixed — 7 indexes added in `init_db()` |
+| **P-2** | **`resolve_unverified_debits()` spawned one Nexus CLI subprocess per row**, each pulling the same page of transactions. | N rows → N process spawns | ✅ Fixed — `find_usdd_debits_by_references()` does one call for the batch |
+| **P-3** | **`get_transaction_confirmations()` fetched the *entire* USDD transaction history with no `limit`**, once per unconfirmed debit row. | unbounded × N rows | ✅ Fixed — bounded to 200 and batched via `get_transactions_confirmations()` |
+| **P-4** | `process_unprocessed_txids()` re-reads the full `unprocessed_txids` table **8 times** per invocation (once per priority stage); `main` reads all of `unprocessed_sigs` 3× per cycle. | ~34 ms per full scan at 20k rows | ◻️ Open — mitigated by P-1's indexes; a single fetch reused across stages would be the real fix but is a riskier refactor |
+| **P-5** | `poll_nexus_usdd_deposits()` performs an owner lookup (`get_account_info`, one CLI subprocess) **per credit**. | 1 spawn per credit | ◻️ Open — bounded by `MAX_CREDITS_PER_LOOP`; batching needs a Nexus API that supports it |
+
+**Non-finding, worth recording:** I expected the connection-per-call pattern in `state_db`
+(a fresh `sqlite3.connect()` in every helper) to be a bottleneck. Measured at **0.022 ms**
+per connect+close — negligible. Left alone.
+
+### 10.3 Security — no new defects
+
+Re-checked the surfaces added during this engagement:
+
+- **SQL injection** — none. The one dynamically-built clause (`status IN (…)`) interpolates
+  only `?` placeholders; all values are bound. Everything else is parameterised.
+- **Command injection** — none. No `shell=True` anywhere; every `subprocess.run` takes an argv list.
+- **Alert channel** — no attacker-controlled text (deposit memos) is forwarded off-host; the
+  PIN is redacted before delivery. One counterparty address (`destination`) can appear in a
+  `payout_cap_exceeded` payload, so treat the webhook endpoint as receiving user data.
+- **Static analysis** — `pyflakes` reports no undefined names across `src/`, the helper
+  scripts and the test.
+
+**Unchanged and still open:** the `NEXUS_PIN` is passed as a CLI argument and is readable by
+any local user via `ps` / `/proc/<pid>/cmdline` (B-9). This needs a decision on what the
+Nexus CLI supports; guessing risks breaking every money operation.
+
+### 10.4 Verdict
+
+Two High-severity functional defects were found and fixed — notably **one I introduced**,
+which is the clearest argument for the independent review recommended above. Performance
+work was driven by measurement, and one assumption (connection churn) was disproved rather
+than acted on. No new security defects.
+
+**The overall position is unchanged and remains the binding constraint:** the supportable
+claim is *"no known defects remain"*, not *"verified correct"*. Nothing here has run against
+a live Solana or Nexus node, and A-1 is a reminder that new safety code can introduce its
+own fund-handling regressions. A devnet run — both directions plus refund, quarantine,
+cap breach, restart recovery and finality hold — is still the gate before mainnet funds.

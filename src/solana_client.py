@@ -22,6 +22,15 @@ from . import config
 # Expose last sent signature for higher-level idempotency logging (refund / quarantine / debit flows)
 last_sent_sig: str | None = None
 
+
+class PayoutCapExceeded(Exception):
+    """Raised when a send is refused by the rolling 24h payout cap.
+
+    Distinct from a send FAILURE: the payment is fine, we are just throttled. Callers
+    must leave the item's status untouched and retry on a later cycle - treating this
+    like a failure would divert a legitimate refund into quarantine over a temporary cap.
+    """
+
 # SPL Token and ATA Program IDs (constants)
 TOKEN_PROGRAM_ID = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = PublicKey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
@@ -791,7 +800,12 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
             # 7. Process the refund. Memo prefix MUST match the startup-recovery scanner
             #    (refundSig:) so a crash mid-refund is reconstructed, not double-paid.
             state_db.record_attempt(refund_key)
-            sig_r = send_usdc(from_address, net_amount, memo=f"refundSig:{sig}")
+            try:
+                sig_r = send_usdc(from_address, net_amount, memo=f"refundSig:{sig}")
+            except PayoutCapExceeded as e:
+                # Throttled, not failed: leave status as "to be refunded" and retry later.
+                print(f"[REFUND_DEFERRED] sig={sig} {e}")
+                continue
             if sig_r[0]:
                 processed_count += 1
                 # Bug #12 fix: Track the flat refund fee
@@ -824,8 +838,10 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
     from . import state_db, nexus_client
 
     # 1. Fetch unprocessed sigs to be quarantined (oldest first)
+    # Include 'quarantine failed': it was previously written and then never selected
+    # again by any pass, stranding the row (and the funds) in unprocessed_sigs forever.
     unprocessed = state_db.filter_unprocessed_sigs({
-        'status_like': '%to be quarantined%',
+        'status_in': ('to be quarantined', 'quarantine failed'),
         'limit': limit
     })
     if not unprocessed:
@@ -844,9 +860,13 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             break
 
         try:
-            # 2. Check status "to be quarantined"
-            if state_db.get_unprocessed_sig_status(sig) != "to be quarantined":
+            # 2. Re-check status (either pending or a previously failed attempt)
+            if state_db.get_unprocessed_sig_status(sig) not in ("to be quarantined", "quarantine failed"):
                 continue
+            # Bound the retry so a permanently failing quarantine cannot spin every cycle.
+            if not state_db.should_attempt(f"usdc_quarantine_send:{sig}"):
+                continue
+            state_db.record_attempt(f"usdc_quarantine_send:{sig}")
 
             # 3. Run idempotency checks: already processed?
             if state_db.is_processed_sig(sig) or state_db.is_refunded_sig(sig):
@@ -884,7 +904,11 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             # 6. Process the quarantine. Memo prefix MUST match the startup-recovery
             #    scanner (quarantinedSig:) for crash reconstruction.
             state_db.record_attempt(quar_key)
-            sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
+            try:
+                sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
+            except PayoutCapExceeded as e:
+                print(f"[QUARANTINE_DEFERRED] sig={sig} {e}")
+                continue
             if sig_q[0]:
                 processed_count += 1
                 # Bug #8 fix: Track the quarantine fee
@@ -939,14 +963,17 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
                 from . import alerts
                 alerts.critical(
                     "payout_cap_exceeded",
-                    "24h outbound USDC cap would be breached; payment refused",
+                    "24h outbound USDC cap would be breached; payment deferred",
                     spent_units=spent, requested_units=int(amount_base_units), cap_units=cap,
                     destination=str(destination),
                 )
-                return False, None
+                raise PayoutCapExceeded(
+                    f"24h payout cap {cap} would be exceeded (spent {spent}, "
+                    f"requested {int(amount_base_units)})")
+        except PayoutCapExceeded:
+            raise  # genuine cap breach - propagate as-is
         except Exception as e:
-            print(f"[payout_cap] check failed, refusing payment to stay safe: {e}")
-            return False, None
+            raise PayoutCapExceeded(f"payout cap check failed, deferring payment to stay safe: {e}")
 
     try:
         kp = load_vault_keypair()
