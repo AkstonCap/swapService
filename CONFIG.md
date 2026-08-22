@@ -93,6 +93,13 @@ Legend:
 | ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. |
 | ALERT_MIN_INTERVAL_SEC | int | 300 | Per-event dedupe window. |
 
+## Operator Dashboard (read-only UI)
+| Var | Type | Default | Notes |
+|-----|------|---------|-------|
+| DASHBOARD_HOST | str | 127.0.0.1 | Bind address. Anything non-loopback requires DASHBOARD_TOKEN; the dashboard refuses to start otherwise. |
+| DASHBOARD_PORT | int | 8787 | |
+| DASHBOARD_TOKEN | str |  | Bearer token. Required for non-loopback binds; recommended always. |
+
 ## Micro / Advanced Handling Flags
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|

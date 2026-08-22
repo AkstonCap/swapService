@@ -328,6 +328,50 @@ Keep `.env` at mode `600` owned by the service user; it holds the Nexus PIN.
 backing-deficit pauses, unbacked-mint discrepancies and halted pollers only ever reach
 stdout. See [CONFIG.md § Exposure Caps & Alerting](CONFIG.md).
 
+## Operator Dashboard
+
+A read-only web UI for tracking transactions, issues, vault balances and the backing ratio.
+Runs as a **separate process** from the swap service.
+
+```bash
+python3 dashboard.py            # http://127.0.0.1:8787
+```
+
+Remote access — keep the localhost bind and tunnel:
+```bash
+ssh -L 8787:127.0.0.1:8787 operator@your-host
+```
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `DASHBOARD_HOST` | `127.0.0.1` | Binding anything else **requires** `DASHBOARD_TOKEN`; the service refuses otherwise |
+| `DASHBOARD_PORT` | `8787` | |
+| `DASHBOARD_TOKEN` | unset | Bearer token (`Authorization: Bearer …`, or `?token=`) |
+
+**What it shows**
+- Backing ratio, vault USDC, circulating USDD, fees collected, 24h payouts against the cap
+- A paused banner during a backing deficit, and a stale banner if the service stops writing metrics
+- **Issues** — everything needing a human: unverified debits, pending refunds, quarantined
+  items, USDD quarantined but *not moved*, and actions that exhausted their retry budget
+- Transaction tabs per direction: pending, completed, refunded, quarantined, payouts, fees
+
+**Security properties** (enforced, and covered by `tests/test_dashboard.py`)
+- Opens the database with SQLite `mode=ro`, so it *cannot* write state or hold a write lock.
+- No mutating endpoints. There is deliberately no retry/refund/release button — a web
+  endpoint that can move funds is a much larger attack surface than one that can only look.
+  Manual intervention stays on the CLI.
+- Needs **no** vault keypair, Nexus PIN or RPC key: balances come from the `metrics_snapshot`
+  row the service writes each cycle.
+- Deposit memos are attacker-controlled and are rendered in the operator's browser, so all
+  values are delivered as JSON and inserted with `textContent`; the page never uses
+  `innerHTML`. A strict CSP, `nosniff` and `no-referrer` are sent on every response.
+- Stdlib `http.server` only — no new dependencies on a custodial service.
+
+Run the tests before exposing it:
+```bash
+python3 tests/test_dashboard.py
+```
+
 ## Fees & Economics
 
 ### Fee Direction Map
@@ -371,6 +415,7 @@ RPC timeouts: increase `SOLANA_RPC_TIMEOUT_SEC` or switch to a dedicated RPC pro
 - User swap instructions: `README.md`
 - Initiator state machines: `SWAP_INITIATOR_STATE_MACHINES.md`
 - Server-side state machines: `STATE_MACHINES.md`
+- Operator dashboard: `python3 dashboard.py` (see above)
 - Audit findings: `AUDIT_FINDINGS.md`
 
 ## Appendix: Configuration Variables

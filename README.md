@@ -276,6 +276,7 @@ documented in one place — **[`SETUP.md`](SETUP.md)** — so there is a single 
 | Nexus accounts + heartbeat asset | [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping) |
 | Every environment variable | [`.env.example`](.env.example) and [CONFIG.md](CONFIG.md) |
 | Running in production | [SETUP.md § Running](SETUP.md#running) |
+| Monitoring dashboard | [SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard) |
 | Security hardening | [SECURITY.md](SECURITY.md) |
 
 > This README previously duplicated the whole setup guide and its own `.env` template.

@@ -327,6 +327,20 @@ def run():
                         refund_pending = sum(1 for r in unproc_rows if r[5] == 'refund pending')
                         quarantined = sum(1 for r in unproc_rows if r[5] == 'quarantined')
                         print(f"[metrics] vault_usdc={vault_usdc} circ_usdd={circ_usdd} ratio={ratio:.4f} unprocessed={len(unproc_rows)} ready={ready} debiting={debiting} unresolved={unresolved} refund_pending={refund_pending} quarantined={quarantined}")
+
+                        # Persist for the operator dashboard (which never touches the chain).
+                        try:
+                            f_usdc, f_usdd = state_db.get_total_fees_collected()
+                            state_db.save_metrics_snapshot(
+                                vault_usdc_units=vault_usdc,
+                                circulating_usdd_units=circ_usdd,
+                                paused=bool(should_pause),
+                                payouts_24h_units=state_db.payouts_since(86400),
+                                fees_usdc_units=f_usdc,
+                                fees_usdd_units=f_usdd,
+                            )
+                        except Exception as e:
+                            print(f"[metrics] snapshot save error: {e}")
                     except Exception as e:
                         print(f"[metrics] error: {e}")
                 
