@@ -20,6 +20,20 @@ Legend:
 | NEXUS_USDD_TREASURY_ACCOUNT | Y | str |  | USDD treasury account receiving user USDD credits & paying refunds. |
 | SOL_MAIN_ACCOUNT | Y | pubkey |  | Base SOL account (used in some balance / backing logic). |
 
+## Bridged Token Pair
+| Var | Type | Default | Notes |
+|-----|------|---------|-------|
+| SOLANA_TOKEN_MINT | pubkey |  | Mint of the Solana-side token. Alias: `USDC_MINT`. |
+| SOLANA_VAULT_ACCOUNT | pubkey |  | Vault SPL token account (ATA) for that mint. Alias: `VAULT_USDC_ACCOUNT`. |
+| SOLANA_TOKEN_SYMBOL | str | USDC | Display ticker; published in the registration record. |
+| SOLANA_TOKEN_DECIMALS | int | 6 | Alias: `USDC_DECIMALS`. |
+| NEXUS_TOKEN_NAME | str | USDD | The Nexus token minted/debited. Used in `finance/debit/token from=<token>`. |
+| NEXUS_TOKEN_DECIMALS | int | 6 | Alias: `USDD_DECIMALS`. |
+| DEPOSIT_MEMO_PREFIX | str | `nexus:` | Memo prefix depositors use to name their Nexus destination. |
+| SERVICE_PROVIDER | str |  | Operator name/domain, published on-chain. |
+| SERVICE_VERSION | str | 1.0.0 | Published on-chain. |
+| SERVICE_CONTACT | str |  | URL or contact handle, published on-chain. |
+
 ## Decimals
 | Var | Req | Type | Default | Notes |
 |-----|-----|------|---------|-------|

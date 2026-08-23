@@ -221,7 +221,8 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -
         return (False, None)
 
     amount_str = _format_usdd_amount(int(amount_usdd_units))
-    cmd = [config.NEXUS_CLI, "finance/debit/token", "from=USDD", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
+    cmd = [config.NEXUS_CLI, "finance/debit/token", f"from={config.NEXUS_TOKEN_NAME}",
+           f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     # Use a generous, consistent timeout: a debit killed mid-flight may still execute
     # on the node, which would desynchronize state and risk a double payout.
     code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
@@ -845,7 +846,7 @@ def execute_market_order(txid: str) -> bool:
         config.NEXUS_CLI,
         "market/execute/order",
         f"txid={txid}",
-        "from=USDD",
+        f"from={config.NEXUS_TOKEN_NAME}",
         "to=default",
         f"pin={config.NEXUS_PIN}",
     ]
@@ -1045,6 +1046,127 @@ def get_usdd_local_balance_units() -> int:
 # last_safe_timestamp_solana,
 # vaulted_token {chain, ticker, vault_address, balance}
 # minted_nexus_token {name, address, supply}
+
+# --- On-chain service registration ---------------------------------------------------
+# The heartbeat asset doubles as the bridge's public registration record: it declares the
+# token pair, the vault/treasury addresses that back it, the current terms, and a liveness
+# timestamp. A client can discover everything needed to use (or audit) the bridge from
+# this one asset, and can tell whether the operator is currently online.
+#
+# `format=basic` FIXES THE FIELD SET AT CREATION, so the record must be created complete;
+# the service then only rewrites the mutable subset. Field names are defined once here and
+# used by both the registration tool and the runtime updater, so they cannot drift apart.
+
+SERVICE_RECORD_IMMUTABLE = (
+    "distordiaType", "provider", "memo_prefix",
+    "nexus_token", "nexus_treasury_address",
+    "solana_token", "solana_vault_address", "solana_vault_mint",
+)
+SERVICE_RECORD_MUTABLE = (
+    "last_poll_timestamp", "last_safe_timestamp_solana", "last_safe_timestamp_nexus",
+    "status", "version", "contact",
+    "fee_flat_to_nexus", "fee_flat_to_solana", "fee_bps",
+    "min_to_nexus", "min_to_solana",
+)
+SERVICE_RECORD_FIELDS = SERVICE_RECORD_IMMUTABLE + SERVICE_RECORD_MUTABLE
+# Nexus `format=basic` assets are small; keep the whole record well inside one register.
+SERVICE_RECORD_MAX_BYTES = 1024
+
+
+def build_service_record(status: str = "online", last_poll: int | None = None,
+                         wline_sol: int | None = None, wline_nxs: int | None = None) -> dict:
+    """The complete public description of this bridge, derived from config."""
+    import time as _t
+    sol_field = getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
+    nxs_field = getattr(config, "HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
+    rec = {
+        # identity + pair (immutable)
+        "distordiaType": "nexusBridgeHeartbeat",
+        "provider": str(getattr(config, "SERVICE_PROVIDER", "") or "unnamed-operator"),
+        "memo_prefix": str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:")),
+        "nexus_token": str(config.NEXUS_TOKEN_NAME),
+        "nexus_treasury_address": str(config.NEXUS_USDD_TREASURY_ACCOUNT or ""),
+        "solana_token": str(getattr(config, "SOLANA_TOKEN_SYMBOL", "USDC")),
+        "solana_vault_address": str(config.VAULT_USDC_ACCOUNT),
+        "solana_vault_mint": str(config.USDC_MINT),
+        # liveness + terms (mutable)
+        "last_poll_timestamp": int(last_poll if last_poll is not None else _t.time()),
+        sol_field: int(wline_sol or 0),
+        nxs_field: int(wline_nxs or 0),
+        "status": status,
+        "version": str(getattr(config, "SERVICE_VERSION", "1.0.0")),
+        "contact": str(getattr(config, "SERVICE_CONTACT", "") or "-"),
+        # Terms, so a client can compute what they will receive before sending anything.
+        "fee_flat_to_nexus": str(config.FLAT_FEE_USDD),
+        "fee_flat_to_solana": str(config.FLAT_FEE_USDC),
+        "fee_bps": str(int(config.DYNAMIC_FEE_BPS)),
+        "min_to_nexus": _format_usdd_amount(int(config.MIN_DEPOSIT_USDC_UNITS)),
+        "min_to_solana": _format_usdd_amount(int(config.MIN_CREDIT_USDD_UNITS)),
+    }
+    return rec
+
+
+def service_record_size(rec: dict) -> int:
+    """Approximate on-register size of the record as `key=value` pairs."""
+    return sum(len(str(k).encode()) + len(str(v).encode()) + 2 for k, v in rec.items())
+
+
+def publish_service_record(status: str = "online", last_poll: int | None = None,
+                           wline_sol: int | None = None, wline_nxs: int | None = None) -> bool:
+    """Rewrite the MUTABLE part of the registration record (terms, status, liveness).
+
+    Only fields that already exist on the asset can be written: `format=basic` fixes the
+    schema at creation, and one unknown field fails the whole atomic update.
+    """
+    if not getattr(config, "HEARTBEAT_ENABLED", True):
+        return False
+    name = getattr(config, "NEXUS_HEARTBEAT_ASSET_NAME", None)
+    if not name:
+        return False
+    asset = get_heartbeat_asset()
+    if not asset:
+        return False
+    rec = build_service_record(status=status, last_poll=last_poll,
+                               wline_sol=wline_sol, wline_nxs=wline_nxs)
+    sol_field = getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
+    nxs_field = getattr(config, "HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
+    mutable = set(SERVICE_RECORD_MUTABLE) | {sol_field, nxs_field}
+    cmd = [config.NEXUS_CLI, "assets/update/asset", f"name={name}", "format=basic",
+           f"pin={config.NEXUS_PIN}"]
+    wrote = 0
+    for k, v in rec.items():
+        if k in mutable and k in asset:   # never send a field the asset lacks
+            cmd.append(f"{k}={v}")
+            wrote += 1
+    if not wrote:
+        return False
+    try:
+        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
+        if code != 0:
+            print("Nexus: service record update error:", redact(err or out))
+            return False
+        data = _parse_json_lenient(out)
+        return bool(isinstance(data, dict) and data.get("success"))
+    except Exception as e:
+        print("Nexus: service record update exception:", redact(str(e)))
+        return False
+
+
+def read_service_record(name: str | None = None) -> Optional[Dict[str, Any]]:
+    """Read another operator's (or our own) published bridge registration."""
+    target = name or getattr(config, "NEXUS_HEARTBEAT_ASSET_NAME", None)
+    if not target:
+        return None
+    cmd = [config.NEXUS_CLI, "assets/get/asset", f"name={target}"]
+    try:
+        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
+        if code != 0:
+            return None
+        data = _parse_json_lenient(out)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
 
 def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int | None) -> bool:
     """Update the heartbeat asset information."""

@@ -574,12 +574,13 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 continue
 
             # 4. Validate memo format
-            if not memo or not memo.lower().startswith("nexus:"):
+            prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
+            if not memo or not memo.lower().startswith(prefix.lower()):
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid memo
                 proc_count_refund += 1
                 continue
 
-            nexus_address = memo.split(":", 1)[1].strip()
+            nexus_address = memo[len(prefix):].strip()
             if not nexus_address:
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid memo
                 proc_count_refund += 1

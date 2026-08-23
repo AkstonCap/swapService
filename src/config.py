@@ -4,37 +4,83 @@ from solders.pubkey import Pubkey as PublicKey
 
 load_dotenv()
 
+# Each entry is a tuple of accepted spellings; the first is preferred.
 REQUIRED_ENV = [
-    "SOLANA_RPC_URL",
-    "VAULT_KEYPAIR",
-    "VAULT_USDC_ACCOUNT",
-    "USDC_MINT",
-    "SOL_MINT",
-    "NEXUS_PIN",
-    "NEXUS_USDD_TREASURY_ACCOUNT",
-    "SOL_MAIN_ACCOUNT",
+    ("SOLANA_RPC_URL",),
+    ("VAULT_KEYPAIR",),
+    ("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT"),
+    ("SOLANA_TOKEN_MINT", "USDC_MINT"),
+    ("SOL_MINT",),
+    ("NEXUS_PIN",),
+    ("NEXUS_USDD_TREASURY_ACCOUNT",),
+    ("SOL_MAIN_ACCOUNT",),
 ]
-for var in REQUIRED_ENV:
-    if not os.getenv(var):
-        raise ValueError(f"Required environment variable {var} is not set")
+for _names in REQUIRED_ENV:
+    if not any(os.getenv(n) for n in _names):
+        raise ValueError(
+            f"Required environment variable {_names[0]} is not set"
+            + (f" (alias: {', '.join(_names[1:])})" if len(_names) > 1 else "")
+        )
+
+# --- Bridged token pair -------------------------------------------------------------
+# This bridge is token-agnostic: the operator chooses which Solana SPL token is bridged
+# against which Nexus token. The historical variable names say USDC/USDD because that was
+# the first deployment; the generic aliases below are preferred in new configs and both
+# are accepted, so existing .env files keep working.
+#
+#   Solana side : SOLANA_TOKEN_MINT + SOLANA_VAULT_ACCOUNT  (aliases: USDC_MINT, VAULT_USDC_ACCOUNT)
+#   Nexus  side : NEXUS_TOKEN_NAME  + NEXUS_USDD_TREASURY_ACCOUNT
+#
+# NOTE: internal identifiers still read `usdc`/`usdd`. Read them as "the Solana-side
+# token" and "the Nexus-side token". Renaming them would touch every line of the
+# fund-moving code, which is not worth the risk; the VALUES are fully configurable.
+def _first_env(*names, default=None):
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v
+    return default
 
 # Solana
 RPC_URL = os.getenv("SOLANA_RPC_URL")
 VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
-VAULT_USDC_ACCOUNT = PublicKey.from_string(os.getenv("VAULT_USDC_ACCOUNT"))
-USDC_MINT = PublicKey.from_string(os.getenv("USDC_MINT"))
+_vault_acct = _first_env("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT")
+_sol_mint = _first_env("SOLANA_TOKEN_MINT", "USDC_MINT")
+if not _vault_acct:
+    raise ValueError("Required environment variable SOLANA_VAULT_ACCOUNT (or VAULT_USDC_ACCOUNT) is not set")
+if not _sol_mint:
+    raise ValueError("Required environment variable SOLANA_TOKEN_MINT (or USDC_MINT) is not set")
+VAULT_USDC_ACCOUNT = PublicKey.from_string(_vault_acct)
+USDC_MINT = PublicKey.from_string(_sol_mint)
+# Generic aliases (same objects)
+SOLANA_VAULT_ACCOUNT = VAULT_USDC_ACCOUNT
+SOLANA_TOKEN_MINT = USDC_MINT
+# Display ticker for the Solana-side token; used in logs, the dashboard and the on-chain
+# service record. Purely cosmetic - the mint above is what is enforced.
+SOLANA_TOKEN_SYMBOL = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
 SOL_MINT = PublicKey.from_string(os.getenv("SOL_MINT"))
 SOL_MAIN_ACCOUNT = PublicKey.from_string(os.getenv("SOL_MAIN_ACCOUNT"))
 
-# Decimals
-USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
-USDD_DECIMALS = int(os.getenv("USDD_DECIMALS", "6"))
+# Decimals for each side of the pair
+USDC_DECIMALS = int(_first_env("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS", default="6"))
+USDD_DECIMALS = int(_first_env("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", default="6"))
+SOLANA_TOKEN_DECIMALS = USDC_DECIMALS
+NEXUS_TOKEN_DECIMALS = USDD_DECIMALS
 
 # Nexus
 NEXUS_CLI = os.getenv("NEXUS_CLI_PATH", "./nexus")
 NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
+NEXUS_TREASURY_ACCOUNT = NEXUS_USDD_TREASURY_ACCOUNT  # generic alias
+# Memo prefix a depositor puts on the Solana transfer to name their Nexus destination,
+# e.g. "nexus:8Cuy...". Configurable so an operator can namespace their bridge.
+DEPOSIT_MEMO_PREFIX = os.getenv("DEPOSIT_MEMO_PREFIX", "nexus:")
+
+# --- Public service identity (published in the on-chain registration asset) ----------
+SERVICE_PROVIDER = os.getenv("SERVICE_PROVIDER", "")          # operator name / domain
+SERVICE_VERSION = os.getenv("SERVICE_VERSION", "1.0.0")
+SERVICE_CONTACT = os.getenv("SERVICE_CONTACT", "")            # url or contact handle
 NEXUS_USDD_LOCAL_ACCOUNT = os.getenv("NEXUS_USDD_LOCAL_ACCOUNT")
 NEXUS_USDD_QUARANTINE_ACCOUNT = os.getenv("NEXUS_USDD_QUARANTINE_ACCOUNT")
 # Optional USDD fees account (if you separately account for accrued fees on Nexus)
@@ -125,8 +171,12 @@ FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 
 # Anti-DoS protections
-MIN_DEPOSIT_USDC = os.getenv("MIN_DEPOSIT_USDC", "0.2")  # = 2x FLAT_FEE_USDD; nets ~0.0998 USDD
-_MIN_DEPOSIT_USDC_CONFIGURED = _to_units(MIN_DEPOSIT_USDC, USDC_DECIMALS)
+# Default is DERIVED from the flat fee (2x), not a fixed dollar figure: a hardcoded "0.2"
+# would mean 0.2 BTC on a wBTC bridge. An explicit MIN_DEPOSIT_USDC still wins.
+_MIN_DEPOSIT_ENV = _first_env("MIN_DEPOSIT_SOLANA_TOKEN", "MIN_DEPOSIT_USDC")
+_MIN_DEPOSIT_USDC_CONFIGURED = (_to_units(_MIN_DEPOSIT_ENV, USDC_DECIMALS)
+                                if _MIN_DEPOSIT_ENV else 2 * FLAT_FEE_USDC_UNITS_REFUND)
+MIN_DEPOSIT_USDC = _MIN_DEPOSIT_ENV or "(2x flat fee)"
 # A minimum at or below the flat fee means the user nets ~nothing while the swap is still
 # recorded as successful (0.100101 USDC against a 0.1 fee netted 0.0000009 USDD - below one
 # base unit). Enforce a floor of 2x the flat fee so the output is always at least the fee.
@@ -136,16 +186,21 @@ MIN_DEPOSIT_USDC_RAISED = MIN_DEPOSIT_USDC_UNITS > _MIN_DEPOSIT_USDC_CONFIGURED
 # (FLAT_FEE_USDC + dynamic), or the swap nets <= 0 and the whole credit becomes a fee.
 # Keep README.md / CONFIG.md / .env.example in sync with this value: users who follow a
 # documented minimum lower than this one previously had their credit silently destroyed.
-MIN_CREDIT_USDD = os.getenv("MIN_CREDIT_USDD", "1.0")  # = 2x FLAT_FEE_USDC; nets ~0.499 USDC
-_MIN_CREDIT_USDD_CONFIGURED = _to_units(MIN_CREDIT_USDD, USDD_DECIMALS)
+_MIN_CREDIT_ENV = _first_env("MIN_CREDIT_NEXUS_TOKEN", "MIN_CREDIT_USDD")
+_MIN_CREDIT_USDD_CONFIGURED = (_to_units(_MIN_CREDIT_ENV, USDD_DECIMALS)
+                               if _MIN_CREDIT_ENV else 2 * FLAT_FEE_USDC_UNITS)
+MIN_CREDIT_USDD = _MIN_CREDIT_ENV or "(2x flat fee)"
 # Same floor rule as MIN_DEPOSIT_USDC: this direction's flat fee is FLAT_FEE_USDC.
 MIN_CREDIT_USDD_UNITS = max(_MIN_CREDIT_USDD_CONFIGURED, 2 * FLAT_FEE_USDC_UNITS)
 MIN_CREDIT_USDD_RAISED = MIN_CREDIT_USDD_UNITS > _MIN_CREDIT_USDD_CONFIGURED
 # Anti-DoS dust floor. Credits BELOW this are ignored entirely (no state, no accounting).
 # Credits between this floor and MIN_CREDIT_USDD are real user funds: they are recorded
 # and booked as fees rather than dropped without trace.
-DUST_CREDIT_USDD = os.getenv("DUST_CREDIT_USDD", "0.01")
-DUST_CREDIT_USDD_UNITS = _to_units(DUST_CREDIT_USDD, USDD_DECIMALS)
+# Spam floor, also derived so it scales with the token's denomination (1/10 of the fee).
+_DUST_ENV = _first_env("DUST_CREDIT_NEXUS_TOKEN", "DUST_CREDIT_USDD")
+DUST_CREDIT_USDD_UNITS = (_to_units(_DUST_ENV, USDD_DECIMALS) if _DUST_ENV
+                          else max(1, FLAT_FEE_USDC_UNITS // 10))
+DUST_CREDIT_USDD = _DUST_ENV or "(flat fee / 10)"
 MAX_DEPOSITS_PER_LOOP = int(os.getenv("MAX_DEPOSITS_PER_LOOP", "100"))  # batch processing limit
 MAX_CREDITS_PER_LOOP = int(os.getenv("MAX_CREDITS_PER_LOOP", "100"))  # batch processing limit for USDD credits
 MICRO_DEPOSIT_FEE_PCT = int(os.getenv("MICRO_DEPOSIT_FEE_PCT", "100"))  # 100% fee for sub-minimum deposits

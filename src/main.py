@@ -154,11 +154,16 @@ def run():
     print("\n")
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
-    print(f"   USDC Vault: {config.VAULT_USDC_ACCOUNT}")
-    print(f"   USDD Treasury: {config.NEXUS_USDD_TREASURY_ACCOUNT}")
+    print(f"   {config.SOLANA_TOKEN_SYMBOL} vault (Solana): {config.VAULT_USDC_ACCOUNT}")
+    print(f"   {config.NEXUS_TOKEN_NAME} treasury (Nexus): {config.NEXUS_USDD_TREASURY_ACCOUNT}")
+    print(f"   Bridging: {config.SOLANA_TOKEN_SYMBOL} (Solana, {config.SOLANA_TOKEN_DECIMALS}dp) "
+          f"<-> {config.NEXUS_TOKEN_NAME} (Nexus, {config.NEXUS_TOKEN_DECIMALS}dp)")
+    print(f"   Deposit memo format: {config.DEPOSIT_MEMO_PREFIX}<your {config.NEXUS_TOKEN_NAME} account>")
     print("   Monitoring:")
-    print("   - USDC → USDD: Solana deposits with memo nexus:<USDD_ACCOUNT>")
-    print("   - USDD → USDC: USDD deposits mapped via distordiaBridge asset (txid_toService + receival_account)\n")
+    print(f"   - {config.SOLANA_TOKEN_SYMBOL} → {config.NEXUS_TOKEN_NAME}: Solana deposits with memo "
+          f"{config.DEPOSIT_MEMO_PREFIX}<{config.NEXUS_TOKEN_NAME}_ACCOUNT>")
+    print(f"   - {config.NEXUS_TOKEN_NAME} → {config.SOLANA_TOKEN_SYMBOL}: credits mapped via asset "
+          f"(txid_toService + receival_account)\n")
 
     # A minimum at or below its flat fee means the user nets ~nothing while the swap is
     # still recorded as successful. config raises such minimums to 2x the fee; say so.

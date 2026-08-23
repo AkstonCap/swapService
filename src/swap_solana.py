@@ -164,6 +164,15 @@ def poll_solana_deposits(paused: bool = False):
 
         _advance_solana_waterline(wline_sol, poll_start, fetch_ok, deferred_ts)
 
+        # Refresh the public registration record (status + current terms) alongside the
+        # heartbeat, so a client reading it on-chain sees whether we are paused and what
+        # fees/minimums are actually in force right now.
+        try:
+            nexus_client.publish_service_record(
+                status="paused" if paused else "online", last_poll=int(poll_start))
+        except Exception as e:
+            _log("SERVICE_RECORD_UPDATE_FAILED", error=str(e))
+
         # Retained for observability only; this value no longer gates ingestion.
         current_bal_after = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
         state_db.save_last_vault_balance(current_bal_after)

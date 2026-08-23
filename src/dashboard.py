@@ -32,8 +32,18 @@ from urllib.parse import urlparse, parse_qs
 
 from . import state_db
 
-USDC_DECIMALS = int(os.getenv("USDC_DECIMALS", "6"))
-USDD_DECIMALS = int(os.getenv("USDD_DECIMALS", "6"))
+try:
+    from . import config as _cfg
+    USDC_DECIMALS = int(_cfg.SOLANA_TOKEN_DECIMALS)
+    USDD_DECIMALS = int(_cfg.NEXUS_TOKEN_DECIMALS)
+    SOL_SYM = str(_cfg.SOLANA_TOKEN_SYMBOL)
+    NXS_SYM = str(_cfg.NEXUS_TOKEN_NAME)
+except Exception:
+    # Dashboard must still start if config cannot load (e.g. no chain env present).
+    USDC_DECIMALS = int(os.getenv("SOLANA_TOKEN_DECIMALS", os.getenv("USDC_DECIMALS", "6")))
+    USDD_DECIMALS = int(os.getenv("NEXUS_TOKEN_DECIMALS", os.getenv("USDD_DECIMALS", "6")))
+    SOL_SYM = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
+    NXS_SYM = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 
 # Statuses that mean "a human should look at this".
 SIG_ISSUE_STATUSES = (
@@ -155,12 +165,12 @@ def api_issues() -> dict:
             FROM unprocessed_sigs WHERE status IN ({marks})
             ORDER BY timestamp ASC LIMIT 200""", SIG_ISSUE_STATUSES):
         issues.append({
-            "kind": "USDC→USDD",
+            "kind": f"{SOL_SYM}→{NXS_SYM}",
             "id": r["sig"],
             "status": r["status"],
             "age_sec": (now - int(r["timestamp"])) if r.get("timestamp") else None,
             "amount": _units(r.get("amount_usdc_units"), USDC_DECIMALS),
-            "unit": "USDC",
+            "unit": SOL_SYM,
             "counterparty": r.get("from_address"),
             "detail": r.get("memo"),
             "reference": r.get("reference"),
@@ -173,12 +183,12 @@ def api_issues() -> dict:
             ORDER BY timestamp ASC LIMIT 200""", TXID_ISSUE_STATUSES):
         amt = _units(r.get("amount_usdd_units"), USDD_DECIMALS)
         issues.append({
-            "kind": "USDD→USDC",
+            "kind": f"{NXS_SYM}→{SOL_SYM}",
             "id": r["txid"],
             "status": r["status"],
             "age_sec": (now - int(r["timestamp"])) if r.get("timestamp") else None,
             "amount": amt if amt is not None else r.get("amount_usdd"),
-            "unit": "USDD",
+            "unit": NXS_SYM,
             "counterparty": r.get("from_address"),
             "detail": r.get("receival_account"),
             "reference": None,
@@ -189,12 +199,12 @@ def api_issues() -> dict:
                       FROM quarantined_txids WHERE status LIKE '%NOT moved%'
                       ORDER BY timestamp DESC LIMIT 100"""):
         issues.append({
-            "kind": "USDD quarantine",
+            "kind": f"{NXS_SYM} quarantine",
             "id": r["txid"],
             "status": r["status"],
             "age_sec": (now - int(r["timestamp"])) if r.get("timestamp") else None,
             "amount": r.get("amount_usdd"),
-            "unit": "USDD",
+            "unit": NXS_SYM,
             "counterparty": r.get("from_address"),
             "detail": "still in treasury — overstates the backing ratio",
             "reference": None,
@@ -222,28 +232,28 @@ def api_issues() -> dict:
 _TX_SOURCES = {
     "pending_usdc": ("""SELECT sig AS id, timestamp, status, amount_usdc_units AS amount,
                                from_address AS counterparty, memo AS detail
-                        FROM unprocessed_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, "USDC"),
+                        FROM unprocessed_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
     "pending_usdd": ("""SELECT txid AS id, timestamp, status, amount_usdd_units AS amount,
                                from_address AS counterparty, receival_account AS detail
-                        FROM unprocessed_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, "USDD"),
+                        FROM unprocessed_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
     "completed_usdc": ("""SELECT sig AS id, timestamp, status, amount_usdc_units AS amount,
                                  txid AS counterparty, CAST(reference AS TEXT) AS detail
-                          FROM processed_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, "USDC"),
+                          FROM processed_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
     "completed_usdd": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
                                  from_address AS counterparty, sig AS detail
-                          FROM processed_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, "USDD"),
+                          FROM processed_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
     "refunded_usdc": ("""SELECT sig AS id, timestamp, status, refunded_units AS amount,
                                 from_address AS counterparty, refund_sig AS detail
-                         FROM refunded_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, "USDC"),
+                         FROM refunded_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
     "refunded_usdd": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
                                 from_address AS counterparty, sig AS detail
-                         FROM refunded_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, "USDD"),
+                         FROM refunded_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
     "quarantined_usdc": ("""SELECT sig AS id, timestamp, status, quarantined_units AS amount,
                                    from_address AS counterparty, quarantine_sig AS detail
-                            FROM quarantined_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, "USDC"),
+                            FROM quarantined_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
     "quarantined_usdd": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
                                    from_address AS counterparty, sig AS detail
-                            FROM quarantined_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, "USDD"),
+                            FROM quarantined_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
     "fees": ("""SELECT CAST(id AS TEXT) AS id, timestamp, kind AS status,
                        COALESCE(amount_usdc_units, amount_usdd_units) AS amount,
                        sig AS counterparty, txid AS detail
@@ -251,7 +261,7 @@ _TX_SOURCES = {
     "payouts": ("""SELECT CAST(id AS TEXT) AS id, timestamp, kind AS status,
                           amount_usdc_units AS amount, reference AS counterparty,
                           NULL AS detail
-                   FROM payouts ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, "USDC"),
+                   FROM payouts ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
 }
 
 

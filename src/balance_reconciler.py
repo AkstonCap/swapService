@@ -56,8 +56,9 @@ def _db() -> sqlite3.Connection:
 def _extract_nexus_address_from_memo(memo: str | None) -> str | None:
     if not memo:
         return None
-    if memo.lower().startswith("nexus:"):
-        addr = memo.split(":", 1)[1].strip()
+    prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
+    if memo.lower().startswith(prefix.lower()):
+        addr = memo[len(prefix):].strip()
         return addr or None
     return None
 
