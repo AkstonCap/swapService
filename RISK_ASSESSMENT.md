@@ -62,7 +62,7 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 current_bal = solana_client.get_token_account_balance(config.VAULT_USDC_ACCOUNT)
 last_bal   = state_db.load_last_vault_balance()
 delta      = current_bal - last_bal
-skip_new_deposit_fetch = delta < config.MIN_DEPOSIT_USDC_UNITS
+skip_new_deposit_fetch = delta < config.MIN_DEPOSIT_SOLANA_UNITS
 if skip_new_deposit_fetch:
     state_db.propose_solana_waterline(int(poll_start))
     nexus_client.update_heartbeat_asset(int(poll_start), None, int(poll_start))  # wline_sol = NOW
@@ -97,8 +97,8 @@ The per-item guard is a TOCTOU check — status is read, then a slow CLI validat
 
 ```python
 if state_db.get_unprocessed_sig_status(sig) != "ready for processing": continue  # CHECK
-... nexus_client.is_valid_usdd_account(nexus_address)                            # slow CLI
-result = nexus_client.debit_usdd_with_txid(...)                                  # ACT
+... nexus_client.is_valid_nexus_token_account(nexus_address)                            # slow CLI
+result = nexus_client.debit_nexus_token_with_txid(...)                                  # ACT
 state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")     # too late
 ```
 
@@ -106,7 +106,7 @@ Two workers both observe `ready for processing` and **both debit** — minting U
 
 The purpose-built defence exists and is dead: `state_db.reserve_action()` / `release_reservation()` / `is_reserved()` (`state_db.py:662-724`) — an atomic `INSERT`-based reservation built for exactly this — has **zero call sites**, though the table is created and periodically swept.
 
-`_safe_call` (`main.py:13-32`) has the same flaw: on timeout it raises, but the worker thread continues. A "timed-out" `debit_usdd_with_txid` may still execute while the caller treats it as failed.
+`_safe_call` (`main.py:13-32`) has the same flaw: on timeout it raises, but the worker thread continues. A "timed-out" `debit_nexus_token_with_txid` may still execute while the caller treats it as failed.
 
 **Fix:** wrap every money action in `reserve_action()`; make the watchdog cooperative (a stop flag the poller checks); never start a cycle while the previous one is alive.
 
@@ -116,7 +116,7 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 
 > **Resolution: intent-before-action, then let the chain decide.** A `reference` column was added to `unprocessed_sigs` (with migration). The unique per-attempt reference and a `debit in flight` status are now persisted **before** the CLI is invoked. Any non-definitive outcome — exception, timeout, or the `(False, None)` returned when the call succeeded but the body was unparsable — is recorded as `debit unverified` and **never refunded on that signal alone**.
 >
-> A new pass, `resolve_unverified_debits()`, runs each cycle (before the confirmation pass) and resolves those rows against the chain via a new `find_usdd_debit_by_reference()`:
+> A new pass, `resolve_unverified_debits()`, runs each cycle (before the confirmation pass) and resolves those rows against the chain via a new `find_nexus_debit_by_reference()`:
 >
 > | on-chain lookup | action |
 > |---|---|
@@ -128,7 +128,7 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 >
 > All five branches verified by test.
 >
-> **Correction to this report's earlier recommendation:** §8 advised resolving ambiguity with the existing `was_usdd_debited_to_account_for_amount()`. On implementation that function proved unusable here — it inspects the **treasury account**, whereas this path mints via `finance/debit/token from=USDD` (the token *supply* register), and it compares `int(contract.amount)` (a decimal token amount, so `int("10.5")` raises and yields 0) against base units, so it can never match. It is left in place but documented as unsuitable; `find_usdd_debit_by_reference()` keys on the unique reference and is exact.
+> **Correction to this report's earlier recommendation:** §8 advised resolving ambiguity with the existing `was_nexus_debited_to_account_for_amount()`. On implementation that function proved unusable here — it inspects the **treasury account**, whereas this path mints via `finance/debit/token from=USDD` (the token *supply* register), and it compares `int(contract.amount)` (a decimal token amount, so `int("10.5")` raises and yields 0) against base units, so it can never match. It is left in place but documented as unsuitable; `find_nexus_debit_by_reference()` keys on the unique reference and is exact.
 
 **Where:** `src/solana_client.py` (debit step); `src/nexus_client.py:151-177`
 
@@ -145,7 +145,7 @@ if not txid:   return (False, None)   # the CLI SUCCEEDED; we report failure
 
 The caller then marks the deposit `to be refunded` — so the service **mints the USDD and refunds the USDC**: a guaranteed double loss. (The `[DEBIT_NO_TXID]` branch that looks like it handles this is unreachable, since the function already returned `False`.) A CLI timeout is the same class of bug — reduced but not eliminated by the timeout increase in EVALUATION §8.
 
-Again the defence exists and is dead: `nexus_client.was_usdd_debited_to_account_for_amount()` (`nexus_client.py:443`), an on-chain "did we already debit this?" check, has **zero call sites**.
+Again the defence exists and is dead: `nexus_client.was_nexus_debited_to_account_for_amount()` (`nexus_client.py:443`), an on-chain "did we already debit this?" check, has **zero call sites**.
 
 **Fix:** persist intent (+ reference) *before* invoking the CLI; on any ambiguous outcome — non-zero exit, unparsed output, timeout — treat state as **unknown** and resolve it against the chain before retrying or refunding.
 
@@ -207,7 +207,7 @@ Combined with B-6 (the poller aborts when the heartbeat is unusable), a fresh de
 
 ### 🟠 B-6 — Amounts are computed in binary floating point and reach the CLI in scientific notation — ✅ **FIXED (2026-06-15)**
 
-> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_usdd_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_usdd_with_txid()` now takes base units and formats them with `_format_usdd_amount()` (fixed-point, never exponent form). All call sites — the swap debit, the backing reconcile mint, and `mint_usdd_to_local()` — pass base units. Verified against the previously-failing inputs:
+> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_nexus_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_nexus_token_with_txid()` now takes base units and formats them with `_format_nexus_amount()` (fixed-point, never exponent form). All call sites — the swap debit, the backing reconcile mint, and `mint_nexus_to_local()` — pass base units. Verified against the previously-failing inputs:
 >
 > | deposit (USDC units) | old float string | new CLI string |
 > |---|---|---|
@@ -222,7 +222,7 @@ Combined with B-6 (the poller aborts when the heartbeat is unusable), a fresh de
 
 **Where:** `src/nexus_client.py:135-148`; money columns typed `REAL` at `state_db.py:22,66,80,92,105`
 
-`get_usdd_send_amount()` performs float arithmetic and returns a float that is interpolated directly into `f"amount={amount_usdd}"`. Executing the real formula:
+`get_nexus_send_amount()` performs float arithmetic and returns a float that is interpolated directly into `f"amount={amount_usdd}"`. Executing the real formula:
 
 | deposit (USDC base units) | string sent to the Nexus CLI |
 |---|---|
@@ -231,9 +231,9 @@ Combined with B-6 (the poller aborts when the heartbeat is unusable), a fresh de
 | 150,000 | `amount=0.04984999999999999` |
 | 999,999,999,999 | `amount=998999.899999001` |
 
-Two problems: **scientific notation** that a decimal-amount parser is unlikely to accept, and **17-digit binary artifacts** far below USDD's 6 decimals. The rest of the codebase uses `Decimal` with `ROUND_DOWN` (`swap_nexus.py`, `nexus_client._format_usdd_amount`) — this path is the outlier. Storing balances as SQLite `REAL` compounds it, since amounts round-trip through float and are re-scaled with `int(amount * 10**6)`, producing off-by-one accounting drift.
+Two problems: **scientific notation** that a decimal-amount parser is unlikely to accept, and **17-digit binary artifacts** far below USDD's 6 decimals. The rest of the codebase uses `Decimal` with `ROUND_DOWN` (`swap_nexus.py`, `nexus_client._format_nexus_amount`) — this path is the outlier. Storing balances as SQLite `REAL` compounds it, since amounts round-trip through float and are re-scaled with `int(amount * 10**6)`, producing off-by-one accounting drift.
 
-**Fix:** `Decimal` end-to-end, format via `_format_usdd_amount()`, store integer base units (`INTEGER`).
+**Fix:** `Decimal` end-to-end, format via `_format_nexus_amount()`, store integer base units (`INTEGER`).
 
 ---
 
@@ -303,7 +303,7 @@ Related: no caller passes `config.MAX_ACTION_ATTEMPTS` to `should_attempt()`; al
 
 ### 🟠 B-11 — USDD-side quarantine is not implemented — ✅ **FIXED (2026-06-15)**
 
-> **Resolution:** `nexus_client.quarantine_usdd()` actually transfers the credited USDD from the treasury to `NEXUS_USDD_QUARANTINE_ACCOUNT`, and every quarantine path in `swap_nexus` now routes through a `_quarantine_txid()` helper that moves the funds, records the full row, and alerts. If the quarantine account is unset the status is recorded as `quarantined (USDD NOT moved)` rather than implying segregation that did not happen — so the backing ratio is no longer silently overstated.
+> **Resolution:** `nexus_client.quarantine_nexus_token()` actually transfers the credited USDD from the treasury to `NEXUS_USDD_QUARANTINE_ACCOUNT`, and every quarantine path in `swap_nexus` now routes through a `_quarantine_txid()` helper that moves the funds, records the full row, and alerts. If the quarantine account is unset the status is recorded as `quarantined (USDD NOT moved)` rather than implying segregation that did not happen — so the backing ratio is no longer silently overstated.
 
 **Where:** `config.py:39` (`NEXUS_USDD_QUARANTINE_ACCOUNT`) — **never referenced in `src/`**
 
@@ -330,7 +330,7 @@ No lockfile, PID file or `flock` anywhere. A double `systemd` start, a manual ru
 | **B-15** ✅ | **FIXED** — new `src/alerts.py` with webhook + command channels, per-event rate limiting, PIN redaction and off-hot-path delivery; wired into backing pause, unbacked-mint discrepancy, heartbeat failure, quarantine and cap breaches. | Backing checks and balance reconciliation only `print()` to stdout (`main.py:139,207`). There is **no alerting channel of any kind** — no webhook, email or pager. An unbacked-mint discrepancy, a backing pause, or a wedged poller is invisible unless a human is watching a terminal. |
 | **B-16** ✅ | **FIXED** — pausing no longer `continue`s the loop. Pollers run in `paused` mode: no new debits and no new USDC sends, but refunds, quarantine and confirmations keep running. A failed backing check now fails safe to paused. | When `maintain_backing_and_bounds()` returns `True` the loop `continue`s, halting *all* processing including refunds and quarantine of already-stuck user funds, with no notification and no manual override. |
 | **B-17** ✅ | **FIXED** — `MAX_SWAP_USDC`/`MAX_SWAP_USDD` refuse oversized items into the refund path, and USDD→USDC now checks vault liquidity before marking a swap ready (holding it rather than burning attempts). | No `MAX_SWAP` or per-address limit. Oversized deposits are accepted and only fail at payout, dropping into refund/quarantine; a single large or hostile deposit can consume the vault or wedge the queue. |
-| **B-18** ✅ | **FIXED** — the DB `fee_entries` table is now the single source of truth; `fees.add_usdc_fee()` writes to it, `get_usdc_fees()` reads from it, and `reconcile_accounting()` reports drift against the legacy JSON without silently "correcting" either side. | `fees.py` maintains `fees_state.json` + `fee_events.jsonl` while `state_db.fee_entries` records fees separately (9 call sites). Neither is reconciled against the other or against on-chain balances, so fee figures are not trustworthy for accounting. |
+| **B-18** ✅ | **FIXED** — the DB `fee_entries` table is now the single source of truth; `fees.add_solana_fee()` writes to it, `get_solana_fees()` reads from it, and `reconcile_accounting()` reports drift against the legacy JSON without silently "correcting" either side. | `fees.py` maintains `fees_state.json` + `fee_events.jsonl` while `state_db.fee_entries` records fees separately (9 call sites). Neither is reconciled against the other or against on-chain balances, so fee figures are not trustworthy for accounting. |
 | **B-19** ✅ | **FIXED** — `mark_quarantined_txid()` persists the full row (timestamp/amount/from/to/owner/status) preserving prior detail on re-mark, and the viewer formats token amounts exactly instead of `int(float(x)*1e6)`. Reconstructed USDC-side quarantines now go to `quarantined_sigs` instead of being mislabelled as Nexus txids. | `quarantine_viewer.py:270,283` sums `amount_usdd` from `quarantined_txids`, but the only writer — `state_db.mark_quarantined_txid()` (`state_db.py:590`) — inserts **only `(txid, sig)`**. Every other column is permanently `NULL`, so quarantined USDD always displays as **0**. An operator sizing the stuck-funds backlog concludes nothing is at risk. The same table's `txid` column is also fed Solana signatures by `startup_recovery.py:229,313` while the viewer labels it "Nexus TxID". |
 | **B-20** ✅ | **FIXED** — `sanitize()` strips control/ANSI characters from all untrusted text before it reaches a terminal, `csv_safe()` neutralises `= + - @` formula leaders on export, and CSV exports are git-ignored. `--usdc --usdd` together no longer silently hides the USDD table. | Depositor-supplied `memo` text is rendered raw to the terminal (`quarantine_viewer.py:100`) and written unescaped to CSV (`:304`). A memo containing ANSI escapes (`\x1b[2J`, `\r`) can erase or forge rows in the very table used to authorise manual fund recovery; one starting with `=`/`+`/`-` becomes a live formula on CSV export. Exports also land in the CWD with no `csv` pattern in `.gitignore`, so customer addresses/amounts can be committed. |
 | **B-21** ✅ | **FIXED** — added `--dry-run`, a typed confirmation (`--yes` for non-interactive), and an existing-asset probe (`--force` to override). A JSON error body with exit 0 now returns non-zero, as does an unparsable address. The PIN is redacted by key rather than position and scrubbed from echoed CLI output. Field names are validated and rejected if they collide with Nexus API parameters such as `pin`. Success output now points at `NEXUS_HEARTBEAT_ASSET_NAME`, which is what the service actually reads. | It issues `assets/create/asset` (~1 NXS, immutable once created) with **no confirmation, no `--dry-run`, no idempotency check and no network guard**; re-running burns another NXS and creates a conflicting asset. It checks only `returncode != 0`, so a Nexus CLI error returned in a JSON body **exits 0 with a success message**. It also passes the PIN in `argv`, masks it positionally (`cmd[:-1] + ["pin=***"]`, safe only by accident), and echoes raw CLI output that may contain the PIN. |
@@ -341,9 +341,9 @@ No lockfile, PID file or `flock` anywhere. A double `systemd` start, a manual ru
 
 | ID | Detail |
 |----|--------|
-| **B-22** ✅ | **FIXED** — quarantine now finalises a non-positive net as a fee instead of marking the row `awaiting confirmation` with a NULL signature (which the confirmation pass filters out, leaving it stuck forever). Original text: **quarantine lacks the `net_amount <= 0` guard** the refund path has. `send_usdc()` returns `(True, None)` for a non-positive amount, so the row is marked `quarantine sent, awaiting confirmation` with a `NULL` signature and **never confirms — stuck in `unprocessed_sigs` forever**. Note the R-5 batching change (EVALUATION §11) filters `quarantine_sig IS NOT NULL`, which made this failure *silent* rather than log-spamming; the row was stuck before and after, but it now needs the guard to be visible. |
+| **B-22** ✅ | **FIXED** — quarantine now finalises a non-positive net as a fee instead of marking the row `awaiting confirmation` with a NULL signature (which the confirmation pass filters out, leaving it stuck forever). Original text: **quarantine lacks the `net_amount <= 0` guard** the refund path has. `send_solana_token()` returns `(True, None)` for a non-positive amount, so the row is marked `quarantine sent, awaiting confirmation` with a `NULL` signature and **never confirms — stuck in `unprocessed_sigs` forever**. Note the R-5 batching change (EVALUATION §11) filters `quarantine_sig IS NOT NULL`, which made this failure *silent* rather than log-spamming; the row was stuck before and after, but it now needs the guard to be visible. |
 | **B-23** ✅ | **FIXED** — Priority 4 now re-checks `asset_owner == owner` explicitly, matching Priority 1. Original text: **inconsistent owner verification.** Priority 1 explicitly re-checks `str(asset_owner) == str(owner)` before payout (`swap_nexus.py:117`); the Priority 4 recovery path pays out relying only on the query filter, with no explicit re-check. Not currently exploitable, but the defence-in-depth is asymmetric. |
-| **B-24** ✅ | **FIXED** — `is_valid_usdd_account()` and all four `name=USDD` CLI arguments now use `config.NEXUS_TOKEN_NAME`. Original text: **hardcoded ticker.** `is_valid_usdd_account()` compares `info.get("ticker") != "USDD"` literally (`nexus_client.py:74`) rather than `config.NEXUS_TOKEN_NAME`, so the token name is not actually configurable. |
+| **B-24** ✅ | **FIXED** — `is_valid_nexus_token_account()` and all four `name=USDD` CLI arguments now use `config.NEXUS_TOKEN_NAME`. Original text: **hardcoded ticker.** `is_valid_nexus_token_account()` compares `info.get("ticker") != "USDD"` literally (`nexus_client.py:74`) rather than `config.NEXUS_TOKEN_NAME`, so the token name is not actually configurable. |
 | **B-25** ✅ | **MITIGATED** — the address is kept (users of *this* deployment need it) but now carries an explicit warning to verify it against the on-chain heartbeat and to replace it when forking. Original text: **README publishes a live vault address.** `README.md:30,36` hardcode `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ` in the user instructions where every other doc uses `<VAULT_USDC_ACCOUNT>`. Not a secret, but anyone deploying a fork ships instructions that send user funds to the **original operator's vault**. |
 | **B-26** 🟡 | **PARTIALLY ADDRESSED** — money-path failures now raise operator alerts (`src/alerts.py`) rather than only printing, and `update_heartbeat_asset` no longer dereferences a possibly-`None` parse result. A general move to the `logging` module with levels is still outstanding. Original text: **broad exception swallowing** throughout the money paths is what allowed B-2, B-3 and the previously-found dead-code calls to persist unnoticed. Money-path errors should be logged with type and context, not silently defaulted. |
 
@@ -355,7 +355,7 @@ The single most important systemic finding is that a large set of advertised saf
 
 **Safety mechanisms that exist as code but are never invoked**
 - `state_db.reserve_action()` / `release_reservation()` / `is_reserved()` — the anti-double-processing lock (B-2)
-- `nexus_client.was_usdd_debited_to_account_for_amount()` — the on-chain double-debit check (B-3)
+- `nexus_client.was_nexus_debited_to_account_for_amount()` — the on-chain double-debit check (B-3)
 
 **Settings documented as protections that have no effect**
 - `ACTION_RETRY_COOLDOWN_SEC` — no cooldown logic exists (B-10)
@@ -431,7 +431,7 @@ than asserted ones. An independent reviewer should still go over the diff.
 
 | ID | Severity | Finding |
 |----|----------|---------|
-| **A-1** | 🟠 High | **A transient payout-cap breach permanently quarantined a user's refund.** *(Introduced by the B-9 cap work — my own regression.)* `send_usdc()` returned `False` both when a send genuinely failed and when it was refused by the rolling 24h cap. The refund path maps `False` → `to be quarantined`, so hitting the cap converted a routine refund into a manual-intervention event. **Fixed:** the cap now raises `PayoutCapExceeded`, which callers treat as *defer and retry later*, leaving the status untouched. Verified by test: with the cap deliberately breached the row stays `to be refunded`. A follow-on flaw in that same fix — the generic `except` swallowing and re-wrapping the new exception, hiding whether the cap tripped or the check itself broke — was also corrected. |
+| **A-1** | 🟠 High | **A transient payout-cap breach permanently quarantined a user's refund.** *(Introduced by the B-9 cap work — my own regression.)* `send_solana_token()` returned `False` both when a send genuinely failed and when it was refused by the rolling 24h cap. The refund path maps `False` → `to be quarantined`, so hitting the cap converted a routine refund into a manual-intervention event. **Fixed:** the cap now raises `PayoutCapExceeded`, which callers treat as *defer and retry later*, leaving the status untouched. Verified by test: with the cap deliberately breached the row stays `to be refunded`. A follow-on flaw in that same fix — the generic `except` swallowing and re-wrapping the new exception, hiding whether the cap tripped or the check itself broke — was also corrected. |
 | **A-2** | 🟠 High | **`quarantine failed` was a dead-end state.** The status was written on a failed quarantine send, but the quarantine pass selects `status_like '%to be quarantined%'`, which does not match it, and nothing else reads it. Affected rows sat in `unprocessed_sigs` forever — funds neither refunded nor quarantined, and no alert. *(Pre-existing.)* **Fixed:** added a `status_in` filter; the pass now picks up both states, with `should_attempt()` bounding the retry. |
 
 ### 10.2 Performance — measured, not assumed
@@ -441,10 +441,10 @@ Benchmarked against a seeded 20,000-row `unprocessed_sigs` table:
 | ID | Finding | Measured | Status |
 |----|---------|----------|--------|
 | **P-1** | **No indexes on any hot column.** Every poll filters by `status` and orders by `timestamp`; only `payouts` had an index. | status filter **4.29 → 1.62 ms** (2.6×), pending-verification **3.73 → 1.20 ms** (3.1×), full `get_unprocessed_sigs()` scan **34 ms** | ✅ Fixed — 7 indexes added in `init_db()` |
-| **P-2** | **`resolve_unverified_debits()` spawned one Nexus CLI subprocess per row**, each pulling the same page of transactions. | N rows → N process spawns | ✅ Fixed — `find_usdd_debits_by_references()` does one call for the batch |
+| **P-2** | **`resolve_unverified_debits()` spawned one Nexus CLI subprocess per row**, each pulling the same page of transactions. | N rows → N process spawns | ✅ Fixed — `find_nexus_debits_by_references()` does one call for the batch |
 | **P-3** | **`get_transaction_confirmations()` fetched the *entire* USDD transaction history with no `limit`**, once per unconfirmed debit row. | unbounded × N rows | ✅ Fixed — bounded to 200 and batched via `get_transactions_confirmations()` |
 | **P-4** | `process_unprocessed_txids()` re-reads the full `unprocessed_txids` table **8 times** per invocation (once per priority stage); `main` reads all of `unprocessed_sigs` 3× per cycle. | ~34 ms per full scan at 20k rows | ◻️ Open — mitigated by P-1's indexes; a single fetch reused across stages would be the real fix but is a riskier refactor |
-| **P-5** | `poll_nexus_usdd_deposits()` performs an owner lookup (`get_account_info`, one CLI subprocess) **per credit**. | 1 spawn per credit | ◻️ Open — bounded by `MAX_CREDITS_PER_LOOP`; batching needs a Nexus API that supports it |
+| **P-5** | `poll_nexus_deposits()` performs an owner lookup (`get_account_info`, one CLI subprocess) **per credit**. | 1 spawn per credit | ◻️ Open — bounded by `MAX_CREDITS_PER_LOOP`; batching needs a Nexus API that supports it |
 
 **Non-finding, worth recording:** I expected the connection-per-call pattern in `state_db`
 (a fresh `sqlite3.connect()` in every helper) to be a bottleneck. Measured at **0.022 ms**

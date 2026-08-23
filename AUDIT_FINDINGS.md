@@ -42,7 +42,7 @@ except Exception:
 
 ---
 
-### BUG-3: `send_usdc_to_token_account_with_sig` pollutes `processed_txids` table (LOW)
+### BUG-3: `send_solana_token_to_account_with_sig` pollutes `processed_txids` table (LOW)
 
 **File:** `src/solana_client.py`, lines 1499-1508
 

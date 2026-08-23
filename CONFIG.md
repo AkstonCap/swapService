@@ -79,7 +79,7 @@ Legend:
 | METRICS_INTERVAL_SEC | int | 30 | Emit frequency. |
 | REFUND_TIMEOUT_SEC | int | 3600 | Seconds to wait for mapping (USDD→USDC) before refund path. |
 | STALE_DEPOSIT_QUARANTINE_SEC | int | 86400 | Max age before deposit forced to refund/quarantine. |
-| USDC_CONFIRM_TIMEOUT_SEC | int | 600 | Wait for outbound USDC confirmation. |
+| SOLANA_CONFIRM_TIMEOUT_SEC | int | 600 | Wait for outbound USDC confirmation. |
 | STALE_ROW_SEC | int | 86400 | Age trigger for stale state record handling. |
 | HEARTBEAT_MIN_INTERVAL_SEC | int | max(10,POLL) | Prevent spam updates (>=10s). |
 | HEARTBEAT_WATERLINE_SAFETY_SEC | int | 120 | Safety margin subtracted when filtering old items. |

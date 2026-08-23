@@ -107,8 +107,8 @@ def get_account_info(nexus_addr: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def is_valid_usdd_account(account: str) -> bool:
-    """Check if a Nexus account exists and is a USDD token account."""
+def is_valid_nexus_token_account(account: str) -> bool:
+    """Check the Nexus account exists and holds the configured Nexus-side token."""
     info = get_account_info(account)
     if not info:
         return False
@@ -155,7 +155,7 @@ def is_expected_token(account_info: Dict[str, Any], expected: str) -> bool:
     return False
 
 
-def _format_usdd_amount(amount_units: int) -> str:
+def _format_nexus_amount(amount_units: int) -> str:
     """Convert internal base units (USDD_DECIMALS) into decimal string required by Nexus CLI.
 
     Nexus finance API expects human-readable whole/decimal token amounts, not raw base units.
@@ -176,8 +176,8 @@ def _format_usdd_amount(amount_units: int) -> str:
 
 
 
-def get_usdd_send_amount_units(amount_usdc_units: int) -> int:
-    """Net USDD to send, in BASE UNITS, for a USDC deposit in base units.
+def get_nexus_send_amount_units(amount_usdc_units: int) -> int:
+    """Net Nexus-side amount to send, in BASE UNITS, for a Solana deposit in base units.
 
     Exact integer/Decimal arithmetic throughout. The previous float version returned
     values like 8.989999999847731e-07, which was interpolated straight into the CLI
@@ -197,21 +197,21 @@ def get_usdd_send_amount_units(amount_usdc_units: int) -> int:
     return int((net * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
 
 
-def get_usdd_send_amount(amount_usdc: int) -> Decimal:
-    """Deprecated: prefer get_usdd_send_amount_units(). Returns Decimal token units."""
-    return Decimal(get_usdd_send_amount_units(amount_usdc)) / (Decimal(10) ** config.USDD_DECIMALS)
+def get_nexus_send_amount(amount_solana: int) -> Decimal:
+    """Deprecated: prefer get_nexus_send_amount_units(). Returns Decimal token units."""
+    return Decimal(get_nexus_send_amount_units(amount_solana)) / (Decimal(10) ** config.USDD_DECIMALS)
 
 
-def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -> tuple[bool, str | None]:
-    """Perform USDD debit and attempt to parse a txid from output.
+def debit_nexus_token_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -> tuple[bool, str | None]:
+    """Perform Nexus-side debit and attempt to parse a txid from output.
 
     `amount_usdd_units` is in BASE UNITS and is formatted for the CLI by
-    _format_usdd_amount(), which emits a plain fixed-point decimal string. Passing a
+    _format_nexus_amount(), which emits a plain fixed-point decimal string. Passing a
     float here previously produced scientific notation in the command line.
     
     Args:
-        to_addr: Destination Nexus USDD account address
-        amount_usdd_units: Amount in BASE units (e.g. 10500000 for 10.5 USDD)
+        to_addr: Destination Nexus Nexus token account address
+        amount_usdd_units: Amount in BASE units (e.g. 10500000 for 10.5 of a 6-decimal token)
         reference: Unique reference number for this debit
 
     Returns:
@@ -220,7 +220,7 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -
     if not config.NEXUS_PIN:
         return (False, None)
 
-    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    amount_str = _format_nexus_amount(int(amount_usdd_units))
     cmd = [config.NEXUS_CLI, "finance/debit/token", f"from={config.NEXUS_TOKEN_NAME}",
            f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     # Use a generous, consistent timeout: a debit killed mid-flight may still execute
@@ -241,7 +241,7 @@ def debit_usdd_with_txid(to_addr: str, amount_usdd_units: int, reference: int) -
 def get_transactions_confirmations(txids, limit: int = 200) -> dict:
     """Batch: {txid: confirmations} in ONE CLI call.
 
-    The per-txid version below fetched the *entire* USDD transaction history (no limit)
+    The per-txid version below fetched the *entire* Nexus transaction history (no limit)
     and did so once per unconfirmed row, so N pending debits meant N unbounded fetches.
     """
     wanted = {str(t) for t in txids if t}
@@ -292,7 +292,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     """Check unconfirmed Nexus debits and handle confirmations or timeouts.
     
     Critical fix: Added timeout handling for stuck 'debited, awaiting confirmation' entries.
-    If a debit doesn't confirm within USDC_CONFIRM_TIMEOUT_SEC, it's marked for refund.
+    If a debit doesn't confirm within SOLANA_CONFIRM_TIMEOUT_SEC, it's marked for refund.
     
     IMPORTANT: Only refund if transaction was NEVER found (confirmations is None).
     If transaction exists with confirmations > 0, the debit happened - do NOT refund!
@@ -307,7 +307,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     processed_count = 0
     time_start = time.monotonic()
     current_time = time_start
-    confirm_timeout_sec = int(getattr(config, "USDC_CONFIRM_TIMEOUT_SEC", 600))
+    confirm_timeout_sec = int(getattr(config, "SOLANA_CONFIRM_TIMEOUT_SEC", 600))
     # One bounded lookup for the whole batch instead of an unbounded fetch per row.
     conf_map = get_transactions_confirmations([row[6] for row in sigs if row[6]])
 
@@ -334,22 +334,22 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             continue
         
         # Case 3: Transaction fully confirmed
-        # Recalculate USDD amount from USDC (same fee logic as the debit), in BASE UNITS.
-        usdd_out_base = get_usdd_send_amount_units(amount_usdc_units or 0)
-        amount_usdd_debited = float(Decimal(usdd_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
+        # Recalculate the Nexus amount from the deposit (same fee logic as the debit), in BASE UNITS.
+        nexus_out_base = get_nexus_send_amount_units(amount_usdc_units or 0)
+        amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
 
         # Bug #10 fix: Track fees when debit is confirmed.
-        # Both sides are base units (USDC and USDD share decimals at 1:1 parity), so this
+        # Both sides are base units (both sides share decimals at 1:1 parity), so this
         # is exact integer arithmetic - no float scaling.
         try:
-            usdc_in_base = int(amount_usdc_units or 0)
-            fee_usdc_units = max(0, usdc_in_base - int(usdd_out_base))
-            if fee_usdc_units > 0:
+            solana_in_base = int(amount_usdc_units or 0)
+            fee_solana_units = max(0, solana_in_base - int(nexus_out_base))
+            if fee_solana_units > 0:
                 state_db.add_fee_entry(
                     sig=sig,
                     txid=txid,
-                    kind="swap_usdc_to_usdd",
-                    amount_usdc_units=fee_usdc_units,
+                    kind="swap_solana_to_nexus",
+                    amount_usdc_units=fee_solana_units,
                     amount_usdd_units=None
                 )
         except Exception as e:
@@ -358,7 +358,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         # Get reference from latest if needed (or pass None since it's optional)
         reference = state_db.get_latest_reference()
         
-        state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, "debit_confirmed", reference)
+        state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, txid, amount_nexus_debited, "debit_confirmed", reference)
         state_db.remove_unprocessed_sig(sig)
         processed_count += 1
         
@@ -373,7 +373,7 @@ DEBIT_UNVERIFIED_STATUSES = ("debit in flight", "debit unverified")
 
 
 def resolve_unverified_debits(limit: int = 200) -> int:
-    """Resolve USDD debits whose outcome is unknown, using the chain as the oracle.
+    """Resolve Nexus-side debits whose outcome is unknown, using the chain as the oracle.
 
     Covers both a crash between intent and state-write, and a CLI response we could not
     parse. For each row we look up the unique per-attempt reference on-chain:
@@ -391,7 +391,7 @@ def resolve_unverified_debits(limit: int = 200) -> int:
         return 0
 
     # One lookup for the whole batch instead of one subprocess per row.
-    found_map = find_usdd_debits_by_references([r[7] for r in rows if r[7] is not None])
+    found_map = find_nexus_debits_by_references([r[7] for r in rows if r[7] is not None])
 
     grace = int(getattr(config, "DEBIT_VERIFY_GRACE_SEC", 300))
     max_attempts = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
@@ -412,17 +412,17 @@ def resolve_unverified_debits(limit: int = 200) -> int:
             if found_txid:
                 state_db.update_unprocessed_sig_txid(sig, found_txid)
                 state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
-                state_db.release_reservation("usdc_to_usdd_debit", sig)
+                state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
                 print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} CONFIRMED on-chain txid={found_txid}")
                 resolved += 1
                 continue
 
-            attempted_at = state_db.get_attempt_last_timestamp(f"usdd_debit:{sig}") or int(timestamp or 0)
+            attempted_at = state_db.get_attempt_last_timestamp(state_db.debit_attempt_key(sig)) or int(timestamp or 0)
             if now - attempted_at <= grace:
                 continue  # still settling; check again next cycle
 
-            attempts = state_db.get_attempt_count(f"usdd_debit:{sig}")
-            state_db.release_reservation("usdc_to_usdd_debit", sig)
+            attempts = state_db.get_attempt_count(state_db.debit_attempt_key(sig))
+            state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
             if attempts >= max_attempts:
                 state_db.update_unprocessed_sig_status(sig, "to be refunded")
                 print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} not on-chain after "
@@ -440,10 +440,10 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     return resolved
 
 
-def quarantine_usdd(txid: str, amount_usdd_units: int, reason: str = "") -> bool:
-    """Actually MOVE quarantined USDD out of the treasury.
+def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") -> bool:
+    """Actually MOVE quarantined funds out of the treasury.
 
-    README/CONFIG/SETUP/SECURITY all state that USDD from exhausted refunds is moved to
+    README/CONFIG/SETUP/SECURITY all state that funds from exhausted refunds is moved to
     NEXUS_USDD_QUARANTINE_ACCOUNT so it stops counting toward the backing ratio. Nothing
     ever moved it - only a DB status was written - so the funds stayed in the live
     treasury and the ratio was overstated by exactly the quarantined amount.
@@ -452,24 +452,24 @@ def quarantine_usdd(txid: str, amount_usdd_units: int, reason: str = "") -> bool
     """
     dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
     if not dest:
-        print("[quarantine_usdd] NEXUS_USDD_QUARANTINE_ACCOUNT not set; USDD stays in treasury "
+        print("[quarantine_nexus_token] NEXUS_USDD_QUARANTINE_ACCOUNT not set; funds stay in the treasury "
               "and will keep counting toward the backing ratio")
         return False
     if int(amount_usdd_units or 0) <= 0:
         return True
     treas = config.NEXUS_USDD_TREASURY_ACCOUNT
     if not treas:
-        print("[quarantine_usdd] NEXUS_USDD_TREASURY_ACCOUNT not set")
+        print("[quarantine_nexus_token] NEXUS_USDD_TREASURY_ACCOUNT not set")
         return False
     ref = f"quarantine:{txid}" if txid else (reason or "quarantine")
-    ok = transfer_usdd_between_accounts(treas, dest, int(amount_usdd_units), ref[:120])
+    ok = transfer_nexus_between_accounts(treas, dest, int(amount_usdd_units), ref[:120])
     if ok:
-        print(f"[quarantine_usdd] moved {amount_usdd_units} base units to {dest} ({ref})")
+        print(f"[quarantine_nexus_token] moved {amount_usdd_units} base units to {dest} ({ref})")
     return ok
 
 
-def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
-    """Refund USDD by transferring from treasury to the recipient (amount in base units)."""
+def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
+    """Refund by transferring from treasury to the recipient (amount in base units)."""
     # Check if this refund was already processed by checking for txid in reason
     from . import state_db
     if "txid:" in reason:
@@ -482,14 +482,14 @@ def refund_usdd(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     if not treas:
         print("Refund failed: NEXUS_USDD_TREASURY_ACCOUNT not set")
         return False
-    return transfer_usdd_between_accounts(treas, to_addr, amount_usdd_units, ref)
+    return transfer_nexus_between_accounts(treas, to_addr, amount_usdd_units, ref)
 
-def transfer_usdd_between_accounts(from_addr: str, to_addr: str, amount_usdd_units: int, reference: str) -> bool:
-    """Transfer USDD between two Nexus token accounts. Amount is base units internally, formatted for CLI."""
+def transfer_nexus_between_accounts(from_addr: str, to_addr: str, amount_usdd_units: int, reference: str) -> bool:
+    """Transfer the Nexus-side token between two Nexus token accounts. Amount is base units internally, formatted for CLI."""
     if not config.NEXUS_PIN:
         print("ERROR: NEXUS_PIN not set")
         return False
-    amount_str = _format_usdd_amount(int(amount_usdd_units))
+    amount_str = _format_nexus_amount(int(amount_usdd_units))
     cmd = [config.NEXUS_CLI, "finance/debit/account", f"from={from_addr}", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
     try:
         code, out, err = _run(cmd, timeout=30)
@@ -507,7 +507,7 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
     """
     if not config.NEXUS_PIN:
         return (False, None)
-    amount_str = _format_usdd_amount(int(amount_units))
+    amount_str = _format_nexus_amount(int(amount_units))
     cmd = [
         config.NEXUS_CLI,
         "finance/debit/account",
@@ -517,7 +517,7 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
         f"reference={reference}",
         f"pin={config.NEXUS_PIN}",
     ]
-    # Generous, consistent timeout (see debit_usdd_with_txid): avoid killing an
+    # Generous, consistent timeout (see debit_nexus_token_with_txid): avoid killing an
     # in-flight debit that may still commit on the node.
     code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
     if code != 0:
@@ -534,8 +534,8 @@ def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, ref
     return (True, str(txid) if txid else None)
 
 
-def mint_usdd_to_local(amount_units: int, reference: str | int = "REBALANCE") -> bool:
-    """Mint USDD from supply to the configured local account.
+def mint_nexus_to_local(amount_units: int, reference: str | int = "REBALANCE") -> bool:
+    """Mint the Nexus-side token from supply to the configured local account.
 
     ``amount_units`` is in base units (USDD_DECIMALS); it is converted to the
     token units the Nexus CLI expects. Used by the optional fee-conversion rebalancer.
@@ -543,7 +543,7 @@ def mint_usdd_to_local(amount_units: int, reference: str | int = "REBALANCE") ->
     acct = getattr(config, "NEXUS_USDD_LOCAL_ACCOUNT", None)
     if not acct or amount_units <= 0:
         return False
-    ok, _txid = debit_usdd_with_txid(acct, int(amount_units), reference)
+    ok, _txid = debit_nexus_token_with_txid(acct, int(amount_units), reference)
     return ok
 
 
@@ -608,7 +608,7 @@ def find_asset_receival_account_by_sig(sig: str) -> Optional[Dict[str, Any]]:
 
 def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Optional[Dict[str, Any]]:
     """Query assets by txid_toService and owner; return { receival_account } if present.
-    Used for USDD->USDC: results.txid_toService=<txid> AND results.owner=<owner>.
+    Used for Nexus->Solana: results.txid_toService=<txid> AND results.owner=<owner>.
     """
     try:
         cmd = [
@@ -653,8 +653,8 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
         return None
 
 
-def find_usdd_debits_by_references(references, limit: int = 100) -> dict:
-    """Batch form of find_usdd_debit_by_reference: {reference_str: txid} for those found.
+def find_nexus_debits_by_references(references, limit: int = 100) -> dict:
+    """Batch form of find_nexus_debit_by_reference: {reference_str: txid} for those found.
 
     One CLI invocation for the whole set. The per-row version spawned a Nexus CLI
     subprocess for each unverified debit, each pulling the same page of transactions.
@@ -699,15 +699,15 @@ def find_usdd_debits_by_references(references, limit: int = 100) -> dict:
     return out
 
 
-def find_usdd_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
-    """Return the txid of a USDD DEBIT carrying exactly this reference, else None.
+def find_nexus_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
+    """Return the txid of a Nexus-side DEBIT carrying exactly this reference, else None.
 
     This is the authoritative "did my debit actually execute?" check for the
-    USDC->USDD path. It keys on the per-attempt unique reference, so it is exact.
+    Solana->Nexus path. It keys on the per-attempt unique reference, so it is exact.
 
-    NOTE: `was_usdd_debited_to_account_for_amount()` below cannot be used for this.
+    NOTE: `was_nexus_debited_to_account_for_amount()` below cannot be used for this.
     It inspects the TREASURY account, but this path mints via
-    `finance/debit/token from=USDD` (the token supply register), and it compares
+    `finance/debit/token from=<token>` (the token supply register), and it compares
     `int(contract.amount)` - a decimal token amount - against base units, so it never
     matches. Prefer this function.
     """
@@ -747,7 +747,7 @@ def find_usdd_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
         return None
 
 
-def was_usdd_debited_to_account_for_amount(to_addr: str, amount_units: int, lookback_sec: int = 60, min_confirmations: int = 0) -> bool:
+def was_nexus_debited_to_account_for_amount(to_addr: str, amount_units: int, lookback_sec: int = 60, min_confirmations: int = 0) -> bool:
     """Check treasury debits to a recipient for an exact amount within a recent window.
     This provides idempotency without relying on string references.
     """
@@ -800,7 +800,18 @@ def was_usdd_debited_to_account_for_amount(to_addr: str, amount_units: int, look
 
 
 # --- Nexus DEX (market) helpers ---
-def list_market_bids(market: str = "USDD/NXS", limit: int = 20) -> list[Dict[str, Any]]:
+def token_nxs_market() -> str:
+    """`<bridged token>/NXS` market pair for the configured Nexus-side token."""
+    return f"{getattr(config, 'NEXUS_TOKEN_NAME', 'USDD')}/NXS"
+
+
+def nxs_token_market() -> str:
+    """`NXS/<bridged token>` market pair for the configured Nexus-side token."""
+    return f"NXS/{getattr(config, 'NEXUS_TOKEN_NAME', 'USDD')}"
+
+
+def list_market_bids(market: str | None = None, limit: int = 20) -> list[Dict[str, Any]]:
+    market = market or token_nxs_market()
     cmd = [config.NEXUS_CLI, "market/list/bid", f"market={market}", "sort=price", "order=desc", f"limit={limit}"]
     try:
         code, out, err = _run(cmd, timeout=5)
@@ -819,7 +830,8 @@ def list_market_bids(market: str = "USDD/NXS", limit: int = 20) -> list[Dict[str
         print("Nexus market list exception:", e)
         return []
 
-def list_market_asks(market: str = "NXS/USDD", limit: int = 20) -> list[Dict[str, Any]]:
+def list_market_asks(market: str | None = None, limit: int = 20) -> list[Dict[str, Any]]:
+    market = market or nxs_token_market()
     cmd = [config.NEXUS_CLI, "market/list/ask", f"market={market}", "sort=price", "order=asc", f"limit={limit}"]
     try:
         code, out, err = _run(cmd, timeout=5)
@@ -869,45 +881,45 @@ def _to_decimal(x) -> Decimal:
         return Decimal(0)
 
 
-def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
-    """Buy NXS using up to usdd_budget_units (USDD token units).
+def buy_nxs_with_token_budget(nexus_budget_units: int) -> int:
+    """Buy NXS using up to nexus_budget_units (Nexus token units).
     Strategy: consider best prices from both sides:
-    - bids on market=USDD/NXS
-    - asks on market=NXS/USDD
-    Normalize to USDD-per-NXS price and NXS quantity, pick lowest price orders first,
-    and execute full orders that fit in remaining budget. Returns total USDD spent (<= budget).
+    - bids on market=<token>/NXS
+    - asks on market=NXS/<token>
+    Normalize to token-per-NXS price and NXS quantity, pick lowest price orders first,
+    and execute full orders that fit in remaining budget. Returns total Nexus token spent (<= budget).
     """
-    if usdd_budget_units <= 0:
+    if nexus_budget_units <= 0:
         return 0
 
-    remaining = Decimal(usdd_budget_units)
+    remaining = Decimal(nexus_budget_units)
     spent_total = Decimal(0)
 
     # Gather candidate sell offers (we're buying NXS):
-    offers: list[dict] = []  # { txid: str, price: Decimal (USDD/NXS), qty_nxs: Decimal }
+    offers: list[dict] = []  # { txid: str, price: Decimal (token/NXS), qty_nxs: Decimal }
 
-    # 1) From USDD/NXS bids (interpreted per API as executable opposite when we pay USDD)
+    # 1) From <token>/NXS bids (interpreted per API as executable opposite when we pay the bridged token)
     try:
-        bids = list_market_bids("USDD/NXS", limit=20)
+        bids = list_market_bids(token_nxs_market(), limit=20)
     except Exception:
         bids = []
     for bid in bids or []:
         txid = bid.get("txid")
-        price = _to_decimal(bid.get("price"))  # USDD per NXS
+        price = _to_decimal(bid.get("price"))  # bridged token per NXS
         order = bid.get("order") or {}
         qty_nxs = _to_decimal(order.get("amount"))  # NXS amount
         if not txid or price <= 0 or qty_nxs <= 0:
             continue
         offers.append({"txid": str(txid), "price": price, "qty_nxs": qty_nxs})
 
-    # 2) From NXS/USDD asks (sellers of NXS)
+    # 2) From NXS/<token> asks (sellers of NXS)
     try:
-        asks = list_market_asks("NXS/USDD", limit=20)
+        asks = list_market_asks(nxs_token_market(), limit=20)
     except Exception:
         asks = []
     for ask in asks or []:
         txid = ask.get("txid")
-        price = _to_decimal(ask.get("price"))  # USDD per NXS (since quote is USDD)
+        price = _to_decimal(ask.get("price"))  # bridged token per NXS (the quote side)
         contract = ask.get("contract") or {}
         qty_nxs = _to_decimal(contract.get("amount"))  # NXS amount being sold
         if not txid or price <= 0 or qty_nxs <= 0:
@@ -920,7 +932,7 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
     # Sort by best (lowest) price, then larger qty to reduce tx count
     offers.sort(key=lambda o: (o["price"], -o["qty_nxs"]))
 
-    # Plan: include full orders that fit in remaining USDD budget
+    # Plan: include full orders that fit in remaining Nexus token budget
     plan: list[dict] = []  # { txid, cost }
     plan_cost = Decimal(0)
     for o in offers:
@@ -948,7 +960,7 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
         else:
             print(f"Nexus: execute failed for order {txid}")
 
-    # Return truncated integer token units of USDD spent
+    # Return truncated integer token units of Nexus token spent
     try:
         return int(spent_total)
     except Exception:
@@ -956,12 +968,12 @@ def buy_nxs_with_usdd_budget(usdd_budget_units: int) -> int:
 
 
 # --- Treasury and metrics ---
-def get_circulating_usdd() -> int:
+def get_circulating_nexus_supply() -> int:
     cmd = [config.NEXUS_CLI, "finance/get/token/currentsupply", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus USDD current supply error:", redact(err or out))
+            print("Nexus Nexus token supply error:", redact(err or out))
             return 0
         data = _parse_json_lenient(out)
         # Accept either raw number or an object containing value/amount
@@ -975,23 +987,23 @@ def get_circulating_usdd() -> int:
         units = int(dec)
         return units
     except Exception as e:
-        print("Nexus USDD current supply exception:", e)
+        print("Nexus Nexus token supply exception:", e)
         return 0
 
 
-def get_circulating_usdd_units() -> int:
-    """Circulating USDD supply in BASE units (token amount x 10**USDD_DECIMALS).
+def get_circulating_nexus_units() -> int:
+    """Circulating supply in BASE units (token amount x 10**USDD_DECIMALS).
 
     Nexus 'currentsupply' is reported in human-readable token units (e.g. 4002.0),
     so it must be scaled to base units before comparing against on-chain base-unit
-    balances (e.g. the vault USDC balance). Use THIS for backing/solvency math;
-    use get_circulating_usdd() only for human-readable display.
+    balances (e.g. the vault balance). Use THIS for backing/solvency math;
+    use get_circulating_nexus_supply() only for human-readable display.
     """
     cmd = [config.NEXUS_CLI, "finance/get/token/currentsupply", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus USDD current supply error:", redact(err or out))
+            print("Nexus Nexus token supply error:", redact(err or out))
             return 0
         data = _parse_json_lenient(out)
         if isinstance(data, (int, float, str)):
@@ -1000,10 +1012,10 @@ def get_circulating_usdd_units() -> int:
             dec = Decimal(str(data["currentsupply"]))
         else:
             return 0
-        decimals = int(getattr(config, "USDD_DECIMALS", 6))
+        decimals = int(getattr(config, "NEXUS_TOKEN_DECIMALS", 6))
         return int((dec * (Decimal(10) ** decimals)).to_integral_value(rounding=ROUND_DOWN))
     except Exception as e:
-        print("Nexus USDD current supply exception:", e)
+        print("Nexus Nexus token supply exception:", e)
         return 0
 
 
@@ -1025,8 +1037,8 @@ def get_nxs_default_balance_units() -> int:
         return 0
 
 
-def get_usdd_local_balance_units() -> int:
-    """Return available USDD balance in the local account (if queryable via finance/get/account)."""
+def get_nexus_local_balance_units() -> int:
+    """Return available Nexus balance in the local account (if queryable via finance/get/account)."""
     try:
         info = get_account_info(config.NEXUS_USDD_LOCAL_ACCOUNT)
         if not info:
@@ -1100,8 +1112,8 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         "fee_flat_to_nexus": str(config.FLAT_FEE_USDD),
         "fee_flat_to_solana": str(config.FLAT_FEE_USDC),
         "fee_bps": str(int(config.DYNAMIC_FEE_BPS)),
-        "min_to_nexus": _format_usdd_amount(int(config.MIN_DEPOSIT_USDC_UNITS)),
-        "min_to_solana": _format_usdd_amount(int(config.MIN_CREDIT_USDD_UNITS)),
+        "min_to_nexus": _format_nexus_amount(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
+        "min_to_solana": _format_nexus_amount(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }
     return rec
 
@@ -1282,7 +1294,7 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
 
 
 def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: int = 50) -> list[dict]:
-    """Fetch all USDD credits to treasury since given timestamp.
+    """Fetch all Nexus credits to treasury since given timestamp.
     
     Args:
         treasury_addr: Nexus treasury account address
@@ -1309,7 +1321,7 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
     # Use WHERE filter if available (may reduce bandwidth)
     # Filter at the dust floor, not the swap minimum: credits in between are real user
     # funds that must still be fetched so they can be recorded rather than lost.
-    min_credit_threshold = config.DUST_CREDIT_USDD_UNITS / (10 ** config.USDD_DECIMALS)
+    min_credit_threshold = config.DUST_CREDIT_NEXUS_UNITS / (10 ** config.USDD_DECIMALS)
     try:
         base_cmd.append(f"where='contracts.amount>={min_credit_threshold}'")
     except Exception:

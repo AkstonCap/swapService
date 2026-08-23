@@ -5,6 +5,79 @@ from typing import List, Optional, Tuple
 
 DB_PATH = os.getenv("STATE_DB_PATH", "swap_service.db")
 
+
+# --------------------------------------------------------------------------- #
+# Frozen on-disk key strings.
+#
+# The bridge is token-pair agnostic, and its code identifiers say "solana" and
+# "nexus" rather than naming the USDC/USDD pair it was first written for. These
+# constants are the exception: their NAMES are generic, but their VALUES are the
+# original strings, because they are rows in the state database rather than code.
+#
+#   * `attempts.action_key`  gates the retry budget. A renamed key looks like a
+#     fresh action, so a deposit that had already burned its attempts would get a
+#     full new budget and be retried past the point where it should have stopped.
+#   * `reservations.kind`    is the cross-worker mutual-exclusion guard. A renamed
+#     kind cannot see a reservation written by the previous build, so a process
+#     that crashed mid-debit could be debited a second time after an upgrade.
+#
+# Both failure modes move real funds, and they are triggered by exactly the case a
+# rename is most likely to hit: an upgrade over a database with work in flight.
+# Renaming these would need a migration that rewrites the existing rows; a naming
+# improvement does not justify that risk, so the values stay put.
+#
+# Purely descriptive strings carry no such property and WERE renamed: `payouts.kind`
+# and `fee_entries.kind` are labels nothing branches on, so pre-upgrade rows simply
+# keep their old label in the dashboard's history.
+# --------------------------------------------------------------------------- #
+
+DEBIT_RESERVATION_KIND = "usdc_to_usdd_debit"     # reservations.kind
+
+
+def debit_attempt_key(sig: str) -> str:
+    """Retry-budget key for debiting the Nexus-side token against a Solana deposit."""
+    return f"usdd_debit:{sig}"
+
+
+def refund_attempt_key(sig: str) -> str:
+    """Retry-budget key for refunding a Solana deposit to its sender."""
+    return f"usdc_refund:{sig}"
+
+
+def quarantine_send_attempt_key(sig: str) -> str:
+    """Retry-budget key for the on-chain move of a Solana deposit into quarantine."""
+    return f"usdc_quarantine_send:{sig}"
+
+
+def quarantine_attempt_key(sig: str) -> str:
+    """Retry-budget key for marking a Solana deposit quarantined."""
+    return f"usdc_quarantine:{sig}"
+
+
+def payout_attempt_key(txid: str) -> str:
+    """Retry-budget key for paying a Nexus credit out on Solana."""
+    return f"usdc_send:{txid}"
+
+
+def nexus_refund_attempt_key(txid: str) -> str:
+    """Retry-budget key for refunding a Nexus credit to its sender."""
+    return f"usdd_refund:{txid}"
+
+
+def nexus_refund_unresolved_attempt_key(txid: str) -> str:
+    """Retry-budget key for a Nexus refund whose outcome could not be determined."""
+    return f"usdd_refund_unresolved:{txid}"
+
+
+def nexus_refund_pending_attempt_key(txid: str) -> str:
+    """Retry-budget key for a Nexus refund awaiting confirmation."""
+    return f"usdd_refund_pending:{txid}"
+
+
+def nexus_collect_refund_attempt_key(txid: str) -> str:
+    """Retry-budget key for collecting funds back before a Nexus refund."""
+    return f"usdd_collect_refund:{txid}"
+
 def init_db():
     """Initialize DB tables if not exist."""
     conn = sqlite3.connect(DB_PATH)
@@ -230,7 +303,7 @@ def init_db():
     """)
 
     # --- Lightweight migrations for pre-existing databases ---
-    # unprocessed_txids.sig persists the Solana send signature so USDD->USDC
+    # unprocessed_txids.sig persists the Solana send signature so Nexus->Solana
     # confirmation can use get_signature_statuses instead of scanning memos.
     cursor.execute("PRAGMA table_info(unprocessed_txids)")
     _utx_cols = {row[1] for row in cursor.fetchall()}
@@ -573,7 +646,7 @@ def is_quarantined_sig(sig: str) -> bool:
     return result is not None
 
 
-## Unprocessed txids USDD -> USDC
+## Unprocessed txids Nexus -> Solana
 
 def mark_unprocessed_txid(
     txid: str,
@@ -692,7 +765,7 @@ def mark_quarantined_txid(
     """Record a quarantined Nexus txid.
 
     Previously this wrote only (txid, sig), leaving amount/from/to/owner permanently
-    NULL - so quarantine_viewer summed `amount_usdd` and always reported 0 USDD
+    NULL - so quarantine_viewer summed `amount_usdd` and always reported zero
     quarantined, however much was actually stuck. Populate the full row.
     """
     import time as _time
@@ -726,7 +799,7 @@ def mark_quarantined_txid(
 ## Outbound payout ledger (rolling exposure caps)
 
 def record_payout(kind: str, amount_usdc_units: int, reference: str | None = None):
-    """Log an outbound USDC payment for rolling-cap accounting."""
+    """Log an outbound Solana-side payment for rolling-cap accounting."""
     import time as _time
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -739,7 +812,7 @@ def record_payout(kind: str, amount_usdc_units: int, reference: str | None = Non
 
 
 def payouts_since(seconds: int) -> int:
-    """Total outbound USDC base units paid in the last `seconds`."""
+    """Total outbound Solana base units paid in the last `seconds`."""
     import time as _time
     cutoff = int(_time.time()) - int(seconds)
     conn = sqlite3.connect(DB_PATH)
@@ -1121,11 +1194,11 @@ def add_fee_entry(sig: str | None, txid: str | None, kind: str, amount_usdc_unit
     """Add a fee entry to the journal.
     
     Args:
-        sig: Solana signature (for USDC->USDD fees)
-        txid: Nexus txid (for USDD->USDC fees)
+        sig: Solana signature (for Solana->Nexus fees)
+        txid: Nexus txid (for Nexus->Solana fees)
         kind: Type of fee ('flat', 'dynamic', 'swap', etc.)
-        amount_usdc_units: Fee amount in USDC base units
-        amount_usdd_units: Fee amount in USDD base units
+        amount_usdc_units: Fee amount in Solana base units
+        amount_usdd_units: Fee amount in Nexus-side base units
     """
     import time
     now = int(time.time())
@@ -1175,14 +1248,14 @@ def get_total_fees_collected() -> Tuple[int, int]:
     """Get total fees collected.
     
     Returns:
-        (total_usdc_units, total_usdd_units) tuple
+        (total_solana_units, total_nexus_units) tuple
     """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         SELECT 
-            COALESCE(SUM(amount_usdc_units), 0) as total_usdc,
-            COALESCE(SUM(amount_usdd_units), 0) as total_usdd
+            COALESCE(SUM(amount_usdc_units), 0) as total_solana,
+            COALESCE(SUM(amount_usdd_units), 0) as total_nexus
         FROM fee_entries
     """)
     row = cursor.fetchone()
@@ -1194,14 +1267,14 @@ def update_fee_summary():
     """Update aggregated fee summary (call periodically)."""
     import time
     now = int(time.time())
-    total_usdc, total_usdd = get_total_fees_collected()
+    total_solana, total_nexus = get_total_fees_collected()
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO fee_summary (id, total_collected_usdc, total_collected_usdd, last_updated)
         VALUES (1, ?, ?, ?)
-    """, (total_usdc, total_usdd, now))
+    """, (total_solana, total_nexus, now))  # column names frozen: see the header block
     conn.commit()
     conn.close()
 
@@ -1425,14 +1498,19 @@ def is_processed_txid(txid: str) -> bool:
 
 ## Vault balance tracking (for Solana polling optimization)
 
-def save_last_vault_balance(balance: int):
-    """Save last known vault balance for delta calculation."""
+def save_last_vault_balance(balance: int, ticker: str | None = None):
+    """Save last known vault balance for delta calculation.
+
+    `ticker` is a display label only. It defaults from the environment rather than from
+    `config` so this module stays free of the chain-dependent import.
+    """
+    label = ticker or os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO accounts (nickname, chain, ticker, name, address, balance, timestamp)
-        VALUES ('vault_last_balance', 'solana', 'USDC', 'Last Vault Balance', '', ?, ?)
-    """, (float(balance), int(__import__('time').time())))
+        VALUES ('vault_last_balance', 'solana', ?, 'Last Vault Balance', '', ?, ?)
+    """, (label, float(balance), int(__import__('time').time())))
     conn.commit()
     conn.close()
 

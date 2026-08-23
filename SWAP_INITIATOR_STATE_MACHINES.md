@@ -339,7 +339,7 @@ Look at `last_poll_timestamp` — if `current_time - last_poll_timestamp > 60 se
 | Timeout | Default | What Happens |
 |---------|---------|--------------|
 | `REFUND_TIMEOUT_SEC` | 3600s (1 hour) | USDD→USDC: if no asset mapping found, USDD is refunded |
-| `USDC_CONFIRM_TIMEOUT_SEC` | 600s (10 min) | USDD→USDC: if the USDC send cannot be confirmed, the swap is **quarantined for manual review**, not auto-refunded (the USDC may already have been sent) |
+| `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s (10 min) | USDD→USDC: if the USDC send cannot be confirmed, the swap is **quarantined for manual review**, not auto-refunded (the USDC may already have been sent) |
 | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s (24 hours) | Unresolved deposits are quarantined for manual review |
 | `ACTION_RETRY_COOLDOWN_SEC` | 300s (5 min) | Minimum wait between retry attempts (enforced) |
 

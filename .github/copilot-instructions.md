@@ -34,7 +34,7 @@ All config lives in [src/config.py](../src/config.py) loading from `.env`. Use `
 Structured, single-line prints with prefix: `[SWAP_USDC]`, `[USDD_PROCESS_START]`, `[WATERLINE_ADVANCED]`. Use `_log(kind, **fields)` helpers (not traditional logger). Critical: Never log `NEXUS_PIN` or private keys.
 
 ### Fee Calculation
-Applies to both directions: `FLAT_FEE_USDC_UNITS` + `DYNAMIC_FEE_BPS` (basis points of amount). Micro deposits below thresholds (`MIN_DEPOSIT_USDC`, `MIN_CREDIT_USDD`) treated as 100% fee (`MICRO_DEPOSIT_FEE_PCT`). See [src/fees.py](../src/fees.py) for aggregation.
+Applies to both directions: `FLAT_FEE_TO_SOLANA_UNITS` + `DYNAMIC_FEE_BPS` (basis points of amount). Micro deposits below thresholds (`MIN_DEPOSIT_USDC`, `MIN_CREDIT_USDD`) treated as 100% fee (`MICRO_DEPOSIT_FEE_PCT`). See [src/fees.py](../src/fees.py) for aggregation.
 
 ### Nexus CLI Interaction Pattern
 Subprocess calls with timeout protection (see `_run()` in [nexus_client.py](../src/nexus_client.py)). Use `_parse_json_lenient()` for resilient CLI output parsing. Always inject PIN via CLI args, never environment. Asset queries use `register/list/assets` with `where` filters for `txid_toService` + owner validation.
@@ -50,7 +50,7 @@ The `finance/*` and `assets/*` APIs only query registers (accounts, tokens, asse
 Users must create a mutable Nexus asset with fields `txid_toService` and `receival_account`. The service queries assets by `txid_toService` AND `owner` to verify the USDD sender owns the mapping. Full specification in [ASSET_STANDARD.md](../ASSET_STANDARD.md). Recommended format: `basic` (simplest). Create once, update `txid_toService` per swap.
 
 ### Solana Signature Scanning
-Prefer Helius enhanced RPC (`fetch_incoming_usdc_deposits_via_helius`) over raw `getSignaturesForAddress` to batch fetch memos efficiently. **Performance**: Helius uses 1-2 API calls vs N+1 for core RPC (50-100x faster for 100 deposits). Automatic fallback to core RPC when Helius unavailable. See [solana_client.py](../src/solana_client.py). Memos format: `nexus:<NEXUS_ADDRESS>` or `refundSig:<ORIGINAL_SIG>`.
+Prefer Helius enhanced RPC (`fetch_incoming_deposits_via_helius`) over raw `getSignaturesForAddress` to batch fetch memos efficiently. **Performance**: Helius uses 1-2 API calls vs N+1 for core RPC (50-100x faster for 100 deposits). Automatic fallback to core RPC when Helius unavailable. See [solana_client.py](../src/solana_client.py). Memos format: `nexus:<NEXUS_ADDRESS>` or `refundSig:<ORIGINAL_SIG>`.
 
 ### Startup Recovery Flow
 On every service start: fetch waterlines from heartbeat asset → rebuild missing unprocessed entries from on-chain history → scan sent transaction memos for `processedTxid:` and `refundSig:` patterns → seed reference counter if missing. Fully idempotent; safe to run multiple times. See [startup_recovery.py](../src/startup_recovery.py).
@@ -156,19 +156,19 @@ Use `Decimal` for token amounts, never floats. Convert to base units (multiply b
 **Nexus (USDD)**: The **Nexus CLI expects token units** (human-readable amounts like `"10.5"`), NOT base units. However, internally the service stores USDD amounts as base units for consistency.
 
 **Conversion Functions**:
-- `_format_usdd_amount(amount_units: int) -> str`: Converts base units → token unit string for CLI
-- `get_usdd_send_amount(amount_usdc: int) -> float`: Returns USDD in **token units** (ready for CLI)
+- `_format_nexus_amount(amount_units: int) -> str`: Converts base units → token unit string for CLI
+- `get_nexus_send_amount(amount_usdc: int) -> float`: Returns USDD in **token units** (ready for CLI)
 
 **Function Parameter Conventions**:
 | Function | Parameter Type | Description |
 |----------|---------------|-------------|
-| `debit_usdd_with_txid()` | `amount_usdd: float` | Token units (passed directly to CLI) |
-| `refund_usdd()` | `amount_usdd_units: int` | Base units (converted via `_format_usdd_amount`) |
-| `transfer_usdd_between_accounts()` | `amount_usdd_units: int` | Base units (converted via `_format_usdd_amount`) |
-| Solana `send_usdc*()` functions | `amount_base_units: int` | Base units |
+| `debit_nexus_token_with_txid()` | `amount_usdd: float` | Token units (passed directly to CLI) |
+| `refund_nexus_token()` | `amount_usdd_units: int` | Base units (converted via `_format_nexus_amount`) |
+| `transfer_nexus_between_accounts()` | `amount_usdd_units: int` | Base units (converted via `_format_nexus_amount`) |
+| Solana `send_solana_token*()` functions | `amount_base_units: int` | Base units |
 
-**USDC→USDD Flow**: `amount_usdc` (base units) → `get_usdd_send_amount()` → `net_amount` (token units) → `debit_usdd_with_txid()` → CLI  
-**USDD→USDC Refund Flow**: `amt_dec` (Decimal) → multiply by `10**DECIMALS` → `amt_units` (int base units) → `refund_usdd()` → `_format_usdd_amount()` → CLI
+**USDC→USDD Flow**: `amount_usdc` (base units) → `get_nexus_send_amount()` → `net_amount` (token units) → `debit_nexus_token_with_txid()` → CLI  
+**USDD→USDC Refund Flow**: `amt_dec` (Decimal) → multiply by `10**DECIMALS` → `amt_units` (int base units) → `refund_nexus_token()` → `_format_nexus_amount()` → CLI
 
 ### Status Lifecycle Transitions
 USDC→USDD: `ready for processing` → `debited, awaiting confirmation` → `processed` (via `processed_sigs`)  
@@ -180,7 +180,7 @@ USDD→USDC: `pending_receival` → `ready for processing` → `sending` → `si
 USDD→USDC Mapping Timeout: `pending_receival` → `trade balance to be checked` → `collecting refund` → `refunded`  
 USDD→USDC Failures: `refund pending` → `refunded` or `quarantined` after max attempts  
 
-Timeout handlers: `check_unconfirmed_debits()` marks stuck debits for refund after `USDC_CONFIRM_TIMEOUT_SEC`
+Timeout handlers: `check_unconfirmed_debits()` marks stuck debits for refund after `SOLANA_CONFIRM_TIMEOUT_SEC`
 
 ### Reading Documentation Files
 - User-facing swap guide: [README.md](../README.md)

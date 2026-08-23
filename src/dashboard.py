@@ -34,14 +34,14 @@ from . import state_db
 
 try:
     from . import config as _cfg
-    USDC_DECIMALS = int(_cfg.SOLANA_TOKEN_DECIMALS)
-    USDD_DECIMALS = int(_cfg.NEXUS_TOKEN_DECIMALS)
+    SOL_DECIMALS = int(_cfg.SOLANA_TOKEN_DECIMALS)
+    NXS_DECIMALS = int(_cfg.NEXUS_TOKEN_DECIMALS)
     SOL_SYM = str(_cfg.SOLANA_TOKEN_SYMBOL)
     NXS_SYM = str(_cfg.NEXUS_TOKEN_NAME)
 except Exception:
     # Dashboard must still start if config cannot load (e.g. no chain env present).
-    USDC_DECIMALS = int(os.getenv("SOLANA_TOKEN_DECIMALS", os.getenv("USDC_DECIMALS", "6")))
-    USDD_DECIMALS = int(os.getenv("NEXUS_TOKEN_DECIMALS", os.getenv("USDD_DECIMALS", "6")))
+    SOL_DECIMALS = int(os.getenv("SOLANA_TOKEN_DECIMALS", os.getenv("USDC_DECIMALS", "6")))
+    NXS_DECIMALS = int(os.getenv("NEXUS_TOKEN_DECIMALS", os.getenv("USDD_DECIMALS", "6")))
     SOL_SYM = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
     NXS_SYM = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 
@@ -117,7 +117,7 @@ def api_summary() -> dict:
     cap = 0
     try:
         from . import config
-        cap = int(getattr(config, "DAILY_PAYOUT_CAP_USDC_UNITS", 0) or 0)
+        cap = int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0)
     except Exception:
         cap = 0
     spent = snap.get("payouts_24h_units")
@@ -134,14 +134,14 @@ def api_summary() -> dict:
         "snapshot_age_sec": snap_age,
         "snapshot_stale": snap_age is None or snap_age > 300,
         "paused": bool(snap.get("paused")),
-        "vault_usdc": _units(snap.get("vault_usdc_units"), USDC_DECIMALS),
-        "circulating_usdd": _units(snap.get("circulating_usdd_units"), USDD_DECIMALS),
+        "vault_solana": _units(snap.get("vault_usdc_units"), SOL_DECIMALS),
+        "circulating_nexus": _units(snap.get("circulating_usdd_units"), NXS_DECIMALS),
         "ratio": (ratio_bps / 10000.0) if ratio_bps is not None else None,
         "ratio_bps": ratio_bps,
-        "fees_usdc": _units(snap.get("fees_usdc_units"), USDC_DECIMALS),
-        "fees_usdd": _units(snap.get("fees_usdd_units"), USDD_DECIMALS),
-        "payout_cap_usdc": _units(cap, USDC_DECIMALS) if cap else None,
-        "payout_24h_usdc": _units(spent, USDC_DECIMALS),
+        "fees_solana": _units(snap.get("fees_usdc_units"), SOL_DECIMALS),
+        "fees_nexus": _units(snap.get("fees_usdd_units"), NXS_DECIMALS),
+        "payout_cap_solana": _units(cap, SOL_DECIMALS) if cap else None,
+        "payout_24h_solana": _units(spent, SOL_DECIMALS),
         "payout_cap_pct": (100.0 * spent / cap) if cap else None,
         "heartbeat": {
             "name": hb.get("name"),
@@ -169,7 +169,7 @@ def api_issues() -> dict:
             "id": r["sig"],
             "status": r["status"],
             "age_sec": (now - int(r["timestamp"])) if r.get("timestamp") else None,
-            "amount": _units(r.get("amount_usdc_units"), USDC_DECIMALS),
+            "amount": _units(r.get("amount_usdc_units"), SOL_DECIMALS),
             "unit": SOL_SYM,
             "counterparty": r.get("from_address"),
             "detail": r.get("memo"),
@@ -181,7 +181,7 @@ def api_issues() -> dict:
         f"""SELECT txid, timestamp, status, amount_usdd, amount_usdd_units, from_address, receival_account
             FROM unprocessed_txids WHERE status IN ({marks})
             ORDER BY timestamp ASC LIMIT 200""", TXID_ISSUE_STATUSES):
-        amt = _units(r.get("amount_usdd_units"), USDD_DECIMALS)
+        amt = _units(r.get("amount_usdd_units"), NXS_DECIMALS)
         issues.append({
             "kind": f"{NXS_SYM}→{SOL_SYM}",
             "id": r["txid"],
@@ -194,7 +194,7 @@ def api_issues() -> dict:
             "reference": None,
         })
 
-    # Quarantined USDD that was NOT actually moved still counts toward backing.
+    # Quarantined Nexus credits that were NOT actually moved still count toward backing.
     for r in _rows("""SELECT txid, timestamp, status, amount_usdd, from_address
                       FROM quarantined_txids WHERE status LIKE '%NOT moved%'
                       ORDER BY timestamp DESC LIMIT 100"""):
@@ -230,38 +230,38 @@ def api_issues() -> dict:
 
 
 _TX_SOURCES = {
-    "pending_usdc": ("""SELECT sig AS id, timestamp, status, amount_usdc_units AS amount,
+    "pending_solana": ("""SELECT sig AS id, timestamp, status, amount_usdc_units AS amount,
                                from_address AS counterparty, memo AS detail
-                        FROM unprocessed_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
-    "pending_usdd": ("""SELECT txid AS id, timestamp, status, amount_usdd_units AS amount,
+                        FROM unprocessed_sigs ORDER BY timestamp DESC LIMIT ?""", SOL_DECIMALS, SOL_SYM),
+    "pending_nexus": ("""SELECT txid AS id, timestamp, status, amount_usdd_units AS amount,
                                from_address AS counterparty, receival_account AS detail
-                        FROM unprocessed_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
-    "completed_usdc": ("""SELECT sig AS id, timestamp, status, amount_usdc_units AS amount,
+                        FROM unprocessed_txids ORDER BY timestamp DESC LIMIT ?""", NXS_DECIMALS, NXS_SYM),
+    "completed_solana": ("""SELECT sig AS id, timestamp, status, amount_usdc_units AS amount,
                                  txid AS counterparty, CAST(reference AS TEXT) AS detail
-                          FROM processed_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
-    "completed_usdd": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
+                          FROM processed_sigs ORDER BY timestamp DESC LIMIT ?""", SOL_DECIMALS, SOL_SYM),
+    "completed_nexus": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
                                  from_address AS counterparty, sig AS detail
-                          FROM processed_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
-    "refunded_usdc": ("""SELECT sig AS id, timestamp, status, refunded_units AS amount,
+                          FROM processed_txids ORDER BY timestamp DESC LIMIT ?""", NXS_DECIMALS, NXS_SYM),
+    "refunded_solana": ("""SELECT sig AS id, timestamp, status, refunded_units AS amount,
                                 from_address AS counterparty, refund_sig AS detail
-                         FROM refunded_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
-    "refunded_usdd": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
+                         FROM refunded_sigs ORDER BY timestamp DESC LIMIT ?""", SOL_DECIMALS, SOL_SYM),
+    "refunded_nexus": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
                                 from_address AS counterparty, sig AS detail
-                         FROM refunded_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
-    "quarantined_usdc": ("""SELECT sig AS id, timestamp, status, quarantined_units AS amount,
+                         FROM refunded_txids ORDER BY timestamp DESC LIMIT ?""", NXS_DECIMALS, NXS_SYM),
+    "quarantined_solana": ("""SELECT sig AS id, timestamp, status, quarantined_units AS amount,
                                    from_address AS counterparty, quarantine_sig AS detail
-                            FROM quarantined_sigs ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
-    "quarantined_usdd": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
+                            FROM quarantined_sigs ORDER BY timestamp DESC LIMIT ?""", SOL_DECIMALS, SOL_SYM),
+    "quarantined_nexus": ("""SELECT txid AS id, timestamp, status, NULL AS amount,
                                    from_address AS counterparty, sig AS detail
-                            FROM quarantined_txids ORDER BY timestamp DESC LIMIT ?""", USDD_DECIMALS, NXS_SYM),
+                            FROM quarantined_txids ORDER BY timestamp DESC LIMIT ?""", NXS_DECIMALS, NXS_SYM),
     "fees": ("""SELECT CAST(id AS TEXT) AS id, timestamp, kind AS status,
                        COALESCE(amount_usdc_units, amount_usdd_units) AS amount,
                        sig AS counterparty, txid AS detail
-                FROM fee_entries ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, "units"),
+                FROM fee_entries ORDER BY timestamp DESC LIMIT ?""", SOL_DECIMALS, "units"),
     "payouts": ("""SELECT CAST(id AS TEXT) AS id, timestamp, kind AS status,
                           amount_usdc_units AS amount, reference AS counterparty,
                           NULL AS detail
-                   FROM payouts ORDER BY timestamp DESC LIMIT ?""", USDC_DECIMALS, SOL_SYM),
+                   FROM payouts ORDER BY timestamp DESC LIMIT ?""", SOL_DECIMALS, SOL_SYM),
 }
 
 
@@ -341,7 +341,7 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/api/transactions":
                 q = parse_qs(parsed.query)
                 return self._json(200, api_transactions(
-                    q.get("source", ["pending_usdc"])[0], int(q.get("limit", ["100"])[0])))
+                    q.get("source", ["pending_solana"])[0], int(q.get("limit", ["100"])[0])))
             if route == "/api/health":
                 return self._json(200, {"ok": True})
             return self._json(404, {"error": "not found"})
@@ -374,7 +374,7 @@ def serve(host: str | None = None, port: int | None = None) -> None:
     ThreadingHTTPServer((host, port), _Handler).serve_forever()
 
 
-_PAGE = """<!doctype html>
+_PAGE_TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>swapService — operator</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -431,10 +431,15 @@ const F=(n,d=6)=>n==null?"—":Number(n).toLocaleString(undefined,{maximumFracti
 const AGE=s=>s==null?"—":s<60?s+"s":s<3600?Math.floor(s/60)+"m":s<86400?Math.floor(s/3600)+"h":Math.floor(s/86400)+"d";
 const TS=t=>t?new Date(t*1000).toISOString().replace("T"," ").slice(0,19):"—";
 const el=(t,c,txt)=>{const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;};
-const TABS=[["issues","Issues"],["pending_usdc","Pending USDC→USDD"],["pending_usdd","Pending USDD→USDC"],
- ["completed_usdc","Completed USDC→USDD"],["completed_usdd","Completed USDD→USDC"],
- ["refunded_usdc","Refunds USDC"],["refunded_usdd","Refunds USDD"],
- ["quarantined_usdc","Quarantine USDC"],["quarantined_usdd","Quarantine USDD"],
+const SYMBOLS=__SYMBOLS__;
+// Token names come from the operator's configuration, so the page reads correctly for
+// whatever pair this bridge runs - not just the USDC/USDD one it was first written for.
+const SOL=SYMBOLS.solana, NXS=SYMBOLS.nexus;
+const TABS=[["issues","Issues"],
+ ["pending_solana","Pending "+SOL+"→"+NXS],["pending_nexus","Pending "+NXS+"→"+SOL],
+ ["completed_solana","Completed "+SOL+"→"+NXS],["completed_nexus","Completed "+NXS+"→"+SOL],
+ ["refunded_solana","Refunds "+SOL],["refunded_nexus","Refunds "+NXS],
+ ["quarantined_solana","Quarantine "+SOL],["quarantined_nexus","Quarantine "+NXS],
  ["payouts","Payouts 24h"],["fees","Fees"]];
 let tab="issues";
 const qs=new URLSearchParams(location.search), tok=qs.get("token");
@@ -454,33 +459,33 @@ function renderSummary(d){
     x.append(document.createTextNode("Last snapshot "+AGE(d.snapshot_age_sec)+" ago — the service may be down or wedged."));b.append(x);}
   if(d.ratio!=null&&d.ratio<1){const x=el("div","banner bad");
     x.append(el("strong",null,"Under-collateralised. "));
-    x.append(document.createTextNode("Vault USDC is below circulating USDD."));b.append(x);}
+    x.append(document.createTextNode("Vault "+SOL+" is below circulating "+NXS+"."));b.append(x);}
 
   const c=document.getElementById("cards");c.textContent="";
   const rc=d.ratio==null?"":d.ratio>=1?"ok":d.ratio>=0.99?"warn":"bad";
   c.append(card("Backing ratio", d.ratio==null?"—":d.ratio.toFixed(4),
     d.ratio_bps!=null?d.ratio_bps+" bps":"vault ÷ circulating", rc));
-  c.append(card("Vault USDC", F(d.vault_usdc,2), "on Solana"));
-  c.append(card("Circulating USDD", F(d.circulating_usdd,2), "on Nexus"));
+  c.append(card("Vault "+SOL, F(d.vault_solana,2), "on Solana"));
+  c.append(card("Circulating "+NXS, F(d.circulating_nexus,2), "on Nexus"));
   c.append(card("Open items",
     (d.counts.unprocessed_sigs+d.counts.unprocessed_txids),
-    d.counts.unprocessed_sigs+" USDC · "+d.counts.unprocessed_txids+" USDD"));
+    d.counts.unprocessed_sigs+" "+SOL+" · "+d.counts.unprocessed_txids+" "+NXS));
   c.append(card("Quarantined",
     (d.counts.quarantined_sigs+d.counts.quarantined_txids),
     "needs manual review",
     (d.counts.quarantined_sigs+d.counts.quarantined_txids)>0?"warn":""));
-  c.append(card("Fees collected", F(d.fees_usdc,2)+" / "+F(d.fees_usdd,2), "USDC / USDD"));
+  c.append(card("Fees collected", F(d.fees_solana,2)+" / "+F(d.fees_nexus,2), SOL+" / "+NXS));
   const hb=card("Heartbeat", AGE(d.heartbeat.age_sec),
     d.heartbeat.name||"not configured",
     d.heartbeat.age_sec==null?"bad":d.heartbeat.age_sec>600?"warn":"ok");
   c.append(hb);
-  if(d.payout_cap_usdc!=null){
-    const pc=card("24h payouts", F(d.payout_24h_usdc,2),
-      "cap "+F(d.payout_cap_usdc,2)+" USDC", d.payout_cap_pct>=90?"bad":d.payout_cap_pct>=70?"warn":"");
+  if(d.payout_cap_solana!=null){
+    const pc=card("24h payouts", F(d.payout_24h_solana,2),
+      "cap "+F(d.payout_cap_solana,2)+" "+SOL, d.payout_cap_pct>=90?"bad":d.payout_cap_pct>=70?"warn":"");
     const bar=el("div","bar");const i=el("i");i.style.width=Math.min(100,d.payout_cap_pct||0)+"%";
     bar.append(i);pc.append(bar);c.append(pc);
   } else {
-    c.append(card("24h payouts", F(d.payout_24h_usdc,2), "no cap configured"));
+    c.append(card("24h payouts", F(d.payout_24h_solana,2), "no cap configured"));
   }
   document.getElementById("upd").textContent="updated "+new Date().toLocaleTimeString();
 }
@@ -543,3 +548,21 @@ function load(){
 tabs();load();setInterval(load,15000);
 </script></body></html>
 """
+
+
+def _safe_symbol(value: str, fallback: str) -> str:
+    """Reduce a configured token name to something safe to inline into the page.
+
+    The symbols come from the operator's own environment rather than from a depositor,
+    but they are the only values in this page that are interpolated into markup instead
+    of being set with `textContent`. Restricting them to a conservative character set
+    keeps a typo (or a copied-in config) from being able to close the script tag.
+    """
+    cleaned = "".join(c for c in str(value or "") if c.isalnum() or c in "-_.")[:12]
+    return cleaned or fallback
+
+
+_PAGE = _PAGE_TEMPLATE.replace("__SYMBOLS__", json.dumps({
+    "solana": _safe_symbol(SOL_SYM, "SOL-TOKEN"),
+    "nexus": _safe_symbol(NXS_SYM, "NXS-TOKEN"),
+}))

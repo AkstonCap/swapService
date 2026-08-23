@@ -39,7 +39,7 @@ These are genuine positives observed during the review:
 
 - **Clear modular separation.** `config` / `state_db` / `solana_client` / `nexus_client` / `swap_solana` / `swap_nexus` / `fees` / `startup_recovery` / `balance_reconciler` each own a coherent slice of responsibility.
 - **Explicit state machines.** Deposit and credit lifecycles use named statuses (`ready for processing`, `debited, awaiting confirmation`, `to be refunded`, `to be quarantined`, etc.), which makes the flow auditable.
-- **Idempotency markers.** `processed_sigs` / `processed_txids` / `refunded_sigs` / `quarantined_sigs` tables guard against replay, and `send_usdc_to_token_account_with_sig()` short-circuits on a recognized `nexus_txid:` memo (`solana_client.py:1460`).
+- **Idempotency markers.** `processed_sigs` / `processed_txids` / `refunded_sigs` / `quarantined_sigs` tables guard against replay, and `send_solana_token_to_account_with_sig()` short-circuits on a recognized `nexus_txid:` memo (`solana_client.py:1460`).
 - **Front-running resistance.** USDD→USDC resolves the receival account by **both** `txid_toService` *and* `owner`, and re-checks `asset_owner == owner` before paying out (`swap_nexus.py:117`). Good defense-in-depth.
 - **Parameterized SQL everywhere** — no string interpolation into queries; no SQL-injection surface.
 - **No shell usage** — every `subprocess.run(...)` receives an argv list, not `shell=True`, eliminating classic shell-injection.
@@ -63,11 +63,11 @@ These are genuine positives observed during the review:
 
 ### 🔴 F-2 (Critical, NEW) — Backing-deficit auto-pause is dead code
 
-**Where:** `fees.maintain_backing_and_bounds()` is called every loop iteration (`main.py:169`) and is the mechanism that is supposed to **pause swaps when the vault falls below `BACKING_DEFICIT_PAUSE_PCT`% of circulating USDD** (`SECURITY.md` "Backing & Reconciliation"). It calls `nexus_client.get_circulating_usdd_units()` (`fees.py:201`), **but that function does not exist** — the real function is `get_circulating_usdd()` (`nexus_client.py:652`).
+**Where:** `fees.maintain_backing_and_bounds()` is called every loop iteration (`main.py:169`) and is the mechanism that is supposed to **pause swaps when the vault falls below `BACKING_DEFICIT_PAUSE_PCT`% of circulating USDD** (`SECURITY.md` "Backing & Reconciliation"). It calls `nexus_client.get_circulating_nexus_units()` (`fees.py:201`), **but that function does not exist** — the real function is `get_circulating_nexus_supply()` (`nexus_client.py:652`).
 
 **Impact:** Every invocation raises `AttributeError`, which is caught by the function's own `except` (`fees.py:212`) and returns `False` ("do not pause"). **The solvency circuit-breaker never fires.** If the vault is ever drained or under-collateralized, the service keeps minting/paying out instead of halting. This is the single most important safety control in the design, and it is inert.
 
-**Fix:** Rename the call to `get_circulating_usdd()` (units are already returned as an int). Add a unit/integration test that forces a deficit and asserts `maintain_backing_and_bounds()` returns `True`.
+**Fix:** Rename the call to `get_circulating_nexus_supply()` (units are already returned as an int). Add a unit/integration test that forces a deficit and asserts `maintain_backing_and_bounds()` returns `True`.
 
 ---
 
@@ -93,17 +93,17 @@ These are genuine positives observed during the review:
 
 ### 🟡 F-5 (Medium, NEW) — Periodic backing-reconcile mint targets a non-existent function
 
-**Where:** `main.py:189` calls `nexus_client.debit_usdd(config.NEXUS_USDD_FEES_ACCOUNT, surplus, 'FEE_RECONCILE')`. There is no `debit_usdd()` in `nexus_client` (the closest is `debit_usdd_with_txid()`).
+**Where:** `main.py:189` calls `nexus_client.debit_usdd(config.NEXUS_USDD_FEES_ACCOUNT, surplus, 'FEE_RECONCILE')`. There is no `debit_usdd()` in `nexus_client` (the closest is `debit_nexus_token_with_txid()`).
 
-**Impact:** The surplus→fees mint path raises `AttributeError` (swallowed). The feature is gated behind `BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS > 0` and "no pending deposits", so it is not always reached, but when it is, it never works.
+**Impact:** The surplus→fees mint path raises `AttributeError` (swallowed). The feature is gated behind `BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS > 0` and "no pending deposits", so it is not always reached, but when it is, it never works.
 
-**Fix:** Call `debit_usdd_with_txid(...)` (and handle the returned `(ok, txid)` tuple) or add a thin `debit_usdd()` wrapper.
+**Fix:** Call `debit_nexus_token_with_txid(...)` (and handle the returned `(ok, txid)` tuple) or add a thin `debit_usdd()` wrapper.
 
 ---
 
 ### 🟡 F-6 (Medium) — Fee-conversion path references several non-existent functions
 
-**Where:** `fees.process_fee_conversions()` calls `nexus_client.get_circulating_usdd_units()` (`fees.py:107`) and `nexus_client.mint_usdd_to_local()` (`fees.py:127`), neither of which exist.
+**Where:** `fees.process_fee_conversions()` calls `nexus_client.get_circulating_nexus_units()` (`fees.py:107`) and `nexus_client.mint_nexus_to_local()` (`fees.py:127`), neither of which exist.
 
 **Impact:** If an operator ever sets `FEE_CONVERSION_ENABLED=true`, this path throws immediately. It is `false` by default, so this is latent rather than active, but it is a trap for operators who enable the documented feature.
 
@@ -141,7 +141,7 @@ Store the key outside the working tree (the documented `0600` guidance is good b
 
 ### 🟠 H-2 (High, NEW) — Crash window allows double refunds (recovery scans the wrong memo prefix)
 
-**Where:** The active refund path is `send_usdc(from_address, net_amount, memo=f"refund:{sig}")` (`solana_client.py:818`). Idempotency for that path relies entirely on a DB status flip to `refund sent, awaiting confirmation` that happens **after** the on-chain send. `send_usdc()` itself performs no on-chain idempotency check. Meanwhile startup recovery only reconstructs refund markers from memos prefixed **`refundSig:`** (`solana_client.py:1844`, `1714`), and the alternate helper `refund_usdc_to_source()` (unused by the main loop) is the only one that writes that prefix.
+**Where:** The active refund path is `send_solana_token(from_address, net_amount, memo=f"refund:{sig}")` (`solana_client.py:818`). Idempotency for that path relies entirely on a DB status flip to `refund sent, awaiting confirmation` that happens **after** the on-chain send. `send_solana_token()` itself performs no on-chain idempotency check. Meanwhile startup recovery only reconstructs refund markers from memos prefixed **`refundSig:`** (`solana_client.py:1844`, `1714`), and the alternate helper `refund_solana_token_to_source()` (unused by the main loop) is the only one that writes that prefix.
 
 **Impact:** If the process crashes/restarts in the window between sending the refund and writing the DB status, the deposit row is still `to be refunded`, recovery cannot match the `refund:` memo it actually wrote, and the next loop **refunds again** — a direct loss of vault USDC. This is narrow but real, and **F-4** (rows never leaving `awaiting confirmation`) keeps related state alive longer than expected.
 
@@ -151,11 +151,11 @@ Store the key outside the working tree (the documented `0600` guidance is good b
 
 ### 🟠 H-3 (High) — Short debit timeout can desynchronize Nexus state
 
-**Where:** `debit_usdd_with_txid()` and `debit_account_with_txid()` run the Nexus CLI with `timeout=5` (`nexus_client.py:167`, `322`), whereas `transfer_usdd_between_accounts()` uses `timeout=30` (`nexus_client.py:297`).
+**Where:** `debit_nexus_token_with_txid()` and `debit_account_with_txid()` run the Nexus CLI with `timeout=5` (`nexus_client.py:167`, `322`), whereas `transfer_nexus_between_accounts()` uses `timeout=30` (`nexus_client.py:297`).
 
 **Impact:** A debit that takes longer than 5 s is killed locally and reported as failure, but the Nexus node may have **already accepted/queued the transaction**. The caller then marks the deposit `to be refunded` (per PROC-1) — so the user can receive **both** the (eventually-confirmed) USDD debit **and** a USDC refund. This is a classic "timeout ≠ failure" double-spend on financial RPCs.
 
-**Fix:** Use a generous, consistent timeout for state-changing calls; on timeout, treat the result as *unknown* and verify via `was_usdd_debited_to_account_for_amount()` / txid lookup before refunding. Apply attempt-tracking to the debit stage (addresses PROC-1 too).
+**Fix:** Use a generous, consistent timeout for state-changing calls; on timeout, treat the result as *unknown* and verify via `was_nexus_debited_to_account_for_amount()` / txid lookup before refunding. Apply attempt-tracking to the debit stage (addresses PROC-1 too).
 
 ---
 
@@ -192,9 +192,9 @@ Store the key outside the working tree (the documented `0600` guidance is good b
 ### 🔵 Low / Hardening findings
 
 - **L-1 (NEW) — Broad exception swallowing reduces visibility.** Many fund-path helpers (`get_account_info`, `find_asset_*`, the confirmation checkers, `maintain_backing_and_bounds`) catch `Exception` and return a benign default. This is what allowed F-2/F-3/F-5 to hide. Log at `WARNING`/`ERROR` with the exception type, and let truly unexpected errors surface.
-- **L-2 (NEW) — Argument-injection defense-in-depth.** User-influenced values (the `nexus:<addr>` memo, asset `receival_account`) are passed as `key=value` argv tokens to the Nexus CLI. The no-shell design makes classic injection unlikely, and validators (`is_valid_usdd_account`, `is_valid_usdc_token_account`) gate most uses, but the address is interpolated into argv *before* some validations. Validate against a strict base58/charset+length whitelist immediately on extraction.
+- **L-2 (NEW) — Argument-injection defense-in-depth.** User-influenced values (the `nexus:<addr>` memo, asset `receival_account`) are passed as `key=value` argv tokens to the Nexus CLI. The no-shell design makes classic injection unlikely, and validators (`is_valid_nexus_token_account`, `is_valid_solana_token_account`) gate most uses, but the address is interpolated into argv *before* some validations. Validate against a strict base58/charset+length whitelist immediately on extraction.
 - **L-3 — ✅ FIXED.** `update_heartbeat_asset` may dereference `None`. `data.get("success")` runs on the result of `_parse_json_lenient`, which can return `None` (`nexus_client.py:741`); it's inside a `try`, so it degrades to "False" rather than crashing, but it's fragile.
-- **L-4 (NEW) — Type/contract sloppiness.** `balance_reconciler._fee_net_usdd()` is annotated `-> int` but returns a float division result (`balance_reconciler.py:65-71`); `mark_quarantined_sig` returns nothing. These small mismatches make the code harder to reason about.
+- **L-4 (NEW) — Type/contract sloppiness.** `balance_reconciler._fee_net_nexus()` is annotated `-> int` but returns a float division result (`balance_reconciler.py:65-71`); `mark_quarantined_sig` returns nothing. These small mismatches make the code harder to reason about.
 - **L-5 — Logging is `print`-based.** No levels, no rotation, no structured fields; secrets could appear in tracebacks. Adopt the `logging` module with redaction (aligns with `SECURITY.md` "Logging & Monitoring").
 - **L-6 — 🟡 PARTIALLY ADDRESSED (`tests/test_smoke.py` added; no CI yet).** No automated tests. There is no test suite; every finding above (especially the dead-code calls F-2/F-3/F-5) would be caught by even minimal smoke/import tests or a `python -c "import src.main"` CI step plus a devnet end-to-end run.
 
@@ -224,7 +224,7 @@ Store the key outside the working tree (the documented `0600` guidance is good b
 
 **Before touching real funds (blockers):**
 1. Wire up `state_db.init_db()` at startup (**F-1**).
-2. Fix the two dead safety controls — `get_circulating_usdd()` (**F-2**) and a real `run_balance_reconciliation()` (**F-3**) — and make their failures *loud*.
+2. Fix the two dead safety controls — `get_circulating_nexus_supply()` (**F-2**) and a real `run_balance_reconciliation()` (**F-3**) — and make their failures *loud*.
 3. Fix confirmation finalization (**F-4**) and the refund double-pay window/memo-prefix mismatch (**H-2**).
 4. Make state-changing Nexus calls timeout-safe and verify-before-refund (**H-3**).
 5. Harden `.gitignore` and move the vault key out of the working tree (**H-1**).
@@ -251,11 +251,11 @@ The following fixes were applied on branch `claude/elegant-bohr-kqlicw`. Each wa
 | ID | Status | What changed |
 |----|--------|--------------|
 | F-1 | ✅ Fixed | `main.run()` now calls `state_db.init_db()` before any state access. |
-| F-2 | ✅ Fixed | `fees.py` calls the real `nexus_client.get_circulating_usdd()`; the backing-deficit pause path executes. |
+| F-2 | ✅ Fixed | `fees.py` calls the real `nexus_client.get_circulating_nexus_supply()`; the backing-deficit pause path executes. |
 | F-3 | ✅ Fixed | Implemented `balance_reconciler.run_balance_reconciliation(dry_run=...)` (+ `_distinct_mint_recipient_accounts`), reusing `reconcile_account_trades` to flag accounts with positive trade delta. |
 | F-4 | ✅ Fixed | Confirmation checks now key off `confirmationStatus` (`finalized`/`confirmed`), with the numeric count as a fallback — finalized refunds/quarantines no longer stall forever. |
-| F-5 | ✅ Fixed | Reconcile-mint calls `debit_usdd_with_txid` with base→token unit conversion and proper `(ok, txid)` tuple handling. |
-| F-6 | ✅ Fixed | Added `nexus_client.mint_usdd_to_local()`; `get_circulating_usdd` rename also covers the fee-conversion path. |
+| F-5 | ✅ Fixed | Reconcile-mint calls `debit_nexus_token_with_txid` with base→token unit conversion and proper `(ok, txid)` tuple handling. |
+| F-6 | ✅ Fixed | Added `nexus_client.mint_nexus_to_local()`; `get_circulating_nexus_supply` rename also covers the fee-conversion path. |
 | H-1 | ✅ Fixed | `.gitignore` now excludes `vault-keypair.json`, `*-keypair.json`, `*.db`, `swap_service.db`, `fees_state.json`, `fee_events.jsonl`. |
 | H-2 | ✅ Fixed | Active refund/quarantine sends now use the `refundSig:` / `quarantinedSig:` memo prefixes that startup recovery scans, plus an on-chain `find_signature_with_memo` pre-check before sending (closes the crash-window double-pay). |
 | H-3 | 🟡 Mitigated | Debit CLI timeouts raised from 5 s to `NEXUS_CLI_TIMEOUT_SEC` (≈30 s), drastically reducing spurious timeouts. **Open:** a definitive "verify-on-chain before refunding after an ambiguous timeout" (and debit-stage attempt gating, PROC-1) is still recommended. |
@@ -274,10 +274,10 @@ A fresh review of the patched tree was performed — including the patches thems
 
 | ID | Severity | Status | Detail |
 |----|----------|--------|--------|
-| N-1 | 🔴 Critical | ✅ Fixed | **Unit mismatch in backing/solvency math.** `nexus_client.get_circulating_usdd()` returns *token units* (Nexus `currentsupply` is human-readable, e.g. `4002.0` — confirmed in `Nexus API docs/COMMANDS/FINANCE.MD:395`), but it was compared against and subtracted from the *base-unit* vault balance in `fees.maintain_backing_and_bounds` and `main.run` (reconcile + metrics). The mismatch is a factor of `10**USDD_DECIMALS` (1e6). This was latent before because those call paths were dead code; fixing **F-2/F-5** made them live, turning the reconcile-mint surplus into a ~1e6 over-estimate (it would mint roughly the entire vault balance as USDD). **Fix:** added `nexus_client.get_circulating_usdd_units()` (base units) and pointed all backing math at it; `get_circulating_usdd()` is retained for display only. |
+| N-1 | 🔴 Critical | ✅ Fixed | **Unit mismatch in backing/solvency math.** `nexus_client.get_circulating_nexus_supply()` returns *token units* (Nexus `currentsupply` is human-readable, e.g. `4002.0` — confirmed in `Nexus API docs/COMMANDS/FINANCE.MD:395`), but it was compared against and subtracted from the *base-unit* vault balance in `fees.maintain_backing_and_bounds` and `main.run` (reconcile + metrics). The mismatch is a factor of `10**USDD_DECIMALS` (1e6). This was latent before because those call paths were dead code; fixing **F-2/F-5** made them live, turning the reconcile-mint surplus into a ~1e6 over-estimate (it would mint roughly the entire vault balance as USDD). **Fix:** added `nexus_client.get_circulating_nexus_units()` (base units) and pointed all backing math at it; `get_circulating_nexus_supply()` is retained for display only. |
 | N-2 | 🟡 Medium | ✅ Fixed | **Per-refund signature scan (introduced by H-2).** The H-2 on-chain idempotency pre-check ran `find_signature_with_memo` (up to ~50 `getTransaction` calls) on *every* refund and quarantine, which could blow the 8 s processing budget under load. **Fix:** the scan is now gated behind `get_attempt_count(...) > 0` and an attempt is recorded before sending, so the common first-attempt path skips the scan while crash/retry recovery still works. |
 | N-3 | 🔵 Low | ◻️ Open | `run_balance_reconciliation` (the new F-3 code) scans all mint-recipient accounts over full history with `waterline_ts=0`; cost is roughly O(accounts × table-size). It is read-only and the periodic call is wrapped in a 15 s `_safe_call`, but the startup call is unguarded. Consider a bounded default waterline if the DB grows large. |
-| N-4 | 🔵 Low | ◻️ Open | Startup line `USDD Circulating Supply: {usdd_amount} USDD )` has a stray `)` and `get_circulating_usdd()` truncates fractional supply (`int(dec)`) — cosmetic/display only; backing math is unaffected (it uses the new base-unit accessor). |
+| N-4 | 🔵 Low | ◻️ Open | Startup line `USDD Circulating Supply: {usdd_amount} USDD )` has a stray `)` and `get_circulating_nexus_supply()` truncates fractional supply (`int(dec)`) — cosmetic/display only; backing math is unaffected (it uses the new base-unit accessor). |
 
 **Verification (this pass):** all edited files byte-compile; `state_db` schema/WAL/reference/quarantine behavior was exercised against a temp DB (17 tables, WAL active, monotonic references, no leak); every cross-module reference and the math-vs-display split for circulating supply were confirmed by static checks. Full runtime/import and end-to-end testing still require the Solana/Nexus dependencies and live RPC, so a devnet/testnet pass remains the recommended final gate.
 
@@ -295,7 +295,7 @@ A targeted pass on Solana RPC usage. It found one Critical correctness bug in th
 | R-2 | 🟠 High (efficiency) | ✅ Fixed | **Enriched fast path was negated by a re-fetch.** Even had R-1 not crashed, `process_filtered_deposits` re-fetched **every** deposit with `get_transaction` (N extra calls) to extract memo/sender — data the Helius enriched call already returned. The new `process_helius_deposits()` does **zero** per-deposit RPC, keeping ingestion at the 1–2 enriched calls (or the core-RPC fallback). |
 | R-3 | 🟡 Medium | ✅ Fixed | **No connection reuse.** 18 call sites each constructed `Client(config.RPC_URL)`, so solana-py opened a fresh `requests.Session` (new TCP/TLS) per call. **Fix:** a process-wide `_get_client()` singleton; all sites reuse it (HTTP keep-alive / pooling). |
 | R-6 | 🟡 Medium | ✅ Fixed | **Every send blocked on confirmation.** `_build_and_send_legacy_tx` called `confirm_transaction` inline after each send, blocking the loop (up to `SOLANA_RPC_TIMEOUT_SEC`) even though refunds, quarantines, and USDD→USDC sends all have dedicated confirmation passes. Under a backlog this capped throughput at a few sends per cycle. **Fix:** removed the inline confirm; confirmations are tracked by the existing passes. |
-| R-4 | 🟠 High (efficiency) | ✅ Fixed (§11) | **USDD→USDC confirmation was O(N×50).** `process_unprocessed_txids` Priority 3 confirms each awaiting send via `find_signature_with_memo`, which scans up to 50 `getTransaction` calls **per item, per cycle**. The send already returns its signature (`send_usdc_to_token_account_with_sig`), but it is discarded because `unprocessed_txids` has no `sig` column, forcing the memo re-scan (the Priority 2 "recovery" path exists for the same reason). **Recommend:** add a `sig` column, persist the returned signature, and confirm via a single `get_signature_statuses` — replacing ~50 calls/item with 1. (Schema change; deferred to avoid a migration in this pass.) |
+| R-4 | 🟠 High (efficiency) | ✅ Fixed (§11) | **USDD→USDC confirmation was O(N×50).** `process_unprocessed_txids` Priority 3 confirms each awaiting send via `find_signature_with_memo`, which scans up to 50 `getTransaction` calls **per item, per cycle**. The send already returns its signature (`send_solana_token_to_account_with_sig`), but it is discarded because `unprocessed_txids` has no `sig` column, forcing the memo re-scan (the Priority 2 "recovery" path exists for the same reason). **Recommend:** add a `sig` column, persist the returned signature, and confirm via a single `get_signature_statuses` — replacing ~50 calls/item with 1. (Schema change; deferred to avoid a migration in this pass.) |
 | R-5 | 🔵 Low | ✅ Fixed (§11) | `check_sig_confirmations` / `check_quarantine_confirmations` call `get_signature_statuses([one_sig])` per row. `getSignatureStatuses` accepts up to 256 sigs per call — batching turns N calls into 1. |
 | R-7 | 🔵 Low | ✅ Fixed (§11) | The vault USDC balance is fetched via separate `get_token_account_balance` RPCs ~5×/loop (poll start + end, `maintain_backing_and_bounds`, reconcile, metrics). A short per-cycle cache (or fetch-once-and-pass) would cut redundant calls. |
 | R-8 | 🔵 Low | ✅ Fixed (§11) | `process_filtered_deposits` and `fetch_filtered_token_account_transaction_history` (both N+1) are now unused by the poll loop and are candidates for removal to avoid future mis-wiring. |

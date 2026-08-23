@@ -81,7 +81,7 @@ def fake_run(cmd, timeout=15):
     seen["cmd"] = cmd
     return (1, "", "stubbed")
 nc._run = fake_run
-nc.debit_usdd_with_txid("someNexusAccount", 12345678, 99)
+nc.debit_nexus_token_with_txid("someNexusAccount", 12345678, 99)
 joined = " ".join(seen["cmd"])
 check("debit uses from=BTCn", "from=BTCn" in joined, joined[:110])
 check("debit never says USDD", "USDD" not in joined, joined[:110])

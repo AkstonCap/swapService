@@ -213,10 +213,19 @@ hardcoded `0.2` would mean 0.2 BTC on a wBTC bridge.
 The legacy names (`VAULT_USDC_ACCOUNT`, `USDC_MINT`, `USDC_DECIMALS`) still work, so
 existing `.env` files need no changes.
 
-> **Note on internal naming.** Identifiers in the source still read `usdc`/`usdd`. Read
-> them as "the Solana-side token" and "the Nexus-side token" — the *values* are fully
-> configurable. Renaming them would touch every line of the fund-moving code, which is not
-> a change worth making without a live test environment.
+> **Note on internal naming.** Source identifiers say `solana` and `nexus`, not `usdc`
+> and `usdd` — `send_solana_token()`, `poll_nexus_deposits()`, `MIN_DEPOSIT_SOLANA_UNITS`.
+> Three things deliberately keep the original spelling, because in each case the name is
+> not a code identifier but a value that already exists outside the process:
+>
+> | Kept as-is | Example | Why |
+> |---|---|---|
+> | Environment variables and the config attributes mirroring them | `VAULT_USDC_ACCOUNT` | Your `.env` already sets them; generic aliases exist alongside |
+> | State-database column names | `amount_usdc_units` | Renaming needs an `ALTER TABLE` over live fund records |
+> | Persisted row values with a safety property | the retry-budget keys, the debit reservation kind, the `USDD_STATUS_*` strings | A rename makes an in-flight swap written by the previous build invisible to the new one, which could re-debit it |
+>
+> The rationale is recorded in the header block of `src/state_db.py`, and
+> `tests/test_frozen_names.py` fails the build if any of them drifts.
 
 ## Solana Setup
 
@@ -363,11 +372,16 @@ validates this at startup and prints the field names the asset actually has. Kee
 
 **Pre-flight check** — run before first start and after any config change:
 ```bash
-python3 tests/test_smoke.py
+python3 tests/test_smoke.py         # imports every module, runs real functions on a temp DB
+python3 tests/test_frozen_names.py  # state-DB schema and persisted keys unchanged
+python3 tests/test_token_pair.py    # token pair is fully driven by config, not hardcoded
+python3 tests/test_session.py       # multiuser session handling in both node modes
+python3 tests/test_dashboard.py     # dashboard is read-only, XSS-safe, auth-enforced
 ```
-It imports every module, exercises the real functions against a temporary database and
-verifies call-site signatures. It catches configuration and schema faults that a syntax
-check cannot.
+`test_smoke` catches configuration and schema faults that a syntax check cannot.
+`test_frozen_names` is the one to run after **any** refactor that touches naming: it fails
+if a database column, a retry-budget key, a reservation kind or a lifecycle status string
+has drifted, all of which would break an upgrade over a database with swaps in flight.
 
 **Start**
 ```bash
