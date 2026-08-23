@@ -100,7 +100,7 @@ def _deposit_commitment() -> str:
     """Commitment for ingesting deposits / settling our own payouts.
 
     Defaults to 'finalized'. 'confirmed' is supermajority-voted but not rooted, so a
-    deposit can be reorged away after we have minted USDD against it - an irreversible
+    deposit can be reorged away after we have minted supply against it - an irreversible
     loss, since Nexus cannot learn of a Solana reorg.
     """
     return str(getattr(config, "SOLANA_DEPOSIT_COMMITMENT", "finalized") or "finalized")
@@ -211,14 +211,14 @@ def get_transactions_for_address(
     )
 
 
-def fetch_incoming_usdc_deposits_via_helius(
+def fetch_incoming_deposits_via_helius(
     token_account_addr: str,
     since_ts: int,
     min_units: int = 0,
     limit: int = 200,
 ) -> list[tuple[str, int, str | None, str | None, int]]:
     """
-    Fetch recent incoming USDC transfers to token_account_addr with memos.
+    Fetch recent incoming token transfers to token_account_addr with memos.
     
     Performance comparison:
     - Helius: 1-2 API calls (enriched data with parsed tokenTransfers + memos)
@@ -257,7 +257,7 @@ def _fetch_deposits_helius(
         collected: list[tuple[str, int, str | None, str | None, int]] = []
         page_size = max(1, min(1000, limit))
         before: str | None = None
-        usdc_mint = str(getattr(config, "USDC_MINT"))
+        solana_mint = str(getattr(config, "USDC_MINT"))
 
         while len(collected) < limit:
             txs = helius_get_transactions_for_address(
@@ -265,7 +265,7 @@ def _fetch_deposits_helius(
                 limit=page_size,
                 before=before,
                 # 'finalized' by default: a 'confirmed' deposit can still be reorged
-                # away after we have already minted USDD against it.
+                # away after we have already minted supply against it.
                 commitment=getattr(config, "SOLANA_DEPOSIT_COMMITMENT", "finalized"),
                 encoding=None,
             ) or []
@@ -280,11 +280,11 @@ def _fetch_deposits_helius(
                     txs = []
                     break
 
-                # Find incoming USDC transfer to our ATA
+                # Find incoming token transfer to our ATA
                 for t in (tx.get("tokenTransfers") or []):
                     if str(t.get("toTokenAccount")) != str(token_account_addr):
                         continue
-                    if str(t.get("mint")) != usdc_mint:
+                    if str(t.get("mint")) != solana_mint:
                         continue
 
                     # Amount in base units (tokenAmount is base units in enriched)
@@ -347,7 +347,7 @@ def _fetch_deposits_core_rpc(
     try:
         client = _get_client()
         collected: list[tuple[str, int, str | None, str | None, int]] = []
-        usdc_mint = str(getattr(config, "USDC_MINT"))
+        solana_mint = str(getattr(config, "USDC_MINT"))
         
         # Step 1: Get signatures (1 API call)
         sig_resp = _rpc_call(
@@ -388,7 +388,7 @@ def _fetch_deposits_core_rpc(
                 if not tx_data or not isinstance(tx_data, dict):
                     continue
                 
-                # Parse transaction for USDC transfer and memo
+                # Parse transaction for token transfer and memo
                 meta = tx_data.get("meta", {})
                 pre_balances = meta.get("preTokenBalances", [])
                 post_balances = meta.get("postTokenBalances", [])
@@ -399,7 +399,7 @@ def _fetch_deposits_core_rpc(
                 for post in post_balances:
                     if not isinstance(post, dict):
                         continue
-                    if post.get("mint") == usdc_mint and post.get("owner") == str(config.SOL_MAIN_ACCOUNT):
+                    if post.get("mint") == solana_mint and post.get("owner") == str(config.SOL_MAIN_ACCOUNT):
                         post_amount = int(post.get("uiTokenAmount", {}).get("amount", "0"))
                         for pre in pre_balances:
                             if (isinstance(pre, dict) and
@@ -415,7 +415,7 @@ def _fetch_deposits_core_rpc(
                 
                 # Extract sender from preTokenBalances (account that decreased)
                 for pre in pre_balances:
-                    if isinstance(pre, dict) and pre.get("mint") == usdc_mint:
+                    if isinstance(pre, dict) and pre.get("mint") == solana_mint:
                         pre_amt = int(pre.get("uiTokenAmount", {}).get("amount", "0"))
                         for post in post_balances:
                             if (isinstance(post, dict) and 
@@ -455,7 +455,7 @@ def _fetch_deposits_core_rpc(
     
 
 def process_helius_deposits(deposits: list, db_check: bool = True) -> tuple:
-    """Persist enriched deposits from ``fetch_incoming_usdc_deposits_via_helius``.
+    """Persist enriched deposits from ``fetch_incoming_deposits_via_helius``.
 
     Each item is a tuple ``(sig, timestamp, memo, from_address, amount_units)`` that
     already contains everything we need, so we write straight to ``unprocessed_sigs``
@@ -531,11 +531,11 @@ def process_helius_deposits(deposits: list, db_check: bool = True) -> tuple:
     return (added, oldest_deferred_ts)
 
 
-def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -> list:
+def process_unprocessed_solana_deposits(limit: int = 1000, timeout: float = 8.0) -> list:
     """
     Process unprocessed deposit signatures from DB.
     Fetches oldest unprocessed sigs up to limit, validates memo format "nexus:<address>",
-    checks Nexus USDD account validity, runs idempotency checks, debits USDD if valid,
+    checks the destination Nexus token account, runs idempotency checks, debits if valid,
     and updates status accordingly.
     
     Returns: Number of sigs processed.
@@ -559,7 +559,7 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
     timestamp_start = time.monotonic()
     current_timestamp = time.monotonic()
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
-    for sig, timestamp, memo, from_address, amount_usdc, status, txid in unprocessed[:limit]:
+    for sig, timestamp, memo, from_address, amount_solana, status, txid in unprocessed[:limit]:
         processing_secs = current_timestamp - timestamp_start
         if processing_secs >= timeout:
             break
@@ -574,55 +574,61 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 continue
 
             # 4. Validate memo format
-            if not memo or not memo.lower().startswith("nexus:"):
+            prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
+            if not memo or not memo.lower().startswith(prefix.lower()):
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid memo
                 proc_count_refund += 1
                 continue
 
-            nexus_address = memo.split(":", 1)[1].strip()
+            nexus_address = memo[len(prefix):].strip()
             if not nexus_address:
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid memo
                 proc_count_refund += 1
                 continue
 
-            # 5. Check Nexus USDD account validity
-            if not nexus_client.is_valid_usdd_account(nexus_address):
+            # 5. Check Nexus Nexus token account validity
+            if not nexus_client.is_valid_nexus_token_account(nexus_address):
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid account
                 proc_count_refund += 1
                 continue
 
             # 5b. Per-swap size cap: refund oversized deposits rather than minting
             # against them. Bounds the blast radius of a bug or a hostile deposit.
-            max_swap = int(getattr(config, "MAX_SWAP_USDC_UNITS", 0) or 0)
-            if max_swap > 0 and int(amount_usdc or 0) > max_swap:
+            max_swap = int(getattr(config, "MAX_SWAP_SOLANA_UNITS", 0) or 0)
+            if max_swap > 0 and int(amount_solana or 0) > max_swap:
                 from . import alerts
                 alerts.warning("swap_over_cap",
                                "deposit exceeds MAX_SWAP_USDC; refunding instead of swapping",
-                               sig=sig, amount_units=int(amount_usdc or 0), cap_units=max_swap)
+                               sig=sig, amount_units=int(amount_solana or 0), cap_units=max_swap)
                 state_db.update_unprocessed_sig_status(sig, "to be refunded")
                 proc_count_refund += 1
                 continue
 
             # 6. Calculate amount minus fees
             # Base units, exact integer math (no float / scientific-notation hazard).
-            net_amount = nexus_client.get_usdd_send_amount_units(amount_usdc)
+            net_amount = nexus_client.get_nexus_send_amount_units(amount_solana)
             if net_amount <= 0:
                 # Bug #12 fix: Track the fee (entire deposit amount is kept as fee)
                 state_db.add_fee_entry(
                     sig=sig,
                     txid=None,
                     kind="micro_deposit_fee",
-                    amount_usdc_units=int(amount_usdc),
+                    amount_usdc_units=int(amount_solana),
                     amount_usdd_units=None
                 )
-                state_db.mark_processed_sig(sig, timestamp, int(amount_usdc), None, 0, "processed, amount after fees <= 0", None)
+                state_db.mark_processed_sig(sig, timestamp, int(amount_solana), None, 0, "processed, amount after fees <= 0", None)
                 state_db.remove_unprocessed_sig(sig)
                 proc_count_mic += 1
                 continue
 
-            # 7. Debit USDD if valid.
+            # 7. Debit the Nexus-side token if valid.
             # Cross-cycle/cross-thread guard: only one worker may act on this deposit.
-            if not state_db.reserve_action("usdc_to_usdd_debit", sig, ttl_sec=600):
+            # The literal state_db.DEBIT_RESERVATION_KIND is deliberately NOT renamed: it is a row
+            # value in the `reservations` table, not a code identifier. Renaming it would
+            # make a live reservation written by the previous build invisible to this one,
+            # so a process that crashed mid-debit could be re-debited after the upgrade.
+            # See DEBIT_RESERVATION_KIND in state_db for the frozen-name rationale.
+            if not state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, sig, ttl_sec=600):
                 continue
 
             # Bug #9 fix: next_reference() atomically increments to prevent duplicate references.
@@ -633,11 +639,11 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
             # resolved against the chain (resolve_unverified_debits) instead of guessed.
             # Guessing is what previously produced a double mint, or a mint AND a refund.
             state_db.set_unprocessed_sig_reference(sig, reference)
-            state_db.record_attempt(f"usdd_debit:{sig}")
+            state_db.record_attempt(state_db.debit_attempt_key(sig))
             state_db.update_unprocessed_sig_status(sig, "debit in flight")
 
             try:
-                result = nexus_client.debit_usdd_with_txid(nexus_address, net_amount, reference)
+                result = nexus_client.debit_nexus_token_with_txid(nexus_address, net_amount, reference)
             except Exception as e:
                 # Timeout or transport failure: the debit may still have executed.
                 state_db.update_unprocessed_sig_status(sig, "debit unverified")
@@ -650,7 +656,7 @@ def process_unprocessed_usdc_deposits(limit: int = 1000, timeout: float = 8.0) -
                 state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
             else:
                 # The CLI reported failure OR returned an unparsable body. Both are
-                # AMBIGUOUS - debit_usdd_with_txid returns (False, None) when the call
+                # AMBIGUOUS - debit_nexus_token_with_txid returns (False, None) when the call
                 # succeeded but no txid could be parsed. Never refund on this signal.
                 state_db.update_unprocessed_sig_status(sig, "debit unverified")
                 print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} - outcome unknown, awaiting chain verification")
@@ -687,7 +693,7 @@ def _is_token_account_for_mint(token_account_addr: str, mint: PublicKey) -> bool
     
 
 def _is_solana_wallet_with_ata(wallet_address: str) -> bool:
-    """Return True if the address is a Solana wallet with an existing USDC ATA."""
+    """Return True if the address is a Solana wallet with an existing associated token account."""
     try:
         client = _get_client()
 
@@ -697,11 +703,11 @@ def _is_solana_wallet_with_ata(wallet_address: str) -> bool:
         if not wallet_val or not isinstance(wallet_val, dict):
             return False # wallet doesn't exist
         
-        # 2. Derive the expected USDC ATA address
+        # 2. Derive the expected token ATA address
         owner = PublicKey.from_string(wallet_address)
         ata_address = get_associated_token_address(owner, config.USDC_MINT)
 
-        # 3. Check if the ATA account exists and is valid USDC token account
+        # 3. Check if the ATA account exists and is valid token account
         ata_resp = _rpc_call(client.get_account_info, ata_address, encoding="jsonParsed")
         ata_val = _rpc_get_value(ata_resp)
         if not ata_val or not isinstance(ata_val, dict):
@@ -727,7 +733,7 @@ def _is_solana_wallet_with_ata(wallet_address: str) -> bool:
         return False
 
 
-def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> int:
+def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> int:
 
     from . import state_db, nexus_client
 
@@ -762,7 +768,7 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
                 continue
             
             # 4. Check refund net amount
-            net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND
+            net_amount = amount_usdc_units - config.FLAT_FEE_TO_NEXUS_UNITS
             if net_amount <= 0:
                 # Bug #12 fix: Track the fee (entire deposit amount is kept as fee for failed refunds)
                 state_db.add_fee_entry(
@@ -773,11 +779,11 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
                     amount_usdd_units=None
                 )
                 state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, None, 0, "processed, amount after fees <= 0", None)
-                # (sig, timestamp, amount_usdc_units, txid, amount_usdd_debited, status, reference)
+                # (sig, timestamp, amount_usdc_units, txid, amount_nexus_debited, status, reference)
                 state_db.remove_unprocessed_sig(sig)
                 continue
 
-            # 5. Validate from_address whether existing USDC ATA account or Solana wallet with existing ATA account
+            # 5. Validate from_address whether existing token ATA account or Solana wallet with existing ATA account
             if not from_address:
                 state_db.update_unprocessed_sig_status(sig, "to be quarantined")
                 continue
@@ -788,7 +794,7 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
             # 6. On-chain idempotency: only scan the chain when a prior attempt may have
             #    already sent a refund (e.g. crash between send and DB write). This avoids
             #    a ~50-tx signature scan on every first-time refund.
-            refund_key = f"usdc_refund:{sig}"
+            refund_key = state_db.refund_attempt_key(sig)
             if state_db.get_attempt_count(refund_key) > 0:
                 existing_refund = find_signature_with_memo(f"refundSig:{sig}")
                 if existing_refund:
@@ -801,7 +807,7 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
             #    (refundSig:) so a crash mid-refund is reconstructed, not double-paid.
             state_db.record_attempt(refund_key)
             try:
-                sig_r = send_usdc(from_address, net_amount, memo=f"refundSig:{sig}")
+                sig_r = send_solana_token(from_address, net_amount, memo=f"refundSig:{sig}")
             except PayoutCapExceeded as e:
                 # Throttled, not failed: leave status as "to be refunded" and retry later.
                 print(f"[REFUND_DEFERRED] sig={sig} {e}")
@@ -833,7 +839,7 @@ def process_usdc_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> 
     return processed_count
 
 
-def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -> int:
+def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -> int:
 
     from . import state_db, nexus_client
 
@@ -864,9 +870,9 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             if state_db.get_unprocessed_sig_status(sig) not in ("to be quarantined", "quarantine failed"):
                 continue
             # Bound the retry so a permanently failing quarantine cannot spin every cycle.
-            if not state_db.should_attempt(f"usdc_quarantine_send:{sig}"):
+            if not state_db.should_attempt(state_db.quarantine_send_attempt_key(sig)):
                 continue
-            state_db.record_attempt(f"usdc_quarantine_send:{sig}")
+            state_db.record_attempt(state_db.quarantine_send_attempt_key(sig))
 
             # 3. Run idempotency checks: already processed?
             if state_db.is_processed_sig(sig) or state_db.is_refunded_sig(sig):
@@ -874,10 +880,10 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
                 continue
             
             # 4. Check quarantine net amount
-            net_amount = amount_usdc_units - config.FLAT_FEE_USDC_UNITS_REFUND  
+            net_amount = amount_usdc_units - config.FLAT_FEE_TO_NEXUS_UNITS  
 
             # 4b. Nothing left after the fee: there is nothing to move, so finalise here.
-            # Without this, send_usdc() returns (True, None) for a non-positive amount and
+            # Without this, send_solana_token() returns (True, None) for a non-positive amount and
             # the row is marked "awaiting confirmation" with a NULL signature - which the
             # confirmation pass filters out, leaving it stuck in unprocessed_sigs forever.
             if net_amount <= 0:
@@ -892,7 +898,7 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             # 5. On-chain idempotency: only scan after a prior attempt (avoids a per-item
             #    scan on the common first attempt). Double-quarantine is not an external
             #    loss, but this keeps state consistent after a crash.
-            quar_key = f"usdc_quarantine:{sig}"
+            quar_key = state_db.quarantine_attempt_key(sig)
             if state_db.get_attempt_count(quar_key) > 0:
                 existing_quar = find_signature_with_memo(f"quarantinedSig:{sig}")
                 if existing_quar:
@@ -905,7 +911,7 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
             #    scanner (quarantinedSig:) for crash reconstruction.
             state_db.record_attempt(quar_key)
             try:
-                sig_q = send_usdc(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
+                sig_q = send_solana_token(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
             except PayoutCapExceeded as e:
                 print(f"[QUARANTINE_DEFERRED] sig={sig} {e}")
                 continue
@@ -938,9 +944,9 @@ def process_usdc_deposits_quarantine(limit: int = 1000, timeout: float = 25.0) -
     return processed_count
 
 
-def send_usdc(destination: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
+def send_solana_token(destination: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
     """
-    Unified function to send USDC from vault to various destinations.
+    Unified function to send the Solana-side token from vault to various destinations.
     
     Args:
         destination: Target address (owner address or token account address)
@@ -953,9 +959,9 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
     if amount_base_units <= 0:
         return True, None
 
-    # Rolling 24h exposure cap, enforced at the single choke point every USDC payment
+    # Rolling 24h exposure cap, enforced at the single choke point every Solana payout
     # passes through, so a runaway loop or a stolen key cannot drain the vault at once.
-    cap = int(getattr(config, "DAILY_PAYOUT_CAP_USDC_UNITS", 0) or 0)
+    cap = int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0)
     if cap > 0:
         try:
             spent = state_db.payouts_since(86400)
@@ -963,7 +969,7 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
                 from . import alerts
                 alerts.critical(
                     "payout_cap_exceeded",
-                    "24h outbound USDC cap would be breached; payment deferred",
+                    "24h outbound payout cap would be breached; payment deferred",
                     spent_units=spent, requested_units=int(amount_base_units), cap_units=cap,
                     destination=str(destination),
                 )
@@ -983,7 +989,7 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
         # If destination is a wallet address (not a token account), derive the ATA
         dest_token_account = destination
         if not _is_token_account_for_mint(destination, config.USDC_MINT):
-            # Destination is a wallet address - derive its USDC ATA
+            # Destination is a wallet address - derive its token ATA
             try:
                 owner_pubkey = PublicKey.from_string(destination)
                 dest_token_account = str(get_associated_token_address(owner=owner_pubkey, mint=config.USDC_MINT))
@@ -1014,15 +1020,15 @@ def send_usdc(destination: str, amount_base_units: int, memo: str | None = None)
 
         # Record against the rolling cap only after the send actually succeeded.
         try:
-            state_db.record_payout("usdc_send", int(amount_base_units), sig)
+            state_db.record_payout("solana_send", int(amount_base_units), sig)
         except Exception as e:
             print(f"[payout_ledger] failed to record payout {sig}: {e}")
 
-        print(f"Sent USDC tx sig: {sig}")
+        print(f"Sent {config.SOLANA_TOKEN_SYMBOL} tx sig: {sig}")
         return True, sig
 
     except Exception as e:
-        print(f"Error sending USDC: {e}")
+        print(f"Error sending {config.SOLANA_TOKEN_SYMBOL}: {e}")
         return False, None
 
 
@@ -1071,7 +1077,7 @@ def get_signatures_confirmation(sigs: list, min_confirmations: int = 1) -> dict:
 
 
 def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
-    """Check confirmation status for USDC refund transactions.
+    """Check confirmation status for Solana refund transactions.
     
     This function queries refunded_sigs for entries awaiting confirmation,
     then checks the REFUND signature (not the original deposit signature)
@@ -1126,7 +1132,7 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
 
 
 def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> int:
-    """Check confirmation status for USDC quarantine transactions.
+    """Check confirmation status for Solana-side quarantine transactions.
     
     Bug #8 fix: This function queries quarantined_sigs for entries awaiting confirmation,
     then checks the QUARANTINE signature for on-chain confirmation status.
@@ -1300,7 +1306,7 @@ def _build_and_send_legacy_tx(instructions: list[TransactionInstruction], kp: Ke
     if not isinstance(sig, str):
         raise RuntimeError(f"Failed to send tx, unexpected response: {send_resp}")
     # Do NOT block on confirmation here: every send path has a dedicated confirmation
-    # pass (check_sig_confirmations / check_quarantine_confirmations / USDD->USDC
+    # pass (check_sig_confirmations / check_quarantine_confirmations / Nexus->Solana
     # Priority 3). Blocking here would throttle throughput to a few sends per cycle.
     global last_sent_sig
     last_sent_sig = sig
@@ -1369,8 +1375,8 @@ def get_token_account_balance(token_account_addr: str, *, max_age_sec: float = 0
         return 0
 
 
-def transfer_usdc_between_accounts(source_token_account: str, dest_token_account: str, amount_base_units: int) -> bool:
-    """Transfer USDC between two token accounts owned by the vault wallet."""
+def transfer_solana_token_between_accounts(source_token_account: str, dest_token_account: str, amount_base_units: int) -> bool:
+    """Transfer the bridged token between two token accounts owned by the vault wallet."""
     try:
         if amount_base_units <= 0:
             return True
@@ -1386,10 +1392,10 @@ def transfer_usdc_between_accounts(source_token_account: str, dest_token_account
             signers=[],
         )
         sig = _build_and_send_legacy_tx([ix], kp)
-        print(f"USDC transfer token->token sig: {sig}")
+        print(f"Token transfer token->token sig: {sig}")
         return True
     except Exception as e:
-        print(f"Error transferring USDC accounts: {e}")
+        print(f"Error transferring between token accounts: {e}")
         return False
 
 
@@ -1422,12 +1428,13 @@ def check_timestamp_unpr_sigs() -> int | None:
     return new_waterline
 
 
-def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int = 50) -> bool:
-    """Swap USDC->SOL using Jupiter. Returns True on success.
-    Requires: config.USDC_MINT and vault keypair with USDC token account.
+def swap_token_for_sol_via_jupiter(amount_solana_base_units: int, slippage_bps: int = 50) -> bool:
+    """Swap token->SOL using Jupiter. Returns True on success.
+    Requires: config.USDC_MINT (the configured Solana mint) and a vault keypair holding a
+    token account for it.
     """
     try:
-        if amount_usdc_base_units <= 0:
+        if amount_solana_base_units <= 0:
             return False
         client = _get_client()
         kp = load_vault_keypair()
@@ -1438,7 +1445,7 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
         params = {
             "inputMint": str(config.USDC_MINT),
             "outputMint": "So11111111111111111111111111111111111111112",
-            "amount": str(int(amount_usdc_base_units)),
+            "amount": str(int(amount_solana_base_units)),
             "slippageBps": str(int(slippage_bps)),
             "onlyDirectRoutes": "false",
         }
@@ -1490,8 +1497,8 @@ def swap_usdc_for_sol_via_jupiter(amount_usdc_base_units: int, slippage_bps: int
 
 
 
-def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | None = None) -> bool:
-    """Send USDC base units to a Solana owner address. Requires recipient ATA to already exist.
+def ensure_send_token(to_owner_addr: str, amount_base_units: int, memo: str | None = None) -> bool:
+    """Send Solana base units to a Solana owner address. Requires recipient ATA to already exist.
     If memo is provided, attach it to the transaction for idempotency tracing.
     """
     try:
@@ -1501,7 +1508,8 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
         client = _get_client()
         ata_info = _rpc_get_value(_rpc_call(client.get_account_info, dest_ata))
         if ata_info is None:
-            print("Recipient USDC ATA is missing; not creating it. Ask recipient to initialize their USDC ATA.")
+            print("Recipient associated token account is missing; not creating it. "
+                  "Ask the recipient to initialize it.")
             return False
         if amount_base_units <= 0:
             return True
@@ -1519,18 +1527,18 @@ def ensure_send_usdc(to_owner_addr: str, amount_base_units: int, memo: str | Non
         if mix:
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Sent USDC tx sig: {sig}")
+        print(f"Sent {config.SOLANA_TOKEN_SYMBOL} tx sig: {sig}")
         return True
     except Exception as e:
-        print(f"Error sending USDC: {e}")
+        print(f"Error sending {config.SOLANA_TOKEN_SYMBOL}: {e}")
         return False
 
 
 
 
 
-def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
-    """Send USDC base units directly to an existing USDC token account address."""
+def send_solana_token_to_account_with_sig(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
+    """Send Solana base units directly to an existing token account address."""
     # Idempotency short‑circuit for memo formats we recognize
     if memo:
         # Legacy numeric reference
@@ -1549,7 +1557,7 @@ def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_bas
         if amount_base_units <= 0:
             return True, None
         if not _is_token_account_for_mint(dest_token_account_addr, config.USDC_MINT):
-            print("Destination is not a valid USDC token account")
+            print("Destination is not a valid token account for the configured mint")
             return False, None
         kp = load_vault_keypair()
         dest = PublicKey.from_string(dest_token_account_addr)
@@ -1569,9 +1577,12 @@ def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_bas
         if mix:
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Sent USDC to token account tx sig: {sig}")
-        
-        # Mark processed based on memo form for future idempotency
+        print(f"Sent {config.SOLANA_TOKEN_SYMBOL} to token account tx sig: {sig}")
+
+        # Mark processed based on memo form for future idempotency.
+        # "usdc_sent" is a persisted `processed_txids.status` value, frozen for the same
+        # reason as the USDD_STATUS_* strings in swap_nexus: renaming it would make rows
+        # written by an earlier build unrecognisable to the idempotency check.
         try:
             if memo:
                 if memo.isdigit():
@@ -1584,34 +1595,34 @@ def send_usdc_to_token_account_with_sig(dest_token_account_addr: str, amount_bas
         
         return True, sig
     except Exception as e:
-        print(f"Error sending USDC to token account: {e}")
+        print(f"Error sending to token account: {e}")
         return False, None
 
 
-def ensure_send_usdc_to_token_account(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> bool:
-    ok, _sig = send_usdc_to_token_account_with_sig(dest_token_account_addr, amount_base_units, memo)
+def ensure_send_token_to_account(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> bool:
+    ok, _sig = send_solana_token_to_account_with_sig(dest_token_account_addr, amount_base_units, memo)
     return ok
 
 
-def ensure_send_usdc_owner_or_ata(addr_maybe_owner_or_token: str, amount_base_units: int, memo: str | None = None) -> bool:
-    """Send USDC to either a Solana owner address (deriving ATA) or a direct USDC token account address."""
+def ensure_send_token_owner_or_ata(addr_maybe_owner_or_token: str, amount_base_units: int, memo: str | None = None) -> bool:
+    """Send the Solana-side token to either a Solana owner address (deriving ATA) or a direct token account address."""
     try:
         if _is_token_account_for_mint(addr_maybe_owner_or_token, config.USDC_MINT):
-            return ensure_send_usdc_to_token_account(addr_maybe_owner_or_token, amount_base_units, memo)
-        return ensure_send_usdc(addr_maybe_owner_or_token, amount_base_units, memo)
+            return ensure_send_token_to_account(addr_maybe_owner_or_token, amount_base_units, memo)
+        return ensure_send_token(addr_maybe_owner_or_token, amount_base_units, memo)
     except Exception as e:
-        print(f"Error in ensure_send_usdc_owner_or_ata: {e}")
+        print(f"Error in ensure_send_token_owner_or_ata: {e}")
         return False
 
 
-def is_valid_usdc_token_account(addr: str) -> bool:
-    """Public helper: True if addr is a valid SPL token account for the USDC mint."""
+def is_valid_solana_token_account(addr: str) -> bool:
+    """Public helper: True if addr is a valid SPL token account for the configured mint."""
     return _is_token_account_for_mint(addr, config.USDC_MINT)
 
 
 def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]:
     """Best-effort lookup of a recently sent signature containing the given memo string.
-    Searches recent signatures for the vault USDC token account (and optionally the vault owner)
+    Searches recent signatures for the vault token account (and optionally the vault owner)
     and inspects transaction instructions for the Memo program.
     Returns first matching signature or None.
     """
@@ -1715,7 +1726,7 @@ def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]
 
 
 def scan_recent_memos(search_limit: int = 400) -> dict:
-    """Scan recent signatures for vault USDC account collecting structured memos.
+    """Scan recent signatures for the vault account collecting structured memos.
     Returns dict: {
         'nexus_txids': { txid: signature },
         'refund_sigs': { deposit_sig: refund_tx_sig },
@@ -1796,7 +1807,7 @@ def scan_recent_memos(search_limit: int = 400) -> dict:
 
 
 def scan_memos_since_timestamp(since_timestamp: int, max_signatures: int = 10000) -> dict:
-    """Scan ALL signatures for vault USDC account since timestamp, collecting structured memos.
+    """Scan ALL signatures for the vault account since timestamp, collecting structured memos.
     
     Args:
         since_timestamp: Unix timestamp to scan from
@@ -1955,8 +1966,8 @@ def scan_memos_since_timestamp(since_timestamp: int, max_signatures: int = 10000
 ## Memo extraction removed.
 
 
-def has_usdc_ata(owner_addr: str) -> bool:
-    """Return True if the owner's USDC ATA exists."""
+def has_token_ata(owner_addr: str) -> bool:
+    """Return True if the owner's associated token account exists."""
     try:
         client = _get_client()
         owner = PublicKey.from_string(owner_addr)
@@ -1967,8 +1978,8 @@ def has_usdc_ata(owner_addr: str) -> bool:
         return False
 
 
-def derive_usdc_ata(owner_addr: str) -> str | None:
-    """Derive the expected USDC ATA address for a given owner (string form). Returns None on failure."""
+def derive_token_ata(owner_addr: str) -> str | None:
+    """Derive the expected associated token account address for a given owner (string form). Returns None on failure."""
     try:
         owner = PublicKey.from_string(owner_addr)
         ata = get_associated_token_address(owner=owner, mint=config.USDC_MINT)
@@ -1977,8 +1988,8 @@ def derive_usdc_ata(owner_addr: str) -> str | None:
         return None
 
 
-def refund_usdc_to_source(source_token_account: str, amount_base_units: int, reason: str, deposit_sig: str | None = None) -> bool:
-    """Refund USDC back to the sender's token account.
+def refund_solana_token_to_source(source_token_account: str, amount_base_units: int, reason: str, deposit_sig: str | None = None) -> bool:
+    """Refund funds back to the sender's token account.
     Adds memo refundSig:<deposit_sig> if deposit_sig provided for idempotent replay detection.
     """
     # Check if this refund was already processed by checking the reason for signature context
@@ -2008,15 +2019,15 @@ def refund_usdc_to_source(source_token_account: str, amount_base_units: int, rea
         if memo_ix:
             ixs.append(memo_ix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Refunded USDC tx sig: {sig}")  # retain basic trace
+        print(f"Refunded tx sig: {sig}")  # retain basic trace
         return True
     except Exception as e:
-        print(f"Error refunding USDC: {e}")
+        print(f"Error refunding {config.SOLANA_TOKEN_SYMBOL}: {e}")
         return False
 
 
-def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None, deposit_sig: str | None = None) -> bool:
-    """Move USDC to quarantine with structured memo for later idempotency.
+def move_solana_token_to_quarantine(amount_base_units: int, note: str | None = None, deposit_sig: str | None = None) -> bool:
+    """Move the deposit to quarantine with structured memo for later idempotency.
     Memo precedence:
       quarantinedSig:<deposit_sig>
       quarantined:<note>
@@ -2051,8 +2062,8 @@ def move_usdc_to_quarantine(amount_base_units: int, note: str | None = None, dep
         if mix:
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Moved USDC to quarantine, sig: {sig} memo={memo_txt}")
+        print(f"Moved {config.SOLANA_TOKEN_SYMBOL} to quarantine, sig: {sig} memo={memo_txt}")
         return True
     except Exception as e:
-        print(f"Error moving USDC to quarantine: {e}")
+        print(f"Error moving funds to quarantine: {e}")
     return False

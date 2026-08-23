@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Quarantine Viewer - Display quarantined USDC and USDD transactions for manual handling.
+"""Quarantine Viewer - Display quarantined bridge transactions for manual handling.
 
 Usage:
     python quarantine_viewer.py           # Show all quarantined entries
-    python quarantine_viewer.py --usdc    # Show only USDC (Solana) quarantined
-    python quarantine_viewer.py --usdd    # Show only USDD (Nexus) quarantined
+    python quarantine_viewer.py --solana  # Show only the Solana-side quarantine
+    python quarantine_viewer.py --nexus   # Show only the Nexus-side quarantine
     python quarantine_viewer.py --export  # Export to CSV files
 """
 
@@ -18,6 +18,14 @@ from decimal import Decimal
 
 # Default database path (can be overridden via STATE_DB_PATH env var)
 DB_PATH = os.getenv("STATE_DB_PATH", "swap_service.db")
+
+# Token labels and decimals for the configured pair. Read straight from the environment
+# so this tool still runs against a database when the service package cannot be imported
+# (a bare checkout, or a machine without the Solana/Nexus dependencies installed).
+SOL_SYM = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
+NXS_SYM = os.getenv("NEXUS_TOKEN_NAME", "USDD")
+SOL_DECIMALS = int(os.getenv("SOLANA_TOKEN_DECIMALS", os.getenv("USDC_DECIMALS", "6")))
+NXS_DECIMALS = int(os.getenv("NEXUS_TOKEN_DECIMALS", os.getenv("USDD_DECIMALS", "6")))
 
 # Terminal colors
 class Colors:
@@ -48,13 +56,26 @@ def format_timestamp(ts: int | None) -> str:
         return str(ts)
 
 
+def _trim_trailing_zeros(text: str) -> str:
+    """Drop trailing fractional zeros, and only those.
+
+    Stripping unconditionally eats significant digits when there is no decimal point:
+    for a 0-decimal token `"1000".rstrip("0")` is `"1"`, so the operator's quarantine
+    table would understate the amount by three orders of magnitude - on the screen used
+    to authorise manual fund recovery.
+    """
+    if "." not in text:
+        return text
+    return text.rstrip("0").rstrip(".") or "0"
+
+
 def format_amount(units: int | None, decimals: int = 6, ticker: str = "") -> str:
     """Format base units to human-readable token amount."""
     if units is None:
         return "N/A"
     try:
         amount = Decimal(units) / (Decimal(10) ** decimals)
-        formatted = f"{amount:.{decimals}f}".rstrip('0').rstrip('.')
+        formatted = _trim_trailing_zeros(f"{amount:.{decimals}f}")
         return f"{formatted} {ticker}".strip()
     except Exception:
         return str(units)
@@ -83,13 +104,18 @@ def csv_safe(value):
     return text
 
 
-def format_token_amount(amount, ticker: str = "") -> str:
-    """Format a token-unit amount exactly (no float scaling)."""
+def format_token_amount(amount, ticker: str = "", decimals: int | None = None) -> str:
+    """Format a token-unit amount exactly (no float scaling).
+
+    `decimals` defaults to the Nexus-side token's precision; the quantum used to be
+    hardcoded to six places, which silently truncated any pair with finer precision.
+    """
     if amount is None:
         return "N/A"
+    decs = NXS_DECIMALS if decimals is None else int(decimals)
     try:
-        q = Decimal(str(amount)).quantize(Decimal("0.000001"))
-        return f"{format(q, 'f').rstrip('0').rstrip('.') or '0'} {ticker}".strip()
+        q = Decimal(str(amount)).quantize(Decimal(10) ** -decs)
+        return f"{_trim_trailing_zeros(format(q, 'f'))} {ticker}".strip()
     except Exception:
         return str(amount)
 
@@ -137,8 +163,8 @@ def print_table(headers: list[str], rows: list[list[str]], title: str = ""):
     print(f"  Total: {len(rows)} entries\n")
 
 
-def get_quarantined_usdc() -> list[tuple]:
-    """Fetch quarantined USDC deposits (USDC→USDD direction failures)."""
+def get_quarantined_solana() -> list[tuple]:
+    """Fetch quarantined Solana-side deposits (Solana→Nexus direction failures)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -152,8 +178,8 @@ def get_quarantined_usdc() -> list[tuple]:
     return rows
 
 
-def get_quarantined_usdd() -> list[tuple]:
-    """Fetch quarantined USDD credits (USDD→USDC direction failures)."""
+def get_quarantined_nexus() -> list[tuple]:
+    """Fetch quarantined Nexus-side credits (Nexus→Solana direction failures)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -167,8 +193,8 @@ def get_quarantined_usdd() -> list[tuple]:
     return rows
 
 
-def get_failed_refunds_usdc() -> list[tuple]:
-    """Fetch USDC refunds that are stuck or failed."""
+def get_failed_refunds_solana() -> list[tuple]:
+    """Fetch Solana-side refunds that are stuck or failed."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -182,8 +208,8 @@ def get_failed_refunds_usdc() -> list[tuple]:
     return rows
 
 
-def get_failed_refunds_usdd() -> list[tuple]:
-    """Fetch USDD refunds that are stuck or failed."""
+def get_failed_refunds_nexus() -> list[tuple]:
+    """Fetch Nexus-side refunds that are stuck or failed."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -197,17 +223,17 @@ def get_failed_refunds_usdd() -> list[tuple]:
     return rows
 
 
-def display_usdc_quarantine():
-    """Display quarantined USDC transactions."""
+def display_solana_quarantine():
+    """Display quarantined Solana-side transactions."""
     # Quarantined (finalized)
-    rows = get_quarantined_usdc()
+    rows = get_quarantined_solana()
     table_rows = []
     for sig, ts, from_addr, amount, memo, qsig, qunits, status in rows:
         table_rows.append([
             truncate(sig, 16),
             format_timestamp(ts),
             truncate(from_addr, 16),
-            format_amount(amount, 6, "USDC"),
+            format_amount(amount, SOL_DECIMALS, SOL_SYM),
             truncate(memo, 25),
             truncate(status, 20),
         ])
@@ -215,11 +241,11 @@ def display_usdc_quarantine():
     print_table(
         ["Deposit Sig", "Timestamp", "From Address", "Amount", "Memo", "Status"],
         table_rows,
-        "Quarantined USDC Deposits (USDC→USDD Failures)"
+        f"Quarantined {SOL_SYM} Deposits ({SOL_SYM}→{NXS_SYM} Failures)"
     )
     
     # Pending refunds/quarantine
-    pending = get_failed_refunds_usdc()
+    pending = get_failed_refunds_solana()
     if pending:
         pending_rows = []
         for sig, ts, from_addr, amount, memo, status in pending:
@@ -227,7 +253,7 @@ def display_usdc_quarantine():
                 truncate(sig, 16),
                 format_timestamp(ts),
                 truncate(from_addr, 16),
-                format_amount(amount, 6, "USDC"),
+                format_amount(amount, SOL_DECIMALS, SOL_SYM),
                 truncate(memo, 25),
                 truncate(status, 20),
             ])
@@ -235,21 +261,21 @@ def display_usdc_quarantine():
         print_table(
             ["Deposit Sig", "Timestamp", "From Address", "Amount", "Memo", "Status"],
             pending_rows,
-            "Pending USDC Refunds/Quarantine (In Progress)"
+            f"Pending {SOL_SYM} Refunds/Quarantine (In Progress)"
         )
 
 
-def display_usdd_quarantine():
-    """Display quarantined USDD transactions."""
+def display_nexus_quarantine():
+    """Display quarantined Nexus-side transactions."""
     # Quarantined (finalized)
-    rows = get_quarantined_usdd()
+    rows = get_quarantined_nexus()
     table_rows = []
     for txid, ts, amount, from_addr, to_addr, owner, sig, status in rows:
         table_rows.append([
             truncate(txid, 16),
             format_timestamp(ts),
             truncate(from_addr, 16),
-            format_token_amount(amount, "USDD"),
+            format_token_amount(amount, NXS_SYM),
             truncate(owner, 16),
             truncate(status, 20),
         ])
@@ -257,11 +283,11 @@ def display_usdd_quarantine():
     print_table(
         ["Nexus TxID", "Timestamp", "From Address", "Amount", "Owner", "Status"],
         table_rows,
-        "Quarantined USDD Credits (USDD→USDC Failures)"
+        f"Quarantined {NXS_SYM} Credits ({NXS_SYM}→{SOL_SYM} Failures)"
     )
     
     # Pending refunds/quarantine
-    pending = get_failed_refunds_usdd()
+    pending = get_failed_refunds_nexus()
     if pending:
         pending_rows = []
         for txid, ts, amount, from_addr, status in pending:
@@ -269,14 +295,14 @@ def display_usdd_quarantine():
                 truncate(txid, 16),
                 format_timestamp(ts),
                 truncate(from_addr, 16),
-                format_token_amount(amount, "USDD"),
+                format_token_amount(amount, NXS_SYM),
                 truncate(status, 25),
             ])
         
         print_table(
             ["Nexus TxID", "Timestamp", "From Address", "Amount", "Status"],
             pending_rows,
-            "Pending USDD Refunds/Quarantine (In Progress)"
+            f"Pending {NXS_SYM} Refunds/Quarantine (In Progress)"
         )
 
 
@@ -287,39 +313,39 @@ def display_summary():
     
     # Counts
     cursor.execute("SELECT COUNT(*) FROM quarantined_sigs")
-    usdc_quarantined = cursor.fetchone()[0]
+    solana_quarantined = cursor.fetchone()[0]
     
     cursor.execute("SELECT COUNT(*) FROM quarantined_txids")
-    usdd_quarantined = cursor.fetchone()[0]
+    nexus_quarantined = cursor.fetchone()[0]
     
     cursor.execute("SELECT COUNT(*) FROM unprocessed_sigs WHERE status LIKE '%refund%' OR status LIKE '%quarantine%'")
-    usdc_pending = cursor.fetchone()[0]
+    solana_pending = cursor.fetchone()[0]
     
     cursor.execute("SELECT COUNT(*) FROM unprocessed_txids WHERE status LIKE '%refund%' OR status LIKE '%quarantine%'")
-    usdd_pending = cursor.fetchone()[0]
+    nexus_pending = cursor.fetchone()[0]
     
     # Totals
     cursor.execute("SELECT COALESCE(SUM(amount_usdc_units), 0) FROM quarantined_sigs")
-    usdc_total = cursor.fetchone()[0]
+    solana_total = cursor.fetchone()[0]
     
     cursor.execute("SELECT COALESCE(SUM(amount_usdd), 0) FROM quarantined_txids")
-    usdd_total = cursor.fetchone()[0]
+    nexus_total = cursor.fetchone()[0]
     
     conn.close()
     
     print()
     print(color(" QUARANTINE SUMMARY ".center(60, "="), Colors.BOLD + Colors.YELLOW))
     print()
-    print(f"  {color('USDC→USDD Direction:', Colors.BOLD)}")
-    print(f"    Quarantined:     {usdc_quarantined} entries ({format_amount(usdc_total, 6, 'USDC')})")
-    print(f"    Pending:         {usdc_pending} entries")
+    print(f"  {color(f'{SOL_SYM}→{NXS_SYM} Direction:', Colors.BOLD)}")
+    print(f"    Quarantined:     {solana_quarantined} entries ({format_amount(solana_total, SOL_DECIMALS, SOL_SYM)})")
+    print(f"    Pending:         {solana_pending} entries")
     print()
-    print(f"  {color('USDD→USDC Direction:', Colors.BOLD)}")
-    print(f"    Quarantined:     {usdd_quarantined} entries ({format_amount(int(float(usdd_total) * 1_000_000), 6, 'USDD')})")
-    print(f"    Pending:         {usdd_pending} entries")
+    print(f"  {color(f'{NXS_SYM}→{SOL_SYM} Direction:', Colors.BOLD)}")
+    print(f"    Quarantined:     {nexus_quarantined} entries ({format_token_amount(nexus_total, NXS_SYM)})")
+    print(f"    Pending:         {nexus_pending} entries")
     print()
     
-    total = usdc_quarantined + usdd_quarantined + usdc_pending + usdd_pending
+    total = solana_quarantined + nexus_quarantined + solana_pending + nexus_pending
     if total == 0:
         print(color("  ✓ No quarantined or pending items requiring attention.\n", Colors.GREEN))
     else:
@@ -330,70 +356,73 @@ def export_to_csv():
     """Export quarantined data to CSV files."""
     import csv
     
-    # Export USDC quarantine
-    usdc_rows = get_quarantined_usdc()
-    if usdc_rows:
-        with open("quarantine_usdc.csv", "w", newline="") as f:
+    # Export the Solana-side quarantine
+    solana_rows = get_quarantined_solana()
+    if solana_rows:
+        with open("quarantine_solana_token.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["sig", "timestamp", "from_address", "amount_usdc_units", "memo", "quarantine_sig", "quarantined_units", "status"])
-            writer.writerows([[csv_safe(c) for c in r] for r in usdc_rows])
-        print(f"  Exported {len(usdc_rows)} USDC entries to quarantine_usdc.csv")
+            writer.writerows([[csv_safe(c) for c in r] for r in solana_rows])
+        print(f"  Exported {len(solana_rows)} {SOL_SYM} entries to quarantine_solana_token.csv")
     
-    # Export USDD quarantine
-    usdd_rows = get_quarantined_usdd()
-    if usdd_rows:
-        with open("quarantine_usdd.csv", "w", newline="") as f:
+    # Export the Nexus-side quarantine
+    nexus_rows = get_quarantined_nexus()
+    if nexus_rows:
+        with open("quarantine_nexus_token.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["txid", "timestamp", "amount_usdd", "from_address", "to_address", "owner", "sig", "status"])
-            writer.writerows([[csv_safe(c) for c in r] for r in usdd_rows])
-        print(f"  Exported {len(usdd_rows)} USDD entries to quarantine_usdd.csv")
+            writer.writerows([[csv_safe(c) for c in r] for r in nexus_rows])
+        print(f"  Exported {len(nexus_rows)} {NXS_SYM} entries to quarantine_nexus_token.csv")
     
-    # Export pending USDC
-    usdc_pending = get_failed_refunds_usdc()
-    if usdc_pending:
-        with open("pending_usdc.csv", "w", newline="") as f:
+    # Export pending Solana-side refunds
+    solana_pending = get_failed_refunds_solana()
+    if solana_pending:
+        with open("pending_solana_token.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["sig", "timestamp", "from_address", "amount_usdc_units", "memo", "status"])
-            writer.writerows([[csv_safe(c) for c in r] for r in usdc_pending])
-        print(f"  Exported {len(usdc_pending)} pending USDC entries to pending_usdc.csv")
+            writer.writerows([[csv_safe(c) for c in r] for r in solana_pending])
+        print(f"  Exported {len(solana_pending)} pending {SOL_SYM} entries to pending_solana_token.csv")
     
-    # Export pending USDD
-    usdd_pending = get_failed_refunds_usdd()
-    if usdd_pending:
-        with open("pending_usdd.csv", "w", newline="") as f:
+    # Export pending Nexus-side refunds
+    nexus_pending = get_failed_refunds_nexus()
+    if nexus_pending:
+        with open("pending_nexus_token.csv", "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["txid", "timestamp", "amount_usdd", "from_address", "status"])
-            writer.writerows([[csv_safe(c) for c in r] for r in usdd_pending])
-        print(f"  Exported {len(usdd_pending)} pending USDD entries to pending_usdd.csv")
+            writer.writerows([[csv_safe(c) for c in r] for r in nexus_pending])
+        print(f"  Exported {len(nexus_pending)} pending {NXS_SYM} entries to pending_nexus_token.csv")
     
     print()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="View quarantined USDC and USDD transactions for manual handling.",
+        description=f"View quarantined {SOL_SYM} and {NXS_SYM} transactions for manual handling.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
   python quarantine_viewer.py           # Show all quarantined entries
-  python quarantine_viewer.py --usdc    # Show only USDC (Solana) quarantined
-  python quarantine_viewer.py --usdd    # Show only USDD (Nexus) quarantined
+  python quarantine_viewer.py --solana  # Show only {SOL_SYM} (Solana) quarantined
+  python quarantine_viewer.py --nexus   # Show only {NXS_SYM} (Nexus) quarantined
   python quarantine_viewer.py --export  # Export to CSV files
 
 Manual Handling:
-  USDC deposits quarantined due to invalid memo or failed refunds should be
+  {SOL_SYM} deposits quarantined due to invalid memo or failed refunds should be
   manually reviewed and either:
     1. Refunded via Solana CLI to the from_address
     2. Marked as resolved in the database after investigation
-  
-  USDD credits quarantined due to missing asset mapping or invalid receival
+
+  {NXS_SYM} credits quarantined due to missing asset mapping or invalid receival
   account should be:
     1. Refunded via Nexus CLI to the from_address
     2. Marked as resolved in the database after investigation
         """
     )
-    parser.add_argument("--usdc", action="store_true", help="Show only USDC (USDC→USDD) quarantine")
-    parser.add_argument("--usdd", action="store_true", help="Show only USDD (USDD→USDC) quarantine")
+    # `--usdc`/`--usdd` remain as hidden aliases so existing operator scripts keep working.
+    parser.add_argument("--solana", "--usdc", dest="solana", action="store_true",
+                        help=f"Show only the Solana-side ({SOL_SYM}→{NXS_SYM}) quarantine")
+    parser.add_argument("--nexus", "--usdd", dest="nexus", action="store_true",
+                        help=f"Show only the Nexus-side ({NXS_SYM}→{SOL_SYM}) quarantine")
     parser.add_argument("--export", action="store_true", help="Export quarantine data to CSV files")
     parser.add_argument("--db", type=str, help="Path to database file (default: swap_service.db)")
     
@@ -422,14 +451,14 @@ Manual Handling:
     # Display summary first
     display_summary()
     
-    # Display tables based on filters. `--usdc --usdd` together previously fell into
-    # the elif and silently showed only USDC, giving a partial view with no warning.
-    show_usdc = args.usdc or not (args.usdc or args.usdd)
-    show_usdd = args.usdd or not (args.usdc or args.usdd)
-    if show_usdc:
-        display_usdc_quarantine()
-    if show_usdd:
-        display_usdd_quarantine()
+    # Display tables based on filters. Passing both flags together previously fell into
+    # an elif and silently showed only one side, giving a partial view with no warning.
+    show_solana = args.solana or not (args.solana or args.nexus)
+    show_nexus = args.nexus or not (args.solana or args.nexus)
+    if show_solana:
+        display_solana_quarantine()
+    if show_nexus:
+        display_nexus_quarantine()
 
 
 if __name__ == "__main__":

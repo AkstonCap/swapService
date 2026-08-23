@@ -20,6 +20,20 @@ Legend:
 | NEXUS_USDD_TREASURY_ACCOUNT | Y | str |  | USDD treasury account receiving user USDD credits & paying refunds. |
 | SOL_MAIN_ACCOUNT | Y | pubkey |  | Base SOL account (used in some balance / backing logic). |
 
+## Bridged Token Pair
+| Var | Type | Default | Notes |
+|-----|------|---------|-------|
+| SOLANA_TOKEN_MINT | pubkey |  | Mint of the Solana-side token. Alias: `USDC_MINT`. |
+| SOLANA_VAULT_ACCOUNT | pubkey |  | Vault SPL token account (ATA) for that mint. Alias: `VAULT_USDC_ACCOUNT`. |
+| SOLANA_TOKEN_SYMBOL | str | USDC | Display ticker; published in the registration record. |
+| SOLANA_TOKEN_DECIMALS | int | 6 | Alias: `USDC_DECIMALS`. |
+| NEXUS_TOKEN_NAME | str | USDD | The Nexus token minted/debited. Used in `finance/debit/token from=<token>`. |
+| NEXUS_TOKEN_DECIMALS | int | 6 | Alias: `USDD_DECIMALS`. |
+| DEPOSIT_MEMO_PREFIX | str | `nexus:` | Memo prefix depositors use to name their Nexus destination. |
+| SERVICE_PROVIDER | str |  | Operator name/domain, published on-chain. |
+| SERVICE_VERSION | str | 1.0.0 | Published on-chain. |
+| SERVICE_CONTACT | str |  | URL or contact handle, published on-chain. |
+
 ## Decimals
 | Var | Req | Type | Default | Notes |
 |-----|-----|------|---------|-------|
@@ -65,7 +79,7 @@ Legend:
 | METRICS_INTERVAL_SEC | int | 30 | Emit frequency. |
 | REFUND_TIMEOUT_SEC | int | 3600 | Seconds to wait for mapping (USDD→USDC) before refund path. |
 | STALE_DEPOSIT_QUARANTINE_SEC | int | 86400 | Max age before deposit forced to refund/quarantine. |
-| USDC_CONFIRM_TIMEOUT_SEC | int | 600 | Wait for outbound USDC confirmation. |
+| SOLANA_CONFIRM_TIMEOUT_SEC | int | 600 | Wait for outbound USDC confirmation. |
 | STALE_ROW_SEC | int | 86400 | Age trigger for stale state record handling. |
 | HEARTBEAT_MIN_INTERVAL_SEC | int | max(10,POLL) | Prevent spam updates (>=10s). |
 | HEARTBEAT_WATERLINE_SAFETY_SEC | int | 120 | Safety margin subtracted when filtering old items. |
@@ -82,7 +96,7 @@ Legend:
 | DUST_CREDIT_USDD | decimal | 0.01 | Anti-DoS dust floor. Credits below this are ignored entirely (no state, no accounting). Credits between this and MIN_CREDIT_USDD are recorded so the funds remain traceable. |
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
-| NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | Deducted on Nexus refunds (covers on‑chain cost). |
+| NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | **Currently inert.** Intended to cover the on-chain cost of a Nexus refund, but no code path deducts it: all four refund sites return the full credited amount, so the operator absorbs the Nexus transaction cost. Set it if you like — nothing reads it beyond the unused `_apply_congestion_fee()` helper. |
 
 ## Exposure Caps & Alerting
 | Var | Type | Default | Notes |

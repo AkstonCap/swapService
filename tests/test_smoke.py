@@ -43,8 +43,8 @@ state_db.DB_PATH="/tmp/smoke.db"; state_db.init_db()
 # 2. call REAL functions that touch only the DB / pure logic
 checks = [
   ("check_timestamp_unpr_sigs (empty)", lambda: solana_client.check_timestamp_unpr_sigs()),
-  ("get_usdd_send_amount_units",        lambda: nexus_client.get_usdd_send_amount_units(10_500_000)),
-  ("_format_usdd_amount",               lambda: nexus_client._format_usdd_amount(10_389_500)),
+  ("get_nexus_send_amount_units",        lambda: nexus_client.get_nexus_send_amount_units(10_500_000)),
+  ("_format_nexus_amount",               lambda: nexus_client._format_nexus_amount(10_389_500)),
   ("resolve_unverified_debits (empty)", lambda: nexus_client.resolve_unverified_debits()),
   ("should_attempt / exhausted",        lambda: (state_db.should_attempt("k"), state_db.attempts_exhausted("k"))),
   ("payouts_since",                     lambda: state_db.payouts_since(86400)),
@@ -54,12 +54,12 @@ checks = [
   ("get_sigs_pending_debit_verification", lambda: state_db.get_sigs_pending_debit_verification(("a","b"))),
   ("process_helius_deposits (empty)",   lambda: solana_client.process_helius_deposits([])),
   ("process_helius_deposits (tuple)",   lambda: solana_client.process_helius_deposits([("S",1,"nexus:a","f",500000)])),
-  ("process_unprocessed_usdc_deposits", lambda: solana_client.process_unprocessed_usdc_deposits(10,1.0)),
-  ("process_usdc_deposits_refunding",   lambda: solana_client.process_usdc_deposits_refunding(10,1.0)),
-  ("process_usdc_deposits_quarantine",  lambda: solana_client.process_usdc_deposits_quarantine(10,1.0)),
+  ("process_unprocessed_solana_deposits", lambda: solana_client.process_unprocessed_solana_deposits(10,1.0)),
+  ("process_solana_deposits_refunding",   lambda: solana_client.process_solana_deposits_refunding(10,1.0)),
+  ("process_solana_deposits_quarantine",  lambda: solana_client.process_solana_deposits_quarantine(10,1.0)),
   ("check_sig_confirmations",           lambda: solana_client.check_sig_confirmations(1,1.0)),
   ("check_quarantine_confirmations",    lambda: solana_client.check_quarantine_confirmations(1,1.0)),
-  ("fees.get_usdc_fees",                lambda: fees.get_usdc_fees()),
+  ("fees.get_solana_fees",                lambda: fees.get_solana_fees()),
   ("fees.reconcile_accounting",         lambda: fees.reconcile_accounting()),
   ("run_balance_reconciliation",        lambda: balance_reconciler.run_balance_reconciliation(dry_run=True)),
   ("_advance_solana_waterline",         lambda: swap_solana._advance_solana_waterline(1,2,False)),
@@ -73,13 +73,13 @@ print(f"[2] called {len(checks)} real functions")
 # 3. arity check: every call site of functions whose signature I changed
 import ast
 sigs = {
- "debit_usdd_with_txid": nexus_client.debit_usdd_with_txid,
+ "debit_nexus_token_with_txid": nexus_client.debit_nexus_token_with_txid,
  "process_helius_deposits": solana_client.process_helius_deposits,
  "mark_quarantined_txid": state_db.mark_quarantined_txid,
  "add_unprocessed_txid": state_db.add_unprocessed_txid,
  "should_attempt": state_db.should_attempt,
- "quarantine_usdd": nexus_client.quarantine_usdd,
- "get_usdd_send_amount_units": nexus_client.get_usdd_send_amount_units,
+ "quarantine_nexus_token": nexus_client.quarantine_nexus_token,
+ "get_nexus_send_amount_units": nexus_client.get_nexus_send_amount_units,
 }
 for f in os.listdir("src"):
     if not f.endswith(".py"): continue

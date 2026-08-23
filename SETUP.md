@@ -188,9 +188,48 @@ Optional but recommended:
 
 Optional chain-specific intervals: `SOLANA_POLL_INTERVAL`, `NEXUS_POLL_INTERVAL`.
 
+## Choosing the token pair
+
+This is a general Nexus↔Solana bridge; the USDC/USDD pairing is just the default. Pick any
+Solana SPL token and any Nexus token:
+
+```env
+SOLANA_TOKEN_MINT=<mint address of the Solana-side token>
+SOLANA_VAULT_ACCOUNT=<your SPL token account (ATA) for that mint>
+SOLANA_TOKEN_SYMBOL=USDC          # display only
+SOLANA_TOKEN_DECIMALS=6
+
+NEXUS_TOKEN_NAME=USDD             # the Nexus token this service mints/debits
+NEXUS_TOKEN_DECIMALS=6
+NEXUS_USDD_TREASURY_ACCOUNT=<your Nexus treasury account for that token>
+
+DEPOSIT_MEMO_PREFIX=nexus:        # memo users put on their Solana transfer
+```
+
+Leave `MIN_DEPOSIT_USDC` / `MIN_CREDIT_USDD` / `DUST_CREDIT_USDD` **blank** unless you have
+a reason: they then derive from your flat fee, which is correct in any denomination. A
+hardcoded `0.2` would mean 0.2 BTC on a wBTC bridge.
+
+The legacy names (`VAULT_USDC_ACCOUNT`, `USDC_MINT`, `USDC_DECIMALS`) still work, so
+existing `.env` files need no changes.
+
+> **Note on internal naming.** Source identifiers say `solana` and `nexus`, not `usdc`
+> and `usdd` — `send_solana_token()`, `poll_nexus_deposits()`, `MIN_DEPOSIT_SOLANA_UNITS`.
+> Three things deliberately keep the original spelling, because in each case the name is
+> not a code identifier but a value that already exists outside the process:
+>
+> | Kept as-is | Example | Why |
+> |---|---|---|
+> | Environment variables and the config attributes mirroring them | `VAULT_USDC_ACCOUNT` | Your `.env` already sets them; generic aliases exist alongside |
+> | State-database column names | `amount_usdc_units` | Renaming needs an `ALTER TABLE` over live fund records |
+> | Persisted row values with a safety property | the retry-budget keys, the debit reservation kind, the `USDD_STATUS_*` strings | A rename makes an in-flight swap written by the previous build invisible to the new one, which could re-debit it |
+>
+> The rationale is recorded in the header block of `src/state_db.py`, and
+> `tests/test_frozen_names.py` fails the build if any of them drifts.
+
 ## Solana Setup
 
-Creates the service's Solana keypair and the USDC token account (ATA) that holds vault liquidity.
+Creates the service's Solana keypair and the token account (ATA) that holds vault liquidity.
 
 **1. Create the vault keypair**
 ```bash
@@ -280,7 +319,34 @@ heartbeat update would fail and it would look like a total Nexus outage.
 The service mints with `finance/debit/token from=USDD`, so **its signature chain must own
 the USDD token**.
 
-**3. Create the heartbeat asset — REQUIRED, not optional**
+**3. Register the bridge on-chain — REQUIRED, not optional**
+
+The registration asset is both the service's **public description** and its
+**proof of life**. One asset declares the token pair, the vault and treasury that back
+it, the current fees and minimums, the deposit memo format, and a `last_poll_timestamp`
+the service refreshes every cycle. A user or auditor can read it and know what the bridge
+does, what it will charge, and whether it is online right now.
+
+```bash
+python3 register_service.py --show                    # what will be published, from .env
+python3 register_service.py --create --dry-run        # preview, spends nothing
+python3 register_service.py --create --name myBridgeHeartbeat
+python3 register_service.py --inspect myBridgeHeartbeat   # verify, or read someone else's
+```
+
+Set `SERVICE_PROVIDER`, `SERVICE_CONTACT` and the token-pair variables before creating —
+`format=basic` fixes the field set permanently, so an incomplete record means creating a
+new asset (another ~1 NXS). `--show` prints the record and its size against the register
+budget; `--create` refuses if the name already exists or the record is oversized.
+
+Published fields: `distordiaType`, `provider`, `contact`, `version`, `memo_prefix`,
+`nexus_token`, `nexus_treasury_address`, `solana_token`, `solana_vault_address`,
+`solana_vault_mint`, `fee_flat_to_nexus`, `fee_flat_to_solana`, `fee_bps`, `min_to_nexus`,
+`min_to_solana`, `status`, `last_poll_timestamp` and both waterlines. The service rewrites
+the mutable subset (status, terms, liveness) each cycle, so the on-chain terms stay
+truthful if you change your fees.
+
+**3b. Legacy heartbeat-only asset**
 
 The Solana poller reads its waterline from this asset. On a fresh install there is no
 asset and no local fallback, so **`poll_solana_deposits()` returns immediately and no USDC
@@ -306,11 +372,16 @@ validates this at startup and prints the field names the asset actually has. Kee
 
 **Pre-flight check** — run before first start and after any config change:
 ```bash
-python3 tests/test_smoke.py
+python3 tests/test_smoke.py         # imports every module, runs real functions on a temp DB
+python3 tests/test_frozen_names.py  # state-DB schema and persisted keys unchanged
+python3 tests/test_token_pair.py    # token pair is fully driven by config, not hardcoded
+python3 tests/test_session.py       # multiuser session handling in both node modes
+python3 tests/test_dashboard.py     # dashboard is read-only, XSS-safe, auth-enforced
 ```
-It imports every module, exercises the real functions against a temporary database and
-verifies call-site signatures. It catches configuration and schema faults that a syntax
-check cannot.
+`test_smoke` catches configuration and schema faults that a syntax check cannot.
+`test_frozen_names` is the one to run after **any** refactor that touches naming: it fails
+if a database column, a retry-budget key, a reservation kind or a lifecycle status string
+has drifted, all of which would break an upgrade over a database with swaps in flight.
 
 **Start**
 ```bash

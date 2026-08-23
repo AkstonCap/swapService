@@ -34,7 +34,7 @@ state_db.add_unprocessed_txid(txid="TX1", timestamp=int(time.time()) - 60, amoun
                               from_address="userAcct", to_address="treasury",
                               owner_from_address="own", status="refund pending",
                               amount_usdd_units=12_500_000)
-state_db.record_payout("usdc_send", 3_000_000, "sig1")
+state_db.record_payout("solana_send", 3_000_000, "sig1")
 state_db.save_metrics_snapshot(vault_usdc_units=100_000_000, circulating_usdd_units=99_000_000,
                                paused=False, payouts_24h_units=3_000_000,
                                fees_usdc_units=1_234_000, fees_usdd_units=0)
@@ -58,8 +58,8 @@ s = dashboard.api_summary()
 check("ratio computed from snapshot", s["ratio"] == 10101 / 10000, str(s["ratio"]))
 check("ratio never overstates backing", s["ratio"] <= 100 / 99 + 1e-12)
 check("vault/circulating scaled to token units",
-      s["vault_usdc"] == 100.0 and s["circulating_usdd"] == 99.0)
-check("payout total surfaced", s["payout_24h_usdc"] == 3.0)
+      s["vault_solana"] == 100.0 and s["circulating_nexus"] == 99.0)
+check("payout total surfaced", s["payout_24h_solana"] == 3.0)
 check("counts present", s["counts"]["unprocessed_sigs"] == 1)
 
 i = dashboard.api_issues()
@@ -67,7 +67,7 @@ check("issue rows found", i["counts"]["issues"] == 2, str(i["counts"]))
 check("issue carries its reference for chain lookup",
       any(x["reference"] == 4242 for x in i["issues"]))
 
-t = dashboard.api_transactions("pending_usdc", 10)
+t = dashboard.api_transactions("pending_solana", 10)
 check("transactions listed", t["count"] == 1)
 check("unknown source rejected", "error" in dashboard.api_transactions("../../etc/passwd"))
 

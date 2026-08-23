@@ -30,7 +30,7 @@ flowchart TD
     DebitUnverified -->|no reference recorded| ToBeQuarantined["to be quarantined"]
 
     DebitedAwaiting -->|">= min confirmations"| Processed["debit_confirmed ✓"]
-    DebitedAwaiting -->|"tx NEVER appeared and age > USDC_CONFIRM_TIMEOUT_SEC"| ToBeRefunded
+    DebitedAwaiting -->|"tx NEVER appeared and age > SOLANA_CONFIRM_TIMEOUT_SEC"| ToBeRefunded
 
     ToBeRefunded -->|"net ≤ 0"| ProcessedAsFees
     ToBeRefunded -->|"no/invalid sender address"| ToBeQuarantined
@@ -64,7 +64,7 @@ flowchart TD
 | **QuarantineConfirmed** | Quarantine finalized | `quarantined_sigs` | `"awaiting confirmation"` → `"quarantine_confirmed"` |
 | **QuarantineFailed** | Quarantine send failed | `unprocessed_sigs` | `"quarantine failed"` |
 
-> **Ambiguity is never treated as failure.** `debit_usdd_with_txid()` returns `(False, None)`
+> **Ambiguity is never treated as failure.** `debit_nexus_token_with_txid()` returns `(False, None)`
 > both when the CLI failed *and* when it succeeded but the response could not be parsed.
 > Refunding on that signal would mint USDD **and** return the USDC. Instead the row goes to
 > `debit unverified` and `resolve_unverified_debits()` asks the chain, keyed on the unique
@@ -100,7 +100,7 @@ flowchart TD
     Sending -->|"crash recovery: memo found"| Awaiting
 
     Awaiting -->|"stored sig finalized"| Processed["processed ✓"]
-    Awaiting -->|"not confirmed and age > USDC_CONFIRM_TIMEOUT_SEC"| Quarantined["quarantined — manual review ✗"]
+    Awaiting -->|"not confirmed and age > SOLANA_CONFIRM_TIMEOUT_SEC"| Quarantined["quarantined — manual review ✗"]
 
     TradeBal -->|asset appeared| Ready
     TradeBal -->|still missing| Collecting["collecting refund"]
@@ -166,8 +166,8 @@ alert is emitted.
 | Timeout | Config | Default | Applies to | Handler |
 |---------|--------|---------|-----------|---------|
 | Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **USDD→USDC only** | `process_unprocessed_txids()` P1 |
-| Debit-confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD (tx never appeared) | `check_unconfirmed_debits()` |
-| USDC-confirmation timeout | `USDC_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
+| Debit-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD (tx never appeared) | `check_unconfirmed_debits()` |
+| USDC-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
 | Ambiguous-debit grace | `DEBIT_VERIFY_GRACE_SEC` | 300s | USDC→USDD | `resolve_unverified_debits()` |
 | Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | USDC→USDD | `_process_stale_deposits()` |
 
@@ -234,12 +234,12 @@ left behind it is never seen again.
 |-----------|------|----------|
 | USDC→USDD polling | `src/swap_solana.py` | `poll_solana_deposits()` |
 | Waterline advance | `src/swap_solana.py` | `_advance_solana_waterline()` |
-| USDC→USDD processing | `src/solana_client.py` | `process_unprocessed_usdc_deposits()` |
-| Ambiguity resolution | `src/nexus_client.py` | `resolve_unverified_debits()`, `find_usdd_debit_by_reference()` |
-| USDC refunds / quarantine | `src/solana_client.py` | `process_usdc_deposits_refunding()`, `process_usdc_deposits_quarantine()` |
-| USDD→USDC polling | `src/swap_nexus.py` | `poll_nexus_usdd_deposits()` |
+| USDC→USDD processing | `src/solana_client.py` | `process_unprocessed_solana_deposits()` |
+| Ambiguity resolution | `src/nexus_client.py` | `resolve_unverified_debits()`, `find_nexus_debit_by_reference()` |
+| USDC refunds / quarantine | `src/solana_client.py` | `process_solana_deposits_refunding()`, `process_solana_deposits_quarantine()` |
+| USDD→USDC polling | `src/swap_nexus.py` | `poll_nexus_deposits()` |
 | USDD→USDC processing | `src/swap_nexus.py` | `process_unprocessed_txids()` |
-| USDD quarantine transfer | `src/nexus_client.py` | `quarantine_usdd()` |
+| USDD quarantine transfer | `src/nexus_client.py` | `quarantine_nexus_token()` |
 | Alerting | `src/alerts.py` | `critical()`, `warning()`, `info()` |
 | Startup recovery | `src/startup_recovery.py` | `perform_startup_recovery()` |
 

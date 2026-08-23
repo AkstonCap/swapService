@@ -3,7 +3,7 @@ import time
 import threading
 from . import config, state_db, alerts  # switched from JSON state to DB only
 from .swap_solana import poll_solana_deposits
-from .swap_nexus import poll_nexus_usdd_deposits, process_unprocessed_txids
+from .swap_nexus import poll_nexus_deposits, process_unprocessed_txids
 from .nexus_client import get_heartbeat_asset, update_heartbeat_asset
 
 _last_heartbeat = 0
@@ -154,20 +154,25 @@ def run():
     print("\n")
     print("🌐 Starting bidirectional swap service")
     print(f"   Solana RPC: {config.RPC_URL}")
-    print(f"   USDC Vault: {config.VAULT_USDC_ACCOUNT}")
-    print(f"   USDD Treasury: {config.NEXUS_USDD_TREASURY_ACCOUNT}")
+    print(f"   {config.SOLANA_TOKEN_SYMBOL} vault (Solana): {config.VAULT_USDC_ACCOUNT}")
+    print(f"   {config.NEXUS_TOKEN_NAME} treasury (Nexus): {config.NEXUS_USDD_TREASURY_ACCOUNT}")
+    print(f"   Bridging: {config.SOLANA_TOKEN_SYMBOL} (Solana, {config.SOLANA_TOKEN_DECIMALS}dp) "
+          f"<-> {config.NEXUS_TOKEN_NAME} (Nexus, {config.NEXUS_TOKEN_DECIMALS}dp)")
+    print(f"   Deposit memo format: {config.DEPOSIT_MEMO_PREFIX}<your {config.NEXUS_TOKEN_NAME} account>")
     print("   Monitoring:")
-    print("   - USDC → USDD: Solana deposits with memo nexus:<USDD_ACCOUNT>")
-    print("   - USDD → USDC: USDD deposits mapped via distordiaBridge asset (txid_toService + receival_account)\n")
+    print(f"   - {config.SOLANA_TOKEN_SYMBOL} → {config.NEXUS_TOKEN_NAME}: Solana deposits with memo "
+          f"{config.DEPOSIT_MEMO_PREFIX}<{config.NEXUS_TOKEN_NAME}_ACCOUNT>")
+    print(f"   - {config.NEXUS_TOKEN_NAME} → {config.SOLANA_TOKEN_SYMBOL}: credits mapped via asset "
+          f"(txid_toService + receival_account)\n")
 
     # A minimum at or below its flat fee means the user nets ~nothing while the swap is
     # still recorded as successful. config raises such minimums to 2x the fee; say so.
-    if getattr(config, "MIN_DEPOSIT_USDC_RAISED", False):
+    if getattr(config, "MIN_DEPOSIT_SOLANA_RAISED", False):
         print(f"   ⚠ MIN_DEPOSIT_USDC was below 2x the flat fee and has been raised to "
-              f"{config.MIN_DEPOSIT_USDC_UNITS} base units. Update your docs/.env to match.")
-    if getattr(config, "MIN_CREDIT_USDD_RAISED", False):
+              f"{config.MIN_DEPOSIT_SOLANA_UNITS} base units. Update your docs/.env to match.")
+    if getattr(config, "MIN_CREDIT_NEXUS_RAISED", False):
         print(f"   ⚠ MIN_CREDIT_USDD was below 2x the flat fee and has been raised to "
-              f"{config.MIN_CREDIT_USDD_UNITS} base units. Update your docs/.env to match.")
+              f"{config.MIN_CREDIT_NEXUS_UNITS} base units. Update your docs/.env to match.")
     if not (getattr(config, "ALERT_WEBHOOK_URL", None) or getattr(config, "ALERT_COMMAND", None)):
         print("   ⚠ No ALERT_WEBHOOK_URL/ALERT_COMMAND configured — backing pauses, unbacked-mint "
               "discrepancies and halted pollers will only appear on stdout.")
@@ -193,7 +198,7 @@ def run():
     except Exception as e:
         print(f"   ⚠ Heartbeat validation error: {e}")
 
-    # Startup balances summary (USDC vault + USDD circulating supply) with timeout protection
+    # Startup balances summary (Solana vault + Nexus circulating supply) with timeout protection
     try:
         from decimal import Decimal
         from . import solana_client, nexus_client
@@ -205,15 +210,16 @@ def run():
             except Exception:
                 return str(units)
 
-        usdc_units = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=5)
-        usdc_disp = _fmt_units(usdc_units, config.USDC_DECIMALS)
-        print(f"   USDC Vault Balance: {usdc_disp} USDC ({usdc_units} base) — {config.VAULT_USDC_ACCOUNT}")
+        solana_units = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), timeout_sec=5)
+        solana_disp = _fmt_units(solana_units, config.USDC_DECIMALS)
+        print(f"   Vault Balance: {solana_disp} {config.SOLANA_TOKEN_SYMBOL} "
+              f"({solana_units} base) — {config.VAULT_USDC_ACCOUNT}")
 
-        usdd_amount = _safe_call(nexus_client.get_circulating_usdd, timeout_sec=10)
+        nexus_amount = _safe_call(nexus_client.get_circulating_nexus_supply, timeout_sec=10)
         
         treas = getattr(config, 'NEXUS_USDD_TREASURY_ACCOUNT', '')
         suffix = f" — Treasury: {treas}" if treas else ""
-        print(f"   USDD Circulating Supply: {usdd_amount} USDD ){suffix}")
+        print(f"   Circulating Supply: {nexus_amount} {config.NEXUS_TOKEN_NAME}{suffix}")
     except Exception as e:
         print(f"   Startup metrics error: {e}")
 
@@ -225,17 +231,17 @@ def run():
     except Exception as e:
         print(f"   Startup recovery error: {e}")
 
-    # Balance reconciliation check (USDC→USDD direction) – detect potential double-mints
+    # Balance reconciliation check (Solana→Nexus direction) – detect potential double-mints
     try:
         from . import balance_reconciler
         bal_result = balance_reconciler.run_balance_reconciliation(dry_run=True)
         if bal_result.get('discrepancies'):
-            alerts.critical("unbacked_usdd_surplus",
-                            "addresses hold more USDD than their deposits justify (possible double-mint)",
+            alerts.critical("unbacked_nexus_surplus",
+                            "addresses hold more of the Nexus-side token than their deposits justify (possible double-mint)",
                             addresses=len(bal_result['discrepancies']),
-                            total_surplus_units=bal_result.get('total_surplus_usdd', 0))
+                            total_surplus_units=bal_result.get('total_surplus_nexus', 0))
         else:
-            print(f"   ✓ Balance check: All {bal_result.get('checked_addresses', 0)} USDD addresses match expected balances")
+            print(f"   ✓ Balance check: All {bal_result.get('checked_addresses', 0)} Nexus token addresses match expected balances")
     except Exception as e:
         print(f"   Balance reconciliation error: {e}")
 
@@ -269,14 +275,18 @@ def run():
                 from . import fees, nexus_client, solana_client
                 should_pause = _safe_call(fees.maintain_backing_and_bounds, timeout_sec=5)
                 
-                # Periodic backing reconcile: mint USDD to fees account to bring vault USDC back to 1:1 with circulating
+                # Periodic backing reconcile: mint the Nexus-side token to fees account to bring the vault back to 1:1 with circulating
                 now = int(time.time())
                 global _last_reconcile
                 if (now - _last_reconcile) >= max(60, config.BACKING_RECONCILE_INTERVAL_SEC):
                     try:
-                        vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=8)
-                        circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=8)
-                        surplus = max(0, vault_usdc - circ_usdd)
+                        vault_solana = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=8)
+                        circ_nexus = _safe_call(nexus_client.get_circulating_nexus_units, timeout_sec=8)
+                        # Surplus in SOLANA base units. The circulating figure is a Nexus-side
+                        # liability on a possibly different scale, so it is converted (rounded
+                        # up) before subtracting - otherwise a pair with mismatched decimals
+                        # reports surplus that does not exist and mints against it.
+                        surplus = max(0, vault_solana - config.nexus_units_to_solana(circ_nexus))
                         # Skip reconcile if any pending Solana deposits not yet swapped
                         pending_deposits = False
                         try:
@@ -287,13 +297,16 @@ def run():
                                 pending_deposits = True
                         except Exception:
                             pending_deposits = True  # fail safe
-                        threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_USDC_UNITS', 0)
+                        threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS', 0)
                         if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            # Both are base units; debit_usdd_with_txid formats for the CLI.
+                            # The debit is denominated on the Nexus side, so convert the
+                            # Solana-base surplus first (rounded down: never mint more than
+                            # the surplus backs).
+                            mint_units = config.solana_units_to_nexus(surplus)
                             ref = state_db.next_reference()
-                            res = _safe_call(nexus_client.debit_usdd_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(surplus), ref, timeout_sec=15)
+                            res = _safe_call(nexus_client.debit_nexus_token_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(mint_units), ref, timeout_sec=15) if mint_units > 0 else None
                             if res and res[0]:
-                                print(f"[reconcile] Minted {surplus} USDD to fees account (no pending deposits; surplus >= threshold {threshold_units})")
+                                print(f"[reconcile] Minted {mint_units} {config.NEXUS_TOKEN_NAME} base units to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()
                                 _last_reconcile = now
                     except Exception as e:
@@ -305,10 +318,10 @@ def run():
                         from . import balance_reconciler
                         bal_result = _safe_call(balance_reconciler.run_balance_reconciliation, dry_run=True, timeout_sec=15)
                         if bal_result.get('discrepancies'):
-                            alerts.critical("unbacked_usdd_surplus",
-                                            "addresses hold more USDD than their deposits justify (possible double-mint)",
+                            alerts.critical("unbacked_nexus_surplus",
+                                            "addresses hold more of the Nexus-side token than their deposits justify (possible double-mint)",
                                             addresses=len(bal_result['discrepancies']),
-                                            total_surplus_units=bal_result.get('total_surplus_usdd', 0))
+                                            total_surplus_units=bal_result.get('total_surplus_nexus', 0))
                     except Exception as e:
                         print(f"[balance_check] error: {e}")
                 
@@ -324,9 +337,11 @@ def run():
                 if now % max(5, METRICS_INTERVAL) == 0:  # coarse modulus trigger
                     metrics_start = time.time()
                     try:
-                        vault_usdc = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=5)
-                        circ_usdd = _safe_call(nexus_client.get_circulating_usdd_units, timeout_sec=5)
-                        ratio = (vault_usdc / circ_usdd) if circ_usdd else 0
+                        vault_solana = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=5)
+                        circ_nexus = _safe_call(nexus_client.get_circulating_nexus_units, timeout_sec=5)
+                        # Backing ratio compares the two sides, so both must be on one scale.
+                        circ_in_solana = config.nexus_units_to_solana(circ_nexus)
+                        ratio = (vault_solana / circ_in_solana) if circ_in_solana else 0
                         fees_state = _safe_call(fees.reconcile_accounting, timeout_sec=3)
                         
                         # Unprocessed stats from DB
@@ -336,18 +351,23 @@ def run():
                         unresolved = sum(1 for r in unproc_rows if r[5] == 'memo unresolved')
                         refund_pending = sum(1 for r in unproc_rows if r[5] == 'refund pending')
                         quarantined = sum(1 for r in unproc_rows if r[5] == 'quarantined')
-                        print(f"[metrics] vault_usdc={vault_usdc} circ_usdd={circ_usdd} ratio={ratio:.4f} unprocessed={len(unproc_rows)} ready={ready} debiting={debiting} unresolved={unresolved} refund_pending={refund_pending} quarantined={quarantined}")
+                        print(f"[metrics] vault_solana={vault_solana} circ_nexus={circ_nexus} ratio={ratio:.4f} unprocessed={len(unproc_rows)} ready={ready} debiting={debiting} unresolved={unresolved} refund_pending={refund_pending} quarantined={quarantined}")
 
                         # Persist for the operator dashboard (which never touches the chain).
                         try:
-                            f_usdc, f_usdd = state_db.get_total_fees_collected()
+                            f_solana, f_nexus = state_db.get_total_fees_collected()
                             state_db.save_metrics_snapshot(
-                                vault_usdc_units=vault_usdc,
-                                circulating_usdd_units=circ_usdd,
+                                vault_usdc_units=vault_solana,
+                                circulating_usdd_units=circ_nexus,
                                 paused=bool(should_pause),
                                 payouts_24h_units=state_db.payouts_since(86400),
-                                fees_usdc_units=f_usdc,
-                                fees_usdd_units=f_usdd,
+                                fees_usdc_units=f_solana,
+                                fees_usdd_units=f_nexus,
+                                # state_db deliberately does not import config, so it cannot
+                                # convert between the two sides' decimals itself. Pass the
+                                # ratio computed on a single scale rather than letting it
+                                # divide two differently-scaled columns.
+                                ratio_bps=int((vault_solana * 10000) // circ_in_solana) if circ_in_solana > 0 else None,
                             )
                         except Exception as e:
                             print(f"[metrics] snapshot save error: {e}")
@@ -360,7 +380,7 @@ def run():
                     # Instead run the pollers in paused mode: no new exposure, but money
                     # already owed to users keeps moving.
                     alerts.critical("backing_deficit_pause",
-                                    "vault USDC below the configured floor vs circulating USDD; "
+                                    "the vault below the configured floor vs circulating supply; "
                                     "new swaps paused, refunds and quarantine still running")
             except Exception as e:
                 print(f"Maintenance error: {e}")
@@ -370,7 +390,6 @@ def run():
             
             SOLANA_BUDGET = getattr(config, "SOLANA_POLL_TIME_BUDGET_SEC", 20)
             NEXUS_POLL_BUDGET = getattr(config, "NEXUS_POLL_TIME_BUDGET_SEC", 20)
-            UNPROCESSED_BUDGET = getattr(config, "UNPROCESSED_PROCESS_BUDGET_SEC", 30)
             NEXUS_PROCESS_BUDGET = getattr(config, "UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC", 30)
             
             if _stop_event.is_set():
@@ -384,7 +403,7 @@ def run():
             
             if _stop_event.is_set():
                 break
-            _run_with_watchdog(poll_nexus_usdd_deposits, "nexus_poll", NEXUS_POLL_BUDGET)
+            _run_with_watchdog(poll_nexus_deposits, "nexus_poll", NEXUS_POLL_BUDGET)
             
             if _stop_event.is_set():
                 break

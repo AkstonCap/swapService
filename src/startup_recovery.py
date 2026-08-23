@@ -3,8 +3,8 @@
 Responsibilities:
 1. Fetch waterlines from Nexus heartbeat asset
 2. Rebuild database from waterline timestamps (complete server wipeout recovery)
-3. Reconstruct processed_txids markers for USDD->USDC sends using on-chain memos
-4. Reconstruct refunded_sigs for USDC refunds via refundSig:<deposit_sig> memos
+3. Reconstruct processed_txids markers for Nexus->Solana sends using on-chain memos
+4. Reconstruct refunded_sigs for Solana refunds via refundSig:<deposit_sig> memos
 5. Seed reference counter if missing
 6. Provide summary of all actions taken
 
@@ -37,7 +37,7 @@ def _parse_decimal_amount(val) -> Decimal:
 
 
 def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
-    """Scan Nexus USDD deposits from waterline and rebuild unprocessed_txids table.
+    """Scan Nexus Nexus deposits from waterline and rebuild unprocessed_txids table.
     
     Returns dict with stats about deposits added.
     """
@@ -100,9 +100,9 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
                 continue
             
             # Check minimum threshold
-            # Dust floor, matching poll_nexus_usdd_deposits: credits above dust but below
+            # Dust floor, matching poll_nexus_deposits: credits above dust but below
             # the swap minimum are recorded (as fees) rather than skipped without trace.
-            min_threshold = config.DUST_CREDIT_USDD_UNITS / (10 ** config.USDD_DECIMALS)
+            min_threshold = config.DUST_CREDIT_NEXUS_UNITS / (10 ** config.USDD_DECIMALS)
             if amount_dec < min_threshold:
                 continue
             
@@ -156,12 +156,12 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
 
 
 def _rebuild_solana_from_waterline(waterline_timestamp: int) -> dict:
-    """Scan Solana USDC deposits from waterline and rebuild database tables.
+    """Scan Solana deposits from waterline and rebuild database tables.
     
     Rebuilds:
     - processed_txids markers (from nexus_txid: memos)
     - refunded_txids markers (from refundSig: memos)
-    - quarantined_sigs markers (from quarantinedSig: memos - USDC side, keyed by deposit sig)
+    - quarantined_sigs markers (from quarantinedSig: memos - Solana side, keyed by deposit sig)
     
     Returns dict with stats.
     """
@@ -230,7 +230,7 @@ def _rebuild_solana_from_waterline(waterline_timestamp: int) -> dict:
         if qsig in quarantined_sig_set:
             continue
         try:
-            # USDC-side quarantine: belongs in quarantined_sigs, keyed by deposit signature.
+            # Solana-side quarantine: belongs in quarantined_sigs, keyed by deposit signature.
             state_db.mark_quarantined_sig(
                 sig=qsig, timestamp=int(time.time()), from_address="",
                 amount_usdc_units=0, memo=None, quarantine_sig=None,

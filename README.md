@@ -233,6 +233,20 @@ Policy notes on USDD → USDC:
    - USDD→USDC path: the remaining refundable USDD is moved from the treasury to a self-owned Nexus USDD quarantine account.
    - In both cases, the event is recorded in the `quarantined_sigs` or `quarantined_txids` database table for manual inspection.
 
+## Finding and verifying a bridge
+
+Every operator publishes a single Nexus asset describing their bridge: the token pair, the
+vault and treasury backing it, current fees and minimums, the deposit memo format, and a
+liveness timestamp. Read it before sending funds:
+
+```bash
+python3 register_service.py --inspect <bridgeAssetName>
+# or directly:  nexus assets/get/asset name=<bridgeAssetName>
+```
+
+Check that `solana_vault_address` matches where you are about to send, that `status` is
+`online`, and that `last_poll_timestamp` is recent.
+
 ## Public Heartbeat (Free, On-Chain)
 
 The service updates a Nexus Asset after each poll cycle. **Anyone can read it on-chain to
@@ -286,6 +300,8 @@ documented in one place — **[`SETUP.md`](SETUP.md)** — so there is a single 
 | Nexus accounts + heartbeat asset | [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping) |
 | Every environment variable | [`.env.example`](.env.example) and [CONFIG.md](CONFIG.md) |
 | Running in production | [SETUP.md § Running](SETUP.md#running) |
+| Choosing the token pair | [SETUP.md § Choosing the token pair](SETUP.md#choosing-the-token-pair) |
+| Registering the bridge on-chain | `python3 register_service.py --show` → [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping) |
 | Monitoring dashboard | [SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard) |
 | Security hardening | [SECURITY.md](SECURITY.md) |
 

@@ -249,7 +249,8 @@ def main() -> int:
     env_nex_field = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
     env_treasury = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT", "")
     env_vault = os.getenv("VAULT_USDC_ACCOUNT", "")
-    env_mint = os.getenv("USDC_MINT", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+    env_mint = (os.getenv("SOLANA_TOKEN_MINT") or
+            os.getenv("USDC_MINT", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"))
     
     ap = ArgumentParser(
         description="Create Nexus heartbeat asset for swapService (per ASSET_STANDARD.md)"
