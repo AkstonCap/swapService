@@ -115,7 +115,8 @@ def reconcile_accounting(expected_total: int | None = None) -> dict:
 def process_fee_conversions():
     """Policy-driven rebalance when backing ratio > 1.
     - Check balances: SOL (lamports), the bridged token (vault ATA), NXS (via finance/get/balances), Nexus circulating supply.
-    - Only act if vault_solana > circ_nexus (backing ratio > 1).
+    - Only act if the vault exceeds circulating supply (backing ratio > 1), comparing
+      both on the Solana-side scale via config.nexus_units_to_solana().
     - Cases:
       1) Only SOL below min: spend the Solana-side token to buy SOL until ratio == 1 or SOL reaches target; if hit target first, move funds from the treasury to local to bring ratio to 1.
       2) Only NXS below min: move funds from the treasury to local to bring ratio to 1, then buy NXS using up to all the local Nexus account.
@@ -137,20 +138,32 @@ def process_fee_conversions():
         sol_target = int(config.SOL_TOPUP_TARGET_LAMPORTS or 0)
         nxs_min = int(config.NEXUS_NXS_TOPUP_MIN or 0)
 
-        # Compute backing surplus (vault - circulating)
-        surplus = max(0, vault_solana - circ_nexus)
+        # Compute backing surplus (vault - circulating), both in SOLANA base units.
+        # circ_nexus arrives in Nexus base units; subtracting it directly is only valid
+        # when both sides have the same decimals. Rounded up, so a rounding remainder can
+        # never invent surplus that is not really there.
+        circ_in_solana = config.nexus_units_to_solana(circ_nexus)
+        surplus = max(0, vault_solana - circ_in_solana)
         if surplus <= 0:
             return
 
         sol_below = lamports is not None and sol_min and lamports < sol_min
         nxs_below = nxs_min and nxs_units < nxs_min
 
-        # Helper to mint funds from the treasury to local up to delta
-        def _mint_nexus_to_local(units: int) -> int:
-            if units <= 0:
+        # Helper to mint funds from the treasury to local up to delta.
+        # Takes SOLANA base units, because every caller derives its argument from the
+        # surplus math above. The mint itself is denominated on the Nexus side, so the
+        # conversion happens here rather than at four call sites where forgetting it
+        # would mint supply the vault does not back. Rounded down: never mint more than
+        # the surplus actually covers.
+        def _mint_nexus_to_local(solana_units: int) -> int:
+            if solana_units <= 0:
                 return 0
-            ok = nexus_client.mint_nexus_to_local(units, "REBALANCE_TO_1")
-            return units if ok else 0
+            nexus_units = config.solana_units_to_nexus(solana_units)
+            if nexus_units <= 0:
+                return 0
+            ok = nexus_client.mint_nexus_to_local(nexus_units, "REBALANCE_TO_1")
+            return solana_units if ok else 0
 
         # Helper to buy SOL using Jupiter spending Solana base units (not exceeding surplus)
         def _buy_sol_with_solana_token(solana_units: int) -> int:
@@ -173,7 +186,7 @@ def process_fee_conversions():
             spent_solana = _buy_sol_with_solana_token(surplus)
             # Recompute surplus after spend
             vault_solana2 = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
-            surplus2 = max(0, vault_solana2 - circ_nexus)
+            surplus2 = max(0, vault_solana2 - circ_in_solana)
             # If SOL reached target before ratio 1, move funds from the treasury to local to reduce ratio to 1
             if sol_target and lamports is not None:
                 lamports = solana_client.get_vault_sol_balance()
@@ -201,7 +214,7 @@ def process_fee_conversions():
 
         # Neither below min: if ratio above 1.05 and the vault > threshold, move the Nexus-side token to local to bring back to 1
         # Use 5% margin on circulating (ceil): amount to move = min(surplus, vault_solana)
-        if vault_solana * 100 >= circ_nexus * 105 and vault_solana > config.BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS:
+        if vault_solana * 100 >= circ_in_solana * 105 and vault_solana > config.BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS:
             _mint_nexus_to_local(min(surplus, vault_solana))
             return
     except Exception as e:
@@ -224,13 +237,15 @@ def maintain_backing_and_bounds() -> bool:
     try:
         from . import solana_client, nexus_client
         vault_solana = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT), max_age_sec=5)
-        circ_nexus = nexus_client.get_circulating_nexus_units()
-        if circ_nexus > 0:
-            ratio_bps_deficit = int(((circ_nexus - vault_solana) * 10000) / circ_nexus) if vault_solana < circ_nexus else 0
+        # Compare like with like: circulating supply is a Nexus-side liability, the vault a
+        # Solana-side balance. Rounded up, so the pause triggers rather than being missed.
+        circ_in_solana = config.nexus_units_to_solana(nexus_client.get_circulating_nexus_units())
+        if circ_in_solana > 0:
+            ratio_bps_deficit = int(((circ_in_solana - vault_solana) * 10000) / circ_in_solana) if vault_solana < circ_in_solana else 0
         else:
             ratio_bps_deficit = 0
         # Pause if extreme deficit
-        if circ_nexus > 0 and (vault_solana * 100) < (config.BACKING_DEFICIT_PAUSE_PCT * circ_nexus):
+        if circ_in_solana > 0 and (vault_solana * 100) < (config.BACKING_DEFICIT_PAUSE_PCT * circ_in_solana):
             print("[safety] The vault < 90% of circulating supply; pausing for manual investigation")
             return True
     # With a single Solana vault account, there's no separate fee account to drain or cap.

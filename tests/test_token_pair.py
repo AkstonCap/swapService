@@ -90,7 +90,48 @@ print("\n[4] Minimums scale with the configured decimals")
 check("8dp minimum formatted correctly", "." in rec["min_to_nexus"] or rec["min_to_nexus"].isdigit(),
       rec["min_to_nexus"])
 
+print("\n[5] Backing math is correct when the two sides have DIFFERENT decimals")
+# The original pair was 6dp on both sides, so much of the backing math subtracted a Nexus
+# base-unit figure straight from a Solana one. That is off by 10**(difference) for any
+# other pair: a fully-backed vault can look 100x over-collateralised, and the surplus
+# logic mints against the phantom difference. Every cross-side comparison must convert.
+cfg8, _ = load({**BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
+                "SOLANA_TOKEN_DECIMALS": "8", "NEXUS_TOKEN_DECIMALS": "6",
+                "NEXUS_TOKEN_NAME": "BTCn", "NEXUS_USDD_TREASURY_ACCOUNT": "T"})
+
+# 1.5 tokens, expressed on each side
+solana_1_5 = 150_000_000    # 8dp
+nexus_1_5 = 1_500_000       # 6dp
+check("nexus->solana converts 1.5 exactly", cfg8.nexus_units_to_solana(nexus_1_5) == solana_1_5,
+      str(cfg8.nexus_units_to_solana(nexus_1_5)))
+check("solana->nexus converts 1.5 exactly", cfg8.solana_units_to_nexus(solana_1_5) == nexus_1_5,
+      str(cfg8.solana_units_to_nexus(solana_1_5)))
+check("exactly-backed vault has ratio 1, not 100",
+      cfg8.nexus_units_to_solana(nexus_1_5) == solana_1_5)
+check("no phantom surplus when exactly backed",
+      max(0, solana_1_5 - cfg8.nexus_units_to_solana(nexus_1_5)) == 0)
+
+# Rounding direction: a liability must never round down, or a deficit can read as solvent.
+cfg6, _ = load({**BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
+                "SOLANA_TOKEN_DECIMALS": "6", "NEXUS_TOKEN_DECIMALS": "8",
+                "NEXUS_TOKEN_NAME": "BTCn", "NEXUS_USDD_TREASURY_ACCOUNT": "T"})
+# 1.00000001 on an 8dp Nexus side does not fit in 6dp; it must round UP to 1.000001
+check("liability rounds up, never down", cfg6.nexus_units_to_solana(100_000_001) == 1_000_001,
+      str(cfg6.nexus_units_to_solana(100_000_001)))
+check("under-backed vault still reads as under-backed",
+      1_000_000 < cfg6.nexus_units_to_solana(100_000_001))
+# Minting must round DOWN so it can never exceed what the surplus backs.
+check("mint rounds down, never up", cfg6.solana_units_to_nexus(1_000_001) == 100_000_100,
+      str(cfg6.solana_units_to_nexus(1_000_001)))
+
+# Equal decimals must stay a no-op, so the common case is untouched.
+cfgEq, _ = load({**BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
+                 "SOLANA_TOKEN_DECIMALS": "6", "NEXUS_TOKEN_DECIMALS": "6",
+                 "NEXUS_TOKEN_NAME": "USDD", "NEXUS_USDD_TREASURY_ACCOUNT": "T"})
+check("equal decimals is an identity", cfgEq.nexus_units_to_solana(12_345_678) == 12_345_678
+      and cfgEq.solana_units_to_nexus(12_345_678) == 12_345_678)
+
 print()
 if fails:
     print(f"❌ {len(fails)} failed: {', '.join(fails)}"); sys.exit(1)
-print("✅ bridge is token-pair agnostic; registration record complete")
+print("✅ bridge is token-pair agnostic; registration record complete; backing math scale-correct")

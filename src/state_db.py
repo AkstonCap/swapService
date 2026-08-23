@@ -1586,60 +1586,14 @@ def get_processed_txids_as_dicts(limit: int = 1000) -> list[dict]:
     ]
 
 
-def write_unprocessed_txids(txids: list[dict]) -> None:
-    """Replace all unprocessed txids with provided list (compatible with old write_jsonl)."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM unprocessed_txids")
-    
-    for row in txids:
-        cursor.execute("""
-            INSERT OR REPLACE INTO unprocessed_txids 
-            (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            row.get("txid"),
-            row.get("ts"),
-            row.get("amount_usdd"),
-            row.get("from"),
-            row.get("to"),
-            row.get("owner"),
-            row.get("confirmations"),
-            row.get("comment"),
-            row.get("receival_account")
-        ))
-    
-    conn.commit()
-    conn.close()
-
-
-def add_processed_txid_from_dict(row: dict) -> None:
-    """Add processed txid from dict (compatible with old append_jsonl)."""
-    mark_processed_txid(
-        txid=row.get("txid"),
-        timestamp=row.get("ts"),
-        amount_usdd=row.get("amount_usdd"),
-        from_address=row.get("from"),
-        to_address=row.get("to"),
-        owner=row.get("owner"),
-        sig=row.get("sig"),
-        status=row.get("comment")
-    )
-
-
-def add_unprocessed_txid_from_dict(row: dict) -> None:
-    """Add unprocessed txid from dict (compatible with old append_jsonl)."""
-    add_unprocessed_txid(
-        txid=row.get("txid"),
-        timestamp=row.get("ts"),
-        amount_usdd=row.get("amount_usdd"),
-        from_address=row.get("from"),
-        to_address=row.get("to"),
-        owner_from_address=row.get("owner"),
-        confirmations_credit=row.get("confirmations"),
-        status=row.get("comment")
-    )
-
+# Removed: write_unprocessed_txids(), add_processed_txid_from_dict() and
+# add_unprocessed_txid_from_dict() - leftovers from the JSONL-to-SQLite migration with no
+# callers. Each rebuilt rows from a dict that had no `amount_usdd_units` and no `sig`, so
+# calling one would drop the exact credited amount and, for write_unprocessed_txids(),
+# DELETE the whole in-flight queue and lose the payout signature of every swap awaiting
+# confirmation - which the confirmation pass needs to tell "already paid" from "never sent".
+# Rows are written through add_unprocessed_txid()/update_unprocessed_txid(), which carry
+# every column and update in place.
 
 # Add similar functions for other state (e.g., nexus txids, fees)
 
@@ -1648,13 +1602,25 @@ def add_unprocessed_txid_from_dict(row: dict) -> None:
 
 def save_metrics_snapshot(vault_usdc_units: int | None, circulating_usdd_units: int | None,
                           paused: bool = False, payouts_24h_units: int | None = None,
-                          fees_usdc_units: int | None = None, fees_usdd_units: int | None = None):
-    """Persist the latest loop metrics for the dashboard to read."""
+                          fees_usdc_units: int | None = None, fees_usdd_units: int | None = None,
+                          ratio_bps: int | None = None):
+    """Persist the latest loop metrics for the dashboard to read.
+
+    The two amount columns are on DIFFERENT scales - the vault in Solana base units, the
+    circulating supply in Nexus base units - so dividing one by the other is only valid
+    when the pair happens to share its decimals. This module has no access to config (by
+    design), so the caller passes `ratio_bps` already computed on a single scale. The
+    fallback below is kept only for callers that predate the argument, and is correct
+    exactly when the decimals match.
+    """
     import time as _time
     try:
         v = int(vault_usdc_units or 0)
         c = int(circulating_usdd_units or 0)
-        ratio_bps = int((v * 10000) // c) if c > 0 else None
+        if ratio_bps is None:
+            ratio_bps = int((v * 10000) // c) if c > 0 else None
+        else:
+            ratio_bps = int(ratio_bps)
     except Exception:
         v, c, ratio_bps = 0, 0, None
     conn = sqlite3.connect(DB_PATH)

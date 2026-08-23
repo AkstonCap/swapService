@@ -282,7 +282,11 @@ def run():
                     try:
                         vault_solana = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=8)
                         circ_nexus = _safe_call(nexus_client.get_circulating_nexus_units, timeout_sec=8)
-                        surplus = max(0, vault_solana - circ_nexus)
+                        # Surplus in SOLANA base units. The circulating figure is a Nexus-side
+                        # liability on a possibly different scale, so it is converted (rounded
+                        # up) before subtracting - otherwise a pair with mismatched decimals
+                        # reports surplus that does not exist and mints against it.
+                        surplus = max(0, vault_solana - config.nexus_units_to_solana(circ_nexus))
                         # Skip reconcile if any pending Solana deposits not yet swapped
                         pending_deposits = False
                         try:
@@ -295,11 +299,14 @@ def run():
                             pending_deposits = True  # fail safe
                         threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS', 0)
                         if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            # Both are base units; debit_nexus_token_with_txid formats for the CLI.
+                            # The debit is denominated on the Nexus side, so convert the
+                            # Solana-base surplus first (rounded down: never mint more than
+                            # the surplus backs).
+                            mint_units = config.solana_units_to_nexus(surplus)
                             ref = state_db.next_reference()
-                            res = _safe_call(nexus_client.debit_nexus_token_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(surplus), ref, timeout_sec=15)
+                            res = _safe_call(nexus_client.debit_nexus_token_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(mint_units), ref, timeout_sec=15) if mint_units > 0 else None
                             if res and res[0]:
-                                print(f"[reconcile] Minted {surplus} {config.NEXUS_TOKEN_NAME} to fees account (no pending deposits; surplus >= threshold {threshold_units})")
+                                print(f"[reconcile] Minted {mint_units} {config.NEXUS_TOKEN_NAME} base units to fees account (no pending deposits; surplus >= threshold {threshold_units})")
                                 print()
                                 _last_reconcile = now
                     except Exception as e:
@@ -332,7 +339,9 @@ def run():
                     try:
                         vault_solana = _safe_call(solana_client.get_token_account_balance, str(config.VAULT_USDC_ACCOUNT), max_age_sec=5, timeout_sec=5)
                         circ_nexus = _safe_call(nexus_client.get_circulating_nexus_units, timeout_sec=5)
-                        ratio = (vault_solana / circ_nexus) if circ_nexus else 0
+                        # Backing ratio compares the two sides, so both must be on one scale.
+                        circ_in_solana = config.nexus_units_to_solana(circ_nexus)
+                        ratio = (vault_solana / circ_in_solana) if circ_in_solana else 0
                         fees_state = _safe_call(fees.reconcile_accounting, timeout_sec=3)
                         
                         # Unprocessed stats from DB
@@ -354,6 +363,11 @@ def run():
                                 payouts_24h_units=state_db.payouts_since(86400),
                                 fees_usdc_units=f_solana,
                                 fees_usdd_units=f_nexus,
+                                # state_db deliberately does not import config, so it cannot
+                                # convert between the two sides' decimals itself. Pass the
+                                # ratio computed on a single scale rather than letting it
+                                # divide two differently-scaled columns.
+                                ratio_bps=int((vault_solana * 10000) // circ_in_solana) if circ_in_solana > 0 else None,
                             )
                         except Exception as e:
                             print(f"[metrics] snapshot save error: {e}")

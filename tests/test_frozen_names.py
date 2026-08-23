@@ -196,14 +196,11 @@ print("\n[4] Every documented environment variable is still read")
 # expectation in the same pass and still pass - which is exactly what happened once while
 # this file was being written. Cross-checking against a non-Python file closes that hole:
 # the substitution would have to corrupt both a .py and a .env to go unnoticed.
+import glob
+sources = sorted(glob.glob(os.path.join(ROOT, "src", "*.py")) +
+                 glob.glob(os.path.join(ROOT, "*.py")))
 cfg_src = open(os.path.join(ROOT, "src", "config.py")).read()
-extra_sources = ""
-for name in ("dashboard.py", "state_db.py"):
-    extra_sources += open(os.path.join(ROOT, "src", name)).read()
-for name in ("quarantine_viewer.py", "create_heartbeat_asset.py", "register_service.py"):
-    path = os.path.join(ROOT, name)
-    if os.path.exists(path):
-        extra_sources += open(path).read()
+extra_sources = "".join(open(f).read() for f in sources)
 
 env_example = os.path.join(ROOT, ".env.example")
 documented = []

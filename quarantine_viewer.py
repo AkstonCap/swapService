@@ -56,13 +56,26 @@ def format_timestamp(ts: int | None) -> str:
         return str(ts)
 
 
+def _trim_trailing_zeros(text: str) -> str:
+    """Drop trailing fractional zeros, and only those.
+
+    Stripping unconditionally eats significant digits when there is no decimal point:
+    for a 0-decimal token `"1000".rstrip("0")` is `"1"`, so the operator's quarantine
+    table would understate the amount by three orders of magnitude - on the screen used
+    to authorise manual fund recovery.
+    """
+    if "." not in text:
+        return text
+    return text.rstrip("0").rstrip(".") or "0"
+
+
 def format_amount(units: int | None, decimals: int = 6, ticker: str = "") -> str:
     """Format base units to human-readable token amount."""
     if units is None:
         return "N/A"
     try:
         amount = Decimal(units) / (Decimal(10) ** decimals)
-        formatted = f"{amount:.{decimals}f}".rstrip('0').rstrip('.')
+        formatted = _trim_trailing_zeros(f"{amount:.{decimals}f}")
         return f"{formatted} {ticker}".strip()
     except Exception:
         return str(units)
@@ -102,7 +115,7 @@ def format_token_amount(amount, ticker: str = "", decimals: int | None = None) -
     decs = NXS_DECIMALS if decimals is None else int(decimals)
     try:
         q = Decimal(str(amount)).quantize(Decimal(10) ** -decs)
-        return f"{format(q, 'f').rstrip('0').rstrip('.') or '0'} {ticker}".strip()
+        return f"{_trim_trailing_zeros(format(q, 'f'))} {ticker}".strip()
     except Exception:
         return str(amount)
 

@@ -96,7 +96,7 @@ Legend:
 | DUST_CREDIT_USDD | decimal | 0.01 | Anti-DoS dust floor. Credits below this are ignored entirely (no state, no accounting). Credits between this and MIN_CREDIT_USDD are recorded so the funds remain traceable. |
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
-| NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | Deducted on Nexus refunds (covers on‑chain cost). |
+| NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | **Currently inert.** Intended to cover the on-chain cost of a Nexus refund, but no code path deducts it: all four refund sites return the full credited amount, so the operator absorbs the Nexus transaction cost. Set it if you like — nothing reads it beyond the unused `_apply_congestion_fee()` helper. |
 
 ## Exposure Caps & Alerting
 | Var | Type | Default | Notes |

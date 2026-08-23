@@ -79,6 +79,46 @@ USDD_DECIMALS = int(_first_env("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", default=
 SOLANA_TOKEN_DECIMALS = USDC_DECIMALS
 NEXUS_TOKEN_DECIMALS = USDD_DECIMALS
 
+
+# --- Cross-side unit conversion ------------------------------------------------------
+# The two sides of the bridge back each other 1:1 in TOKEN units, but they are stored and
+# moved in BASE units, and the two scales are only the same when the decimals happen to
+# match. The original USDC/USDD pair was 6dp on both sides, so a lot of the backing math
+# subtracted one directly from the other. That is wrong for any other pair: with an 8dp
+# Solana token against a 6dp Nexus token, a fully-backed vault looks 100x over-collateralised,
+# and the surplus logic would mint unbacked supply against the difference.
+#
+# Anything comparing the two sides must convert first, through these helpers.
+
+def rescale_units(amount, src_decimals: int, dst_decimals: int, round_up: bool = False) -> int:
+    """Re-express a base-unit amount from one token's decimals into another's.
+
+    `round_up` matters when scaling DOWN, because the remainder cannot be represented.
+    Pass it when the amount is a liability being compared against backing: rounding the
+    liability up keeps the comparison conservative, so a rounding remainder can never make
+    an under-collateralised vault look solvent.
+    """
+    amount = int(amount or 0)
+    if src_decimals == dst_decimals:
+        return amount
+    if src_decimals < dst_decimals:
+        return amount * (10 ** (dst_decimals - src_decimals))
+    divisor = 10 ** (src_decimals - dst_decimals)
+    if round_up:
+        return -(-amount // divisor)  # ceiling division, correct for negatives too
+    return amount // divisor
+
+
+def nexus_units_to_solana(units, round_up: bool = True) -> int:
+    """Nexus base units -> Solana base units. Defaults to the conservative direction:
+    the usual caller is measuring circulating supply (a liability) against the vault."""
+    return rescale_units(units, USDD_DECIMALS, USDC_DECIMALS, round_up=round_up)
+
+
+def solana_units_to_nexus(units, round_up: bool = False) -> int:
+    """Solana base units -> Nexus base units."""
+    return rescale_units(units, USDC_DECIMALS, USDD_DECIMALS, round_up=round_up)
+
 # Nexus
 NEXUS_CLI = os.getenv("NEXUS_CLI_PATH", "./nexus")
 NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")

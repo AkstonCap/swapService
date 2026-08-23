@@ -110,7 +110,15 @@ def _quarantine_txid(r: dict, reason: str = "") -> None:
 
 
 def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
-    """Subtract a fixed Nexus congestion fee (configured in Nexus token units)."""
+    """Subtract a fixed Nexus congestion fee (configured in Nexus token units).
+
+    NOT WIRED IN. Nothing calls this, so NEXUS_CONGESTION_FEE_USDD has no effect and every
+    Nexus refund returns the full credited amount, with the operator absorbing the on-chain
+    cost. Deducting it is a change to what users receive, so it is left as an explicit
+    operator decision rather than switched on silently. Wire it into the four
+    refund_nexus_token() call sites below to activate, or delete both if the policy is to
+    refund in full.
+    """
     try:
         fee_dec = _parse_decimal_amount(getattr(config, "NEXUS_CONGESTION_FEE_USDD", "0"))
     except Exception:
@@ -283,8 +291,13 @@ def process_unprocessed_txids(paused: bool = False):
                 if not recv_account:
                     continue  # Will be resolved in Priority 1 next cycle
                 
-                # Calculate net Solana amount after fees
-                amt_nexus = _parse_decimal_amount(r.get("amount_usdd"))
+                # Calculate net Solana amount after fees.
+                # Derive from the exact integer column, not the legacy REAL one: this is the
+                # figure that decides how much leaves the vault, and every refund and
+                # quarantine path already reads it through _row_amount_units. Reading the
+                # float here made the payout the one money decision in this module still
+                # exposed to a binary round-trip.
+                amt_nexus = Decimal(_row_amount_units(r)) / (Decimal(10) ** config.USDD_DECIMALS)
                 flat_fee = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDC", "0.1"))
                 dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 10))
                 dyn_fee = (amt_nexus * Decimal(dyn_bps)) / Decimal(10000)
@@ -415,8 +428,10 @@ def process_unprocessed_txids(paused: bool = False):
                         # Legacy/crash fallback: recover the signature by its memo.
                         found_sig = solana_client.find_signature_with_memo(f"nexus_txid:{txid}")
                     if found_sig:
-                        # Solana send confirmed - mark as processed
-                        amt_nexus = _parse_decimal_amount(r.get("amount_usdd"))
+                        # Solana send confirmed - mark as processed. Same exact-column
+                        # derivation as the send path, so the archived amount matches the
+                        # one the payout was computed from.
+                        amt_nexus = Decimal(_row_amount_units(r)) / (Decimal(10) ** config.USDD_DECIMALS)
                         state_db.mark_processed_txid(
                             txid=txid,
                             timestamp=r.get("ts"),

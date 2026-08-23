@@ -11,11 +11,9 @@ def _log(event: str, **fields):
 
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
-    if src_decimals == dst_decimals:
-        return int(amount)
-    if src_decimals < dst_decimals:
-        return int(amount) * (10 ** (dst_decimals - src_decimals))
-    return int(amount) // (10 ** (src_decimals - dst_decimals))
+    """Deprecated alias for `config.rescale_units`, kept so the two implementations of
+    cross-decimal scaling cannot drift apart."""
+    return config.rescale_units(amount, src_decimals, dst_decimals)
 
 
 def _advance_solana_waterline(current_wline, poll_start, fetch_ok: bool, deferred_ts=None) -> None:

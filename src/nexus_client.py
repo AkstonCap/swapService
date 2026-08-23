@@ -339,11 +339,14 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
 
         # Bug #10 fix: Track fees when debit is confirmed.
-        # Both sides are base units (both sides share decimals at 1:1 parity), so this
-        # is exact integer arithmetic - no float scaling.
+        # The fee is what the deposit gave up: deposit in, minus what was credited out.
+        # Those are on different scales (Solana base units vs Nexus base units), so the
+        # credited side is converted first - rounded up, so the recorded fee is never
+        # overstated. Exact integer arithmetic throughout, no float scaling.
         try:
             solana_in_base = int(amount_usdc_units or 0)
-            fee_solana_units = max(0, solana_in_base - int(nexus_out_base))
+            credited_in_solana_base = config.nexus_units_to_solana(int(nexus_out_base))
+            fee_solana_units = max(0, solana_in_base - credited_in_solana_base)
             if fee_solana_units > 0:
                 state_db.add_fee_entry(
                     sig=sig,
