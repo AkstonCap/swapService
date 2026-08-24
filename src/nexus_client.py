@@ -1,5 +1,6 @@
 import json
 import subprocess
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any
 from . import config
@@ -238,36 +239,75 @@ def debit_nexus_token_with_txid(to_addr: str, amount_usdd_units: int, reference:
     return (True, str(txid) if txid else None)
 
 
-def get_transactions_confirmations(txids, limit: int = 200) -> dict:
-    """Batch: {txid: confirmations} in ONE CLI call.
+@dataclass(frozen=True)
+class BatchLookup:
+    """Values returned by a bounded chain lookup plus proof of completeness.
 
-    The per-txid version below fetched the *entire* Nexus transaction history (no limit)
-    and did so once per unconfirmed row, so N pending debits meant N unbounded fetches.
+    Missing values are authoritative only when ``complete`` is true. A transport error,
+    malformed response, or exhausted page budget is an unknown outcome and must never
+    authorize a retry or refund.
     """
+
+    values: dict
+    complete: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AssetLookup:
+    """Receival-asset lookup with an explicit complete/incomplete outcome."""
+
+    asset: dict | None
+    complete: bool
+    reason: str | None = None
+
+
+def get_transactions_confirmations(txids, limit: int = 200) -> BatchLookup:
+    """Batch confirmations without confusing an incomplete scan with absence."""
     wanted = {str(t) for t in txids if t}
     out: dict = {}
     if not wanted:
-        return out
-    cmd = [config.NEXUS_CLI, "finance/transactions/token/txid,confirmations",
-           f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc", f"limit={int(limit)}"]
-    try:
-        code, cli_out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
-        if code != 0:
-            return out
-        data = _parse_json_lenient(cli_out)
-        txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-        for tx in txs or []:
-            if not isinstance(tx, dict):
-                continue
-            t = str(tx.get("txid") or "")
-            if t in wanted and tx.get("confirmations") is not None:
-                try:
-                    out[t] = int(tx.get("confirmations"))
-                except Exception:
+        return BatchLookup(out, True)
+
+    page_size = max(1, int(limit))
+    max_pages = max(1, int(getattr(config, "NEXUS_LOOKUP_MAX_PAGES", 5)))
+    for page in range(max_pages):
+        cmd = [config.NEXUS_CLI, "finance/transactions/token/txid,confirmations",
+               f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc",
+               f"limit={page_size}", f"offset={page * page_size}"]
+        try:
+            code, cli_out, err = _run(
+                cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
+            )
+            if code != 0:
+                return BatchLookup(out, False, "cli_error")
+            data = _parse_json_lenient(cli_out)
+            if isinstance(data, dict) and data.get("error"):
+                return BatchLookup(out, False, "api_error")
+            if data is None:
+                return BatchLookup(out, False, "invalid_response")
+            txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+            for tx in txs:
+                if not isinstance(tx, dict):
                     continue
-    except Exception as e:
-        print(f"Error batch-fetching confirmations: {e}")
-    return out
+                t = str(tx.get("txid") or "")
+                if t in wanted and tx.get("confirmations") is not None:
+                    try:
+                        out[t] = int(tx.get("confirmations"))
+                    except Exception:
+                        continue
+            if wanted.issubset(out):
+                return BatchLookup(out, True)
+            if len(txs) < page_size:
+                # A negative history scan is not a durable proof of non-execution: the
+                # endpoint is live and offset pagination has no snapshot guarantee.
+                # Only a positive txid/reference match is actionable automatically.
+                return BatchLookup(out, False, "not_found_unverified")
+        except Exception as e:
+            print(f"Error batch-fetching confirmations: {e}")
+            return BatchLookup(out, False, "exception")
+
+    return BatchLookup(out, False, "pagination_truncated")
 
 
 def get_transaction_confirmations(txid: str) -> int | None:
@@ -289,13 +329,10 @@ def get_transaction_confirmations(txid: str) -> int | None:
 
 
 def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
-    """Check unconfirmed Nexus debits and handle confirmations or timeouts.
-    
-    Critical fix: Added timeout handling for stuck 'debited, awaiting confirmation' entries.
-    If a debit doesn't confirm within SOLANA_CONFIRM_TIMEOUT_SEC, it's marked for refund.
-    
-    IMPORTANT: Only refund if transaction was NEVER found (confirmations is None).
-    If transaction exists with confirmations > 0, the debit happened - do NOT refund!
+    """Confirm positively observed Nexus debits; ambiguity stays pending.
+
+    A negative history lookup is not proof of non-execution, so this pass never refunds.
+    Missing txids and missing lookup values require manual resolution.
     """
     sigs = state_db.filter_unprocessed_sigs({
         'status': 'debited, awaiting confirmation',
@@ -307,24 +344,21 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     processed_count = 0
     time_start = time.monotonic()
     current_time = time_start
-    confirm_timeout_sec = int(getattr(config, "SOLANA_CONFIRM_TIMEOUT_SEC", 600))
     # One bounded lookup for the whole batch instead of an unbounded fetch per row.
-    conf_map = get_transactions_confirmations([row[6] for row in sigs if row[6]])
+    confirmation_lookup = get_transactions_confirmations([row[6] for row in sigs if row[6]])
 
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
+        if not txid:
+            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} has no txid; manual resolution required")
+            continue
+
+        confirmations = confirmation_lookup.values.get(str(txid))
         
-        confirmations = conf_map.get(str(txid)) if txid else None
-        
-        # Case 1: Transaction NOT found at all - may have been dropped or failed silently
+        # A missing value is never proof that the debit did not execute.
         if confirmations is None:
-            # Check if we've waited too long for this debit to appear
-            age_sec = int(time.time()) - int(timestamp or 0)
-            if age_sec > confirm_timeout_sec:
-                # Timeout - mark for refund (transaction never appeared)
-                state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                print(f"[DEBIT_TIMEOUT] sig={sig} txid={txid} age={age_sec}s > {confirm_timeout_sec}s - transaction never found, marking for refund")
-                processed_count += 1
+            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} "
+                  f"lookup={confirmation_lookup.reason or 'not_observed'}")
             continue
         
         # Case 2: Transaction exists but not enough confirmations yet
@@ -382,10 +416,7 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     parse. For each row we look up the unique per-attempt reference on-chain:
 
       found            -> the debit DID execute; record the txid and proceed (never refund)
-      not found + young -> still within the grace window; leave it alone
-      not found + old   -> the debit definitively did not execute with that reference,
-                           so it is safe to retry (a retry allocates a NEW reference).
-                           After MAX_ACTION_ATTEMPTS, fall back to refunding.
+      not found / failed / incomplete -> leave pending for manual resolution
 
     Returns the number of rows whose state was resolved.
     """
@@ -394,11 +425,10 @@ def resolve_unverified_debits(limit: int = 200) -> int:
         return 0
 
     # One lookup for the whole batch instead of one subprocess per row.
-    found_map = find_nexus_debits_by_references([r[7] for r in rows if r[7] is not None])
+    reference_lookup = find_nexus_debits_by_references(
+        [r[7] for r in rows if r[7] is not None]
+    )
 
-    grace = int(getattr(config, "DEBIT_VERIFY_GRACE_SEC", 300))
-    max_attempts = int(getattr(config, "MAX_ACTION_ATTEMPTS", 3))
-    now = int(time.time())
     resolved = 0
 
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference in rows:
@@ -411,7 +441,7 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 resolved += 1
                 continue
 
-            found_txid = found_map.get(str(reference).strip())
+            found_txid = reference_lookup.values.get(str(reference).strip())
             if found_txid:
                 state_db.update_unprocessed_sig_txid(sig, found_txid)
                 state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
@@ -420,22 +450,9 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 resolved += 1
                 continue
 
-            attempted_at = state_db.get_attempt_last_timestamp(state_db.debit_attempt_key(sig)) or int(timestamp or 0)
-            if now - attempted_at <= grace:
-                continue  # still settling; check again next cycle
-
-            attempts = state_db.get_attempt_count(state_db.debit_attempt_key(sig))
-            state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
-            if attempts >= max_attempts:
-                state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} not on-chain after "
-                      f"{attempts} attempts; refunding")
-            else:
-                # Safe to retry: this reference provably never landed.
-                state_db.update_unprocessed_sig_status(sig, "ready for processing")
-                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} not on-chain after {grace}s; "
-                      f"retrying (attempt {attempts})")
-            resolved += 1
+            print(f"[DEBIT_RESOLVE_HOLD] sig={sig} ref={reference} "
+                  f"lookup={reference_lookup.reason or 'not_observed'}")
+            continue
         except Exception as e:
             print(f"[DEBIT_RESOLVE] error for sig={sig}: {e}")
             continue
@@ -609,10 +626,12 @@ def find_asset_receival_account_by_sig(sig: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Optional[Dict[str, Any]]:
-    """Query assets by txid_toService and owner; return { receival_account } if present.
-    Used for Nexus->Solana: results.txid_toService=<txid> AND results.owner=<owner>.
-    """
+def find_asset_receival_account_by_txid_and_owner(
+    txid: str, owner: str
+) -> AssetLookup:
+    """Query the receival mapping without collapsing lookup failure into absence."""
+    if not txid or not owner:
+        return AssetLookup(None, False, "invalid_request")
     try:
         cmd = [
             config.NEXUS_CLI,
@@ -624,20 +643,35 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
         ]
         code, out, err = _run(cmd, timeout=15)
         if code != 0:
-            return None
+            return AssetLookup(None, False, "cli_error")
         data = _parse_json_lenient(out)
+        if isinstance(data, dict) and data.get("error"):
+            return AssetLookup(None, False, "api_error")
+        if data is None or not isinstance(data, (list, dict)):
+            return AssetLookup(None, False, "invalid_response")
         raw = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
         items = []
         for a in raw or []:
             if not isinstance(a, dict):
-                continue
-            res = a.get("results") or a
+                return AssetLookup(None, False, "invalid_item")
+            res = a.get("results") if "results" in a else a
             if not isinstance(res, dict):
-                continue
-            core = res.get("asset") if isinstance(res.get("asset"), dict) else res
+                return AssetLookup(None, False, "invalid_results")
+            if "asset" in res and not isinstance(res.get("asset"), dict):
+                return AssetLookup(None, False, "invalid_asset")
+            core = res.get("asset") if "asset" in res else res
+            if not isinstance(core, dict):
+                return AssetLookup(None, False, "invalid_asset")
+            mapped_txid = core.get("txid_toService")
+            mapped_owner = core.get("owner")
+            receival = core.get("receival_account")
+            if not mapped_txid or not mapped_owner or not receival:
+                return AssetLookup(None, False, "missing_required_field")
+            if str(mapped_txid) != str(txid) or str(mapped_owner) != str(owner):
+                return AssetLookup(None, False, "query_mismatch")
             items.append(core)
         if not items:
-            return None
+            return AssetLookup(None, True, "not_found")
         def _key(r):
             try:
                 c = r.get("created")
@@ -651,55 +685,74 @@ def find_asset_receival_account_by_txid_and_owner(txid: str, owner: str) -> Opti
                 return (0, 0)
         items.sort(key=_key)
         best = items[0]
-        return {"receival_account": best.get("receival_account"), "owner": best.get("owner")}
+        return AssetLookup(
+            {"receival_account": best.get("receival_account"), "owner": best.get("owner")},
+            True,
+        )
     except Exception:
-        return None
+        return AssetLookup(None, False, "exception")
 
 
-def find_nexus_debits_by_references(references, limit: int = 100) -> dict:
-    """Batch form of find_nexus_debit_by_reference: {reference_str: txid} for those found.
-
-    One CLI invocation for the whole set. The per-row version spawned a Nexus CLI
-    subprocess for each unverified debit, each pulling the same page of transactions.
-    """
+def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup:
+    """Find debit references while preserving whether missing values are authoritative."""
     wanted = {str(r).strip() for r in references if r is not None}
     out: dict = {}
     if not wanted:
-        return out
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.to,contracts.amount",
-        f"name={config.NEXUS_TOKEN_NAME}",
-        "sort=timestamp",
-        "order=desc",
-        f"limit={int(limit)}",
-    ]
-    try:
-        code, cli_out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
-        if code != 0:
-            print("Nexus: batch debit-by-reference lookup error:", err or cli_out)
-            return out
-        data = _parse_json_lenient(cli_out)
-        txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-        for tx in txs or []:
-            if not isinstance(tx, dict):
-                continue
-            for c in (tx.get("contracts") or []):
-                if not isinstance(c, dict):
+        return BatchLookup(out, True)
+
+    page_size = max(1, int(limit))
+    max_pages = max(1, int(getattr(config, "NEXUS_LOOKUP_MAX_PAGES", 5)))
+    for page in range(max_pages):
+        cmd = [
+            config.NEXUS_CLI,
+            "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.to,contracts.amount",
+            f"name={config.NEXUS_TOKEN_NAME}",
+            "sort=timestamp",
+            "order=desc",
+            f"limit={page_size}",
+            f"offset={page * page_size}",
+        ]
+        try:
+            code, cli_out, err = _run(
+                cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
+            )
+            if code != 0:
+                print("Nexus: batch debit-by-reference lookup error:", err or cli_out)
+                return BatchLookup(out, False, "cli_error")
+            data = _parse_json_lenient(cli_out)
+            if isinstance(data, dict) and data.get("error"):
+                return BatchLookup(out, False, "api_error")
+            if data is None:
+                return BatchLookup(out, False, "invalid_response")
+            txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+            for tx in txs:
+                if not isinstance(tx, dict):
                     continue
-                if str(c.get("OP") or "").upper() != "DEBIT":
-                    continue
-                ref = c.get("reference")
-                if ref is None:
-                    continue
-                key = str(ref).strip()
-                if key in wanted and key not in out:
-                    txid = tx.get("txid")
-                    if txid:
-                        out[key] = str(txid)
-    except Exception as e:
-        print("Nexus: batch debit-by-reference lookup exception:", e)
-    return out
+                for contract in (tx.get("contracts") or []):
+                    if not isinstance(contract, dict):
+                        continue
+                    if str(contract.get("OP") or "").upper() != "DEBIT":
+                        continue
+                    reference = contract.get("reference")
+                    if reference is None:
+                        continue
+                    key = str(reference).strip()
+                    if key in wanted and key not in out:
+                        txid = tx.get("txid")
+                        if txid:
+                            out[key] = str(txid)
+            if wanted.issubset(out):
+                return BatchLookup(out, True)
+            if len(txs) < page_size:
+                # A negative history scan is not a durable proof of non-execution: the
+                # endpoint is live and offset pagination has no snapshot guarantee.
+                # Only a positive txid/reference match is actionable automatically.
+                return BatchLookup(out, False, "not_found_unverified")
+        except Exception as e:
+            print("Nexus: batch debit-by-reference lookup exception:", e)
+            return BatchLookup(out, False, "exception")
+
+    return BatchLookup(out, False, "pagination_truncated")
 
 
 def find_nexus_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
@@ -995,31 +1048,38 @@ def get_circulating_nexus_supply() -> int:
 
 
 def get_circulating_nexus_units() -> int:
-    """Circulating supply in BASE units (token amount x 10**USDD_DECIMALS).
+    """Circulating supply in base units, raising when the value is unavailable.
 
-    Nexus 'currentsupply' is reported in human-readable token units (e.g. 4002.0),
-    so it must be scaled to base units before comparing against on-chain base-unit
-    balances (e.g. the vault balance). Use THIS for backing/solvency math;
-    use get_circulating_nexus_supply() only for human-readable display.
+    Returning zero on a transport or parse failure makes an unavailable liability look
+    like no liability at all and causes backing checks to fail open.
     """
     cmd = [config.NEXUS_CLI, "finance/get/token/currentsupply", f"name={config.NEXUS_TOKEN_NAME}"]
     try:
         code, out, err = _run(cmd, timeout=10)
-        if code != 0:
-            print("Nexus Nexus token supply error:", redact(err or out))
-            return 0
-        data = _parse_json_lenient(out)
+    except Exception as e:
+        raise RuntimeError(f"Nexus token supply lookup failed: {e}") from e
+    if code != 0:
+        raise RuntimeError(f"Nexus token supply lookup failed: {redact(err or out)}")
+
+    data = _parse_json_lenient(out)
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"Nexus token supply API error: {redact(str(data['error']))}")
+    try:
         if isinstance(data, (int, float, str)):
             dec = Decimal(str(data))
-        elif isinstance(data, dict):
+        elif isinstance(data, dict) and data.get("currentsupply") is not None:
             dec = Decimal(str(data["currentsupply"]))
         else:
-            return 0
+            raise ValueError("missing currentsupply")
         decimals = int(getattr(config, "NEXUS_TOKEN_DECIMALS", 6))
-        return int((dec * (Decimal(10) ** decimals)).to_integral_value(rounding=ROUND_DOWN))
-    except Exception as e:
-        print("Nexus Nexus token supply exception:", e)
-        return 0
+        units = int(
+            (dec * (Decimal(10) ** decimals)).to_integral_value(rounding=ROUND_DOWN)
+        )
+        if units < 0:
+            raise ValueError("negative currentsupply")
+        return units
+    except (ArithmeticError, KeyError, TypeError, ValueError) as e:
+        raise RuntimeError(f"Invalid Nexus token supply response: {e}") from e
 
 
 def get_nxs_default_balance_units() -> int:

@@ -3,7 +3,7 @@
 User-facing guide for performing swaps between USDC (Solana) and USDD (Nexus).
 
 Operator / setup documentation: see **`SETUP.md`**.  
-Security hardening: **`SECURITY.md`**.  
+Security hardening: **[`docs/SECURITY.md`](docs/SECURITY.md)**.
 Configuration reference: **`CONFIG.md`**.
 
 <details>
@@ -11,11 +11,12 @@ Configuration reference: **`CONFIG.md`**.
 
 | Document | Status | Read it for |
 |----------|--------|-------------|
-| [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md) | **Current** | Whole-system risk: trust model, solvency, fund-flow correctness, operator tooling. **Start here.** |
-| [`STATE_MACHINES.md`](STATE_MACHINES.md) | **Current** | Server-side state machines, re-derived from the code |
-| [`SWAP_INITIATOR_STATE_MACHINES.md`](SWAP_INITIATOR_STATE_MACHINES.md) | **Current** | The same flows from a user's point of view |
-| [`EVALUATION.md`](EVALUATION.md) | History | Code-level findings and fix history (F/H/L/N/R). Line numbers refer to pre-fix code. |
-| [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) | History | The first audit pass, superseded. Two low-severity items remain open. |
+| [`docs/DEVELOPMENT_REVIEW_2026-08-24.md`](docs/DEVELOPMENT_REVIEW_2026-08-24.md) | **Current / Critical repaired locally** | The three Critical findings and fail-open backing check have regression-tested code fixes. Deployment remains blocked pending independent/live verification and the remaining High findings. |
+| [`docs/RISK_ASSESSMENT.md`](docs/RISK_ASSESSMENT.md) | History with current update | Whole-system risk history and current safety-gate note. |
+| [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) | Current with resolution note | Server-side state machines and repaired ambiguity/waterline invariants. |
+| [`docs/SWAP_INITIATOR_STATE_MACHINES.md`](docs/SWAP_INITIATOR_STATE_MACHINES.md) | Current user-flow description | User-facing flow only; it is not fund-safety verification. |
+| [`docs/EVALUATION.md`](docs/EVALUATION.md) | History | Code-level findings and fix history (F/H/L/N/R). Line numbers refer to pre-fix code. |
+| [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) | History | The first audit pass, superseded. |
 
 </details>
 
@@ -220,7 +221,7 @@ Notes:
 
 Policy notes on USDD → USDC:
 - Tiny USDD credits ≤ `MIN_CREDIT_USDD` are treated as fees (no USDC is sent).
-- See [ASSET_STANDARD.md](ASSET_STANDARD.md) for the full asset specification and [SWAP_INITIATOR_STATE_MACHINES.md](SWAP_INITIATOR_STATE_MACHINES.md) for the step-by-step user flow.
+- See [ASSET_STANDARD.md](ASSET_STANDARD.md) for the full asset specification and [SWAP_INITIATOR_STATE_MACHINES.md](docs/SWAP_INITIATOR_STATE_MACHINES.md) for the step-by-step user flow.
 
 ### Loop-Safety and Reliability
 - Actions that can incur fees (mint, send, refunds) are guarded by attempt limits and cooldowns:
@@ -303,7 +304,7 @@ documented in one place — **[`SETUP.md`](SETUP.md)** — so there is a single 
 | Choosing the token pair | [SETUP.md § Choosing the token pair](SETUP.md#choosing-the-token-pair) |
 | Registering the bridge on-chain | `python3 register_service.py --show` → [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping) |
 | Monitoring dashboard | [SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard) |
-| Security hardening | [SECURITY.md](SECURITY.md) |
+| Security hardening | [SECURITY.md](docs/SECURITY.md) |
 
 > This README previously duplicated the whole setup guide and its own `.env` template.
 > Both had drifted out of sync with the code, so they were removed rather than maintained twice.

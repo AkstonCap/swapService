@@ -135,7 +135,7 @@ Legend:
 ## Fee Conversion / Backing (Optional Feature Gate)
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| FEE_CONVERSION_ENABLED | bool | false | Enable periodic conversions / top‑ups. |
+| FEE_CONVERSION_ENABLED | bool | false | Legacy switch. Automated conversion remains safety-disabled in code until durable intent records and chain reconciliation exist; setting this true does not execute fund movements. |
 | FEE_CONVERSION_MIN_USDC | int | 0 | Minimum base units before attempt. |
 | SOL_TOPUP_MIN_LAMPORTS | int | 0 | Trigger threshold. |
 | SOL_TOPUP_TARGET_LAMPORTS | int | 0 | Refill target. |

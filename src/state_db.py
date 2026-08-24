@@ -355,6 +355,23 @@ def get_unprocessed_sigs() -> List[Tuple[str, int, str, str, float, str | None, 
     conn.close()
     return rows
 
+
+def get_unresolved_solana_liability_units() -> int:
+    """Gross Solana units tied to deposits whose lifecycle is not terminal.
+
+    Every row in ``unprocessed_sigs`` is still owed a Nexus credit, refund, or
+    quarantine handling. Gross subtraction is conservative: it can defer fee
+    realization, but cannot classify user funds as spendable surplus.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_usdc_units), 0) FROM unprocessed_sigs"
+        ).fetchone()
+        return max(0, int((row or (0,))[0] or 0))
+    finally:
+        conn.close()
+
 def get_unprocessed_sig_status(sig: str) -> str | None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

@@ -50,6 +50,16 @@ def _parse_decimal_amount(val) -> Decimal:
             return Decimal(0)
 
 
+def _address_value(obj) -> str:
+    """Normalize a Nexus address/name field without guessing malformed objects."""
+    if isinstance(obj, dict):
+        value = obj.get("address") or obj.get("name")
+        return str(value) if value else ""
+    if isinstance(obj, str):
+        return obj
+    return ""
+
+
 def _format_token_amount(amount: Decimal, decimals: int) -> str:
     """Format a Decimal amount with given token decimals, rounded down, as plain string."""
     if amount < 0:
@@ -173,7 +183,17 @@ def process_unprocessed_txids(paused: bool = False):
             if txid in refunded_txids:
                 continue
             owner = r.get("owner")
-            asset = nexus_client.find_asset_receival_account_by_txid_and_owner(txid, owner)
+            asset_lookup = nexus_client.find_asset_receival_account_by_txid_and_owner(
+                str(txid or ""), str(owner or "")
+            )
+            if not asset_lookup.complete:
+                _log(
+                    "NEXUS_RECEIVAL_LOOKUP_HOLD",
+                    txid=txid,
+                    reason=asset_lookup.reason or "incomplete",
+                )
+                continue
+            asset = asset_lookup.asset
             recv = (asset or {}).get("receival_account")
             asset_owner = (asset or {}).get("owner")
             
@@ -475,14 +495,24 @@ def process_unprocessed_txids(paused: bool = False):
                 # Retry asset lookup one more time before refunding
                 owner = r.get("owner")
                 if owner:
-                    asset = nexus_client.find_asset_receival_account_by_txid_and_owner(txid, owner)
+                    asset_lookup = nexus_client.find_asset_receival_account_by_txid_and_owner(
+                        str(txid or ""), str(owner or "")
+                    )
+                    if not asset_lookup.complete:
+                        _log(
+                            "NEXUS_RECEIVAL_RECHECK_HOLD",
+                            txid=txid,
+                            reason=asset_lookup.reason or "incomplete",
+                        )
+                        continue
+                    asset = asset_lookup.asset
                     # Re-verify the owner explicitly, exactly as Priority 1 does. Relying on
                     # the query filter alone made the two paths asymmetric.
                     asset_owner = (asset or {}).get("owner")
                     if asset and asset.get("receival_account") and asset_owner and str(asset_owner) == str(owner):
                         # Found mapping! Move back to ready for processing
                         recv = asset.get("receival_account")
-                        if solana_client.is_valid_solana_token_account(recv):
+                        if recv and solana_client.is_valid_solana_token_account(recv):
                             state_db.update_unprocessed_txid(
                                 txid=txid,
                                 receival_account=recv,
@@ -595,24 +625,9 @@ def process_unprocessed_txids(paused: bool = False):
                     state_db.remove_unprocessed_txid(txid)
                     _log("NEXUS_REFUND_PENDING_MAX_ATTEMPTS", txid=txid)
             
-        # Update waterline after processing
-        try:
-            safety = int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0))
-            active_rows = state_db.get_unprocessed_txids_as_dicts()
-            if active_rows:
-                ts_candidates = [int(x.get("ts") or 0) for x in active_rows if int(x.get("ts") or 0) > 0]
-                if ts_candidates:
-                    min_ts = min(ts_candidates)
-                    wl = max(0, min_ts - safety)
-                    state_db.propose_nexus_waterline(int(wl))
-            else:
-                # No unprocessed txids: advance waterline to current time minus buffer
-                current_ts = int(time.time())
-                waterline_ts = max(0, current_ts - safety)
-                state_db.propose_nexus_waterline(waterline_ts)
-                _log("NEXUS_WATERLINE_ADVANCED", new_ts=waterline_ts, reason="no_unprocessed_txids")
-        except Exception:
-            pass
+        # Processing has no chain-scan evidence, so it must never advance a checkpoint.
+        # The poller alone may propose Nexus waterlines after a complete enumeration.
+        _log("NEXUS_WATERLINE_HOLD", reason="processing_has_no_scan_evidence")
             
         elapsed = time.time() - process_start
         _log("NEXUS_PROCESS_COMPLETE", elapsed=f"{elapsed:.2f}s", budget=PROCESS_BUDGET_SEC)
@@ -693,6 +708,7 @@ def poll_nexus_deposits():
     try:
         page_ts_candidates: list[int] = []
         backlog_truncated = False
+        enumeration_complete = True
         processed_count = 0
         # Step 1 & 2: fetch treasury credits with pagination
         for page in range(max_pages):
@@ -706,15 +722,69 @@ def poll_nexus_deposits():
                 )
             except Exception as e:
                 print(f"Error fetching Nexus transactions page {page}: {e}")
+                enumeration_complete = False
                 break
             if res.returncode != 0:
                 err = (res.stderr or res.stdout or "").strip()
                 print(f"Error fetching Nexus transactions page {page}: {err}")
+                enumeration_complete = False
                 break
             txs = nexus_client._parse_json_lenient(res.stdout)
+            if isinstance(txs, dict) and txs.get("error"):
+                print(f"Error fetching Nexus transactions page {page}: {txs.get('error')}")
+                enumeration_complete = False
+                break
+            if txs is None:
+                print(f"Error fetching Nexus transactions page {page}: invalid response")
+                enumeration_complete = False
+                break
+            if not isinstance(txs, (list, dict)):
+                print(f"Error fetching Nexus transactions page {page}: unexpected response")
+                enumeration_complete = False
+                break
             if not isinstance(txs, list):
                 txs = [txs]
             if not txs:
+                break
+            malformed = False
+            for tx in txs:
+                if not isinstance(tx, dict) or not tx.get("txid"):
+                    malformed = True
+                    break
+                raw_timestamp = tx.get("timestamp")
+                if raw_timestamp is None:
+                    malformed = True
+                    break
+                try:
+                    if int(raw_timestamp) <= 0:
+                        malformed = True
+                        break
+                except (TypeError, ValueError):
+                    malformed = True
+                    break
+                contracts = tx.get("contracts")
+                if not isinstance(contracts, list) or any(
+                    not isinstance(contract, dict) for contract in contracts
+                ):
+                    malformed = True
+                    break
+                for contract in contracts:
+                    operation = str(contract.get("OP") or "").upper()
+                    if not operation:
+                        malformed = True
+                        break
+                    if operation == "CREDIT" and (
+                        not _address_value(contract.get("from"))
+                        or not _address_value(contract.get("to"))
+                        or _parse_decimal_amount(contract.get("amount")) <= 0
+                    ):
+                        malformed = True
+                        break
+                if malformed:
+                    break
+            if malformed:
+                print(f"Error fetching Nexus transactions page {page}: malformed transaction schema")
+                enumeration_complete = False
                 break
             # Determine if we've reached below cutoff (descending order => last element oldest)
             min_ts_page = None
@@ -757,20 +827,11 @@ def poll_nexus_deposits():
                         continue
                     # Look for CREDIT operations TO the treasury account (user sending funds to the treasury for swapping)
                     to = c.get("to")
-                    def _addr(obj) -> str:
-                        if isinstance(obj, dict):
-                            # Check both address field and name field
-                            a = obj.get("address") or obj.get("name")
-                            return str(a) if a else ""
-                        if isinstance(obj, str):
-                            return obj
-                        return ""
-                    
-                    to_addr = _addr(to)
+                    to_addr = _address_value(to)
                     # Skip if this credit is not TO our treasury account
                     if to_addr != treasury_addr:
                         continue
-                    sender = _addr(c.get("from"))
+                    sender = _address_value(c.get("from"))
                     amount_dec = _parse_decimal_amount(c.get("amount"))
                     if amount_dec <= 0:
                         continue
@@ -897,19 +958,21 @@ def poll_nexus_deposits():
         try:
             safety = int(getattr(config, "HEARTBEAT_WATERLINE_SAFETY_SEC", 0))
             rows = state_db.get_unprocessed_txids_as_dicts()
-            if rows:
+            if not enumeration_complete:
+                _log("NEXUS_WATERLINE_HOLD", reason="enumeration_incomplete")
+            elif backlog_truncated:
+                _log("NEXUS_WATERLINE_HOLD", reason="pagination_truncated")
+            elif rows:
                 ts_candidates = [int(x.get("ts") or 0) for x in rows if int(x.get("ts") or 0) > 0]
                 if ts_candidates:
                     min_ts = min(ts_candidates)
                     wl = max(0, min_ts - safety)
                     state_db.propose_nexus_waterline(int(wl))
             else:
-                if page_ts_candidates and not backlog_truncated:
+                if page_ts_candidates:
                     min_page_ts = min(int(t) for t in page_ts_candidates if int(t) > 0)
                     wl = max(0, min_page_ts - safety)
                     state_db.propose_nexus_waterline(int(wl))
-                elif backlog_truncated:
-                    _log("NEXUS_WATERLINE_HOLD", reason="pagination_truncated")
                 else:
                     # No unprocessed txids and no page data: advance waterline to current time minus buffer
                     # This prevents unnecessary re-scanning of old transactions

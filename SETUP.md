@@ -301,7 +301,7 @@ heartbeat update would fail and it would look like a total Nexus outage.
 
 > The session id is a credential: combined with the PIN it authorises spending. It is
 > redacted from logs and alerts, but like the PIN it is passed as a CLI argument and is
-> therefore visible to local users via `ps`. See [SECURITY.md](SECURITY.md).
+> therefore visible to local users via `ps`. See [SECURITY.md](docs/SECURITY.md).
 
 **2. Accounts**
 

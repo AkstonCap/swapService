@@ -112,6 +112,34 @@ def reconcile_accounting(expected_total: int | None = None) -> dict:
     return {"journal_sum": journal_sum, "stored": stored, "db_total": db_total,
             "drift_vs_db": drift_vs_db, "delta": delta}
 
+def available_backing_surplus_solana_units(
+    vault_solana_units: int, circulating_nexus_units: int
+) -> int:
+    """Spendable backing surplus after every unresolved user liability.
+
+    Database read failures propagate intentionally. Callers wrap this function in
+    fail-closed handling, so uncertainty disables minting and rebalancing.
+    """
+    circulating_solana_units = config.nexus_units_to_solana(circulating_nexus_units)
+    unresolved_liability_units = state_db.get_unresolved_solana_liability_units()
+    return max(
+        0,
+        int(vault_solana_units)
+        - int(circulating_solana_units)
+        - int(unresolved_liability_units),
+    )
+
+
+def automatic_surplus_actions_enabled() -> bool:
+    """Hard safety gate for non-idempotent automated fee/surplus actions.
+
+    These actions do not yet have durable intent records plus chain reconciliation. A
+    timeout or unreadable response could therefore execute once and be retried. Keep the
+    gate closed until that protocol exists and is independently verified.
+    """
+    return False
+
+
 def process_fee_conversions():
     """Policy-driven rebalance when backing ratio > 1.
     - Check balances: SOL (lamports), the bridged token (vault ATA), NXS (via finance/get/balances), Nexus circulating supply.
@@ -125,6 +153,10 @@ def process_fee_conversions():
     - Solana-side fees remain in the vault. This function uses actual vault balance, not the "accumulated" tracker.
     """
     if not config.FEE_CONVERSION_ENABLED:
+        return
+    if not automatic_surplus_actions_enabled():
+        print("[fees] automatic fee conversion is safety-disabled: durable intent "
+              "and chain reconciliation are required before enabling it")
         return
     try:
         from . import solana_client, nexus_client
@@ -143,7 +175,7 @@ def process_fee_conversions():
         # when both sides have the same decimals. Rounded up, so a rounding remainder can
         # never invent surplus that is not really there.
         circ_in_solana = config.nexus_units_to_solana(circ_nexus)
-        surplus = max(0, vault_solana - circ_in_solana)
+        surplus = available_backing_surplus_solana_units(vault_solana, circ_nexus)
         if surplus <= 0:
             return
 
@@ -186,7 +218,7 @@ def process_fee_conversions():
             spent_solana = _buy_sol_with_solana_token(surplus)
             # Recompute surplus after spend
             vault_solana2 = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT))
-            surplus2 = max(0, vault_solana2 - circ_in_solana)
+            surplus2 = available_backing_surplus_solana_units(vault_solana2, circ_nexus)
             # If SOL reached target before ratio 1, move funds from the treasury to local to reduce ratio to 1
             if sol_target and lamports is not None:
                 lamports = solana_client.get_vault_sol_balance()
@@ -237,21 +269,24 @@ def maintain_backing_and_bounds() -> bool:
     try:
         from . import solana_client, nexus_client
         vault_solana = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT), max_age_sec=5)
+        unresolved_liability = state_db.get_unresolved_solana_liability_units()
+        available_vault_solana = max(0, int(vault_solana) - int(unresolved_liability))
         # Compare like with like: circulating supply is a Nexus-side liability, the vault a
-        # Solana-side balance. Rounded up, so the pause triggers rather than being missed.
+        # Solana-side balance. Unresolved deposits are not backing assets: they remain owed
+        # as a Nexus credit, refund, or quarantine transfer.
         circ_in_solana = config.nexus_units_to_solana(nexus_client.get_circulating_nexus_units())
         if circ_in_solana > 0:
-            ratio_bps_deficit = int(((circ_in_solana - vault_solana) * 10000) / circ_in_solana) if vault_solana < circ_in_solana else 0
+            ratio_bps_deficit = int(((circ_in_solana - available_vault_solana) * 10000) / circ_in_solana) if available_vault_solana < circ_in_solana else 0
         else:
             ratio_bps_deficit = 0
         # Pause if extreme deficit
-        if circ_in_solana > 0 and (vault_solana * 100) < (config.BACKING_DEFICIT_PAUSE_PCT * circ_in_solana):
-            print("[safety] The vault < 90% of circulating supply; pausing for manual investigation")
+        if circ_in_solana > 0 and (available_vault_solana * 100) < (config.BACKING_DEFICIT_PAUSE_PCT * circ_in_solana):
+            print("[safety] Available vault backing is below the configured floor; pausing for manual investigation")
             return True
     # With a single Solana vault account, there's no separate fee account to drain or cap.
         return False
     except Exception as e:
-        print(f"[safety] maintain_backing_and_bounds error: {e}")
-        return False
+        print(f"[safety] maintain_backing_and_bounds error: {e}; pausing fail-closed")
+        return True
 
 _load()

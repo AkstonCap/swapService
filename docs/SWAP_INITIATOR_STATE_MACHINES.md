@@ -363,6 +363,6 @@ Look at `last_poll_timestamp` — if `current_time - last_poll_timestamp > 60 se
 ## References
 
 - Server-side state machines: [STATE_MACHINES.md](STATE_MACHINES.md)
-- Asset format specification: [ASSET_STANDARD.md](ASSET_STANDARD.md)
-- Configuration reference: [CONFIG.md](CONFIG.md)
-- Setup guide: [SETUP.md](SETUP.md)
+- Asset format specification: [ASSET_STANDARD.md](../ASSET_STANDARD.md)
+- Configuration reference: [CONFIG.md](../CONFIG.md)
+- Setup guide: [SETUP.md](../SETUP.md)
