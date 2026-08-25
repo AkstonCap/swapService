@@ -123,7 +123,7 @@ The service is configurable for different decimals, but several minimum/dust val
 - `MIN_CREDIT_NEXUS_UNITS` derives from `FLAT_FEE_TO_SOLANA_UNITS` (`src/config.py:219,247-253`).
 - `DUST_CREDIT_NEXUS_UNITS` derives from the same Solana-scaled value (`src/config.py:258-260`).
 - `build_service_record()` formats `MIN_DEPOSIT_SOLANA_UNITS` with `_format_nexus_amount()`, which always uses Nexus decimals (`src/nexus_client.py:1174-1179`; formatter at `src/nexus_client.py:159-174`).
-- `tests/test_token_pair.py:89-91` checks only that a published minimum contains a digit or decimal point; it does not assert exact cross-decimal values.
+- `tests/legacy_token_pair.py:89-91` checks only that a published minimum contains a digit or decimal point; it does not assert exact cross-decimal values.
 
 Executed 8-decimal Solana / 6-decimal Nexus example with default 0.5/0.1 flat fees:
 
@@ -302,12 +302,12 @@ A timeout is not failure, an empty bounded scan is not absence, and a warning is
 
 **Goal:** make every later change verifiable.
 
-1. Convert all scripts to isolated pytest tests.
-2. Make one command run the complete suite.
+1. ✅ Convert legacy executable checks into isolated pytest cases (one fresh interpreter per case; no import-time `sys.exit()`).
+2. ✅ Make one command run the complete suite.
 3. Add CI and static/document checks.
 4. Add exact mixed-decimal regression cases and failing reconciliation fixtures before production changes.
 
-**Exit:** a clean checkout has one green CI gate; a deliberately broken safety invariant makes it red.
+**Progress:** `python -m pytest -q` now collects and runs the entire local suite. CI and the pre-production regression fixtures remain open.
 
 ### Batch 2 — Durable Nexus refund protocol
 
@@ -335,15 +335,15 @@ Move secrets out of argv where supported, remove dead paths/config, fix document
 
 | Check | Current result |
 |---|---|
-| `tests/test_smoke.py` | Passed standalone |
-| `tests/test_token_pair.py` | Passed standalone, but cross-decimal threshold assertions are insufficient |
-| `tests/test_session.py` | Passed standalone |
-| `tests/test_frozen_names.py` | Passed standalone |
-| `tests/test_dashboard.py` | Passed standalone |
-| `python -m pytest -q tests/test_critical_safety.py` | 22 passed |
+| `tests/legacy_smoke.py` | Enforced as an isolated pytest case |
+| `tests/legacy_token_pair.py` | Enforced as an isolated pytest case, but cross-decimal threshold assertions are insufficient |
+| `tests/legacy_session.py` | Enforced as an isolated pytest case |
+| `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
+| `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
+| `python -m pytest -q tests/test_critical_safety.py` | 25 passed |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
-| Full `python -m pytest -q` | Failed during collection, exit 3 |
+| Full `python -m pytest -q` | Passed locally (30 collected tests) |
 | CI workflow | Missing |
 | Live integration | Not run |
 

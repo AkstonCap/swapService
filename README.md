@@ -358,7 +358,7 @@ non-localhost binds, and the reasoning behind those choices are in
 [SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard).
 
 ```bash
-python3 tests/test_dashboard.py   # verify read-only, XSS-safe and auth before exposing it
+python -m pytest -q tests/test_legacy_scripts.py   # dashboard and legacy safety checks run isolated
 ```
 
 ## Nexus API Docs

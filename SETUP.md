@@ -225,7 +225,7 @@ existing `.env` files need no changes.
 > | Persisted row values with a safety property | the retry-budget keys, the debit reservation kind, the `USDD_STATUS_*` strings | A rename makes an in-flight swap written by the previous build invisible to the new one, which could re-debit it |
 >
 > The rationale is recorded in the header block of `src/state_db.py`, and
-> `tests/test_frozen_names.py` fails the build if any of them drifts.
+> `tests/legacy_frozen_names.py` is enforced through the isolated pytest suite and fails the build if any of them drifts.
 
 ## Solana Setup
 
@@ -372,11 +372,9 @@ validates this at startup and prints the field names the asset actually has. Kee
 
 **Pre-flight check** — run before first start and after any config change:
 ```bash
-python3 tests/test_smoke.py         # imports every module, runs real functions on a temp DB
-python3 tests/test_frozen_names.py  # state-DB schema and persisted keys unchanged
-python3 tests/test_token_pair.py    # token pair is fully driven by config, not hardcoded
-python3 tests/test_session.py       # multiuser session handling in both node modes
-python3 tests/test_dashboard.py     # dashboard is read-only, XSS-safe, auth-enforced
+python -m pytest -q                 # complete composable suite
+# Individual isolated legacy checks:
+python -m pytest -q tests/test_legacy_scripts.py
 ```
 `test_smoke` catches configuration and schema faults that a syntax check cannot.
 `test_frozen_names` is the one to run after **any** refactor that touches naming: it fails
@@ -456,7 +454,7 @@ ssh -L 8787:127.0.0.1:8787 operator@your-host
   items, USDD quarantined but *not moved*, and actions that exhausted their retry budget
 - Transaction tabs per direction: pending, completed, refunded, quarantined, payouts, fees
 
-**Security properties** (enforced, and covered by `tests/test_dashboard.py`)
+**Security properties** (enforced, and covered by the isolated dashboard test case in `tests/test_legacy_scripts.py`)
 - Opens the database with SQLite `mode=ro`, so it *cannot* write state or hold a write lock.
 - No mutating endpoints. There is deliberately no retry/refund/release button — a web
   endpoint that can move funds is a much larger attack surface than one that can only look.
@@ -470,7 +468,7 @@ ssh -L 8787:127.0.0.1:8787 operator@your-host
 
 Run the tests before exposing it:
 ```bash
-python3 tests/test_dashboard.py
+python -m pytest -q tests/test_legacy_scripts.py
 ```
 
 ## Fees & Economics
