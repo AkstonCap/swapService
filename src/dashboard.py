@@ -45,14 +45,37 @@ except Exception:
     SOL_SYM = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
     NXS_SYM = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 
-# Statuses that mean "a human should look at this".
+# Statuses that mean "a human should look at this".  The paired action maps turn a
+# raw state-machine label into an instruction that is safe for the operator to follow.
 SIG_ISSUE_STATUSES = (
-    "debit unverified", "debit in flight", "to be refunded", "to be quarantined",
-    "quarantine failed", "refund pending",
+    "debit unverified", "debit in flight", "debited, awaiting confirmation",
+    "to be refunded", "refund sent, awaiting confirmation", "to be quarantined",
+    "quarantine sent, awaiting confirmation", "quarantine failed", "refund pending",
 )
 TXID_ISSUE_STATUSES = (
-    "quarantined", "refund pending", "collecting refund", "trade balance to be checked",
+    "quarantined", "refund pending", "refund held for operator review", "collecting refund",
+    "trade balance to be checked", "sending", "sig created, awaiting confirmations",
 )
+SIG_OPERATOR_ACTIONS = {
+    "debit in flight": "verify Nexus debit before any disposition",
+    "debit unverified": "verify Nexus debit before any disposition",
+    "debited, awaiting confirmation": "verify Nexus debit before any disposition",
+    "to be refunded": "automatic Solana refund pending; inspect if stale",
+    "refund sent, awaiting confirmation": "verify Solana refund before any disposition",
+    "to be quarantined": "automatic Solana quarantine pending; inspect if stale",
+    "quarantine sent, awaiting confirmation": "verify Solana quarantine before any disposition",
+    "quarantine failed": "inspect failed Solana quarantine before retrying",
+    "refund pending": "inspect refund evidence before retrying",
+}
+TXID_OPERATOR_ACTIONS = {
+    "refund held for operator review": "do not retry Nexus refund; determine disposition from on-chain evidence",
+    "refund pending": "do not retry Nexus refund; inspect on-chain evidence",
+    "collecting refund": "do not retry Nexus refund; inspect on-chain evidence",
+    "trade balance to be checked": "verify receival mapping and treasury balance before disposition",
+    "sending": "verify Solana payout by Nexus txid memo before any disposition",
+    "sig created, awaiting confirmations": "verify Solana payout before any disposition",
+    "quarantined": "verify payout outcome before any disposition",
+}
 
 
 def _ro_conn() -> sqlite3.Connection:
@@ -174,11 +197,12 @@ def api_issues() -> dict:
             "counterparty": r.get("from_address"),
             "detail": r.get("memo"),
             "reference": r.get("reference"),
+            "operator_action": SIG_OPERATOR_ACTIONS.get(r["status"], "inspect chain evidence before disposition"),
         })
 
     marks = ",".join("?" for _ in TXID_ISSUE_STATUSES)
     for r in _rows(
-        f"""SELECT txid, timestamp, status, amount_usdd, amount_usdd_units, from_address, receival_account
+        f"""SELECT txid, timestamp, status, amount_usdd, amount_usdd_units, from_address, receival_account, hold_reason
             FROM unprocessed_txids WHERE status IN ({marks})
             ORDER BY timestamp ASC LIMIT 200""", TXID_ISSUE_STATUSES):
         amt = _units(r.get("amount_usdd_units"), NXS_DECIMALS)
@@ -190,8 +214,9 @@ def api_issues() -> dict:
             "amount": amt if amt is not None else r.get("amount_usdd"),
             "unit": NXS_SYM,
             "counterparty": r.get("from_address"),
-            "detail": r.get("receival_account"),
+            "detail": r.get("hold_reason") or r.get("receival_account"),
             "reference": None,
+            "operator_action": TXID_OPERATOR_ACTIONS.get(r["status"], "inspect chain evidence before disposition"),
         })
 
     # Quarantined Nexus credits that were NOT actually moved still count toward backing.
@@ -208,6 +233,7 @@ def api_issues() -> dict:
             "counterparty": r.get("from_address"),
             "detail": "still in treasury — overstates the backing ratio",
             "reference": None,
+            "operator_action": "verify treasury movement and restore backing evidence",
         })
 
     # Actions that have burned their retry budget.
@@ -500,7 +526,7 @@ function table(cols,rows,build){
 function renderIssues(d){
   const p=document.getElementById("panel");p.textContent="";
   const rows=d.issues;
-  p.append(table(["Age","Direction","Status","Amount","Counterparty","Detail","ID"],rows,r=>{
+  p.append(table(["Age","Direction","Status","Amount","Counterparty","Detail","Required action","ID"],rows,r=>{
     const tr=el("tr");
     tr.append(el("td",null,AGE(r.age_sec)));
     tr.append(el("td",null,r.kind));
@@ -508,6 +534,7 @@ function renderIssues(d){
     tr.append(el("td","num",r.amount==null?"—":F(r.amount,6)+" "+r.unit));
     tr.append(el("td","mono",r.counterparty||"—"));
     tr.append(el("td","mono",r.detail||"—"));
+    tr.append(el("td",null,r.operator_action||"inspect chain evidence before disposition"));
     tr.append(el("td","mono",r.id||"—"));
     return tr;}));
   if(d.exhausted_attempts.length){

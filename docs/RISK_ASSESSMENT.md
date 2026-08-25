@@ -5,6 +5,15 @@
 **Scope:** The bridge as a *system* — trust model, solvency, fund-flow correctness, availability, economics, operator tooling — rather than a line-by-line code audit.
 **Companion:** [`EVALUATION.md`](EVALUATION.md) holds the code-level findings and their fix history (§1–§11). This document covers systemic risk; where a risk is caused by a specific defect, the defect is cited.
 
+> **Resolution update (2026-08-24):** the three Critical findings from
+> [`DEVELOPMENT_REVIEW_2026-08-24.md`](DEVELOPMENT_REVIEW_2026-08-24.md)
+> are repaired in the working tree with focused regression tests: incomplete
+> Nexus lookups hold, unresolved deposits are subtracted as liabilities,
+> automatic non-idempotent surplus actions are disabled, and failed Nexus
+> enumeration cannot advance the waterline. Backing checks now fail closed.
+> Deployment remains blocked pending independent/live verification and the
+> remaining High findings.
+
 **Method:** Static review of the money paths, state machine, polling loop, recovery logic, helper tooling, configuration, and documentation, plus targeted reasoning about Solana/Nexus finality and SQLite semantics. Arithmetic and SQL claims were executed in isolation to confirm them. **No live run was possible** — the runtime dependencies (`solana`, `solders`, `python-dotenv`) and RPC/Nexus access are unavailable in this environment.
 
 ---

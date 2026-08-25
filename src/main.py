@@ -286,29 +286,26 @@ def run():
                         # liability on a possibly different scale, so it is converted (rounded
                         # up) before subtracting - otherwise a pair with mismatched decimals
                         # reports surplus that does not exist and mints against it.
-                        surplus = max(0, vault_solana - config.nexus_units_to_solana(circ_nexus))
-                        # Skip reconcile if any pending Solana deposits not yet swapped
-                        pending_deposits = False
-                        try:
-                            unproc_rows = state_db.get_unprocessed_sigs()  # DB rows
-                            # 'debit in flight'/'debit unverified' MUST count as pending: minting
-                            # a fee surplus while a debit may still land would double-count it.
-                            if any(True for _sig, _ts, _memo, _from, _amt, _status, _txid in unproc_rows if _status in (None, 'ready for processing','memo unresolved','refunded','debited, awaiting confirmation','debited, awaiting confirmations','debit in flight','debit unverified')):
-                                pending_deposits = True
-                        except Exception:
-                            pending_deposits = True  # fail safe
+                        # User deposits in every non-terminal state are liabilities,
+                        # including refund and quarantine states. They are not fee surplus
+                        # merely because no Nexus supply has been minted against them yet.
+                        if vault_solana is None or circ_nexus is None:
+                            raise RuntimeError("backing inputs unavailable")
+                        surplus = fees.available_backing_surplus_solana_units(
+                            vault_solana, circ_nexus
+                        )
                         threshold_units = getattr(config, 'BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS', 0)
-                        if (surplus >= threshold_units > 0) and not pending_deposits and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
-                            # The debit is denominated on the Nexus side, so convert the
-                            # Solana-base surplus first (rounded down: never mint more than
-                            # the surplus backs).
-                            mint_units = config.solana_units_to_nexus(surplus)
-                            ref = state_db.next_reference()
-                            res = _safe_call(nexus_client.debit_nexus_token_with_txid, config.NEXUS_USDD_FEES_ACCOUNT, int(mint_units), ref, timeout_sec=15) if mint_units > 0 else None
-                            if res and res[0]:
-                                print(f"[reconcile] Minted {mint_units} {config.NEXUS_TOKEN_NAME} base units to fees account (no pending deposits; surplus >= threshold {threshold_units})")
-                                print()
-                                _last_reconcile = now
+                        if (surplus >= threshold_units > 0) and getattr(config, 'NEXUS_USDD_FEES_ACCOUNT', None):
+                            # Do not automate this debit until it has the same durable
+                            # intent + chain-resolution protocol as user mints. A timeout
+                            # here is ambiguous and a blind retry can mint fees twice.
+                            alerts.warning(
+                                "backing_surplus_manual_action_required",
+                                "automatic surplus mint is safety-disabled",
+                                surplus_solana_units=surplus,
+                                threshold_solana_units=threshold_units,
+                            )
+                            _last_reconcile = now
                     except Exception as e:
                         print(f"[reconcile] error: {e}")
 

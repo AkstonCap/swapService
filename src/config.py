@@ -266,8 +266,10 @@ MICRO_CREDIT_FEE_PCT = int(os.getenv("MICRO_CREDIT_FEE_PCT", "100"))  # 100% fee
 IGNORE_MICRO_USDC = True
 
 # Advanced micro-credit handling
-# If true, build a Nexus WHERE clause (instead of simple field filter) to server-side filter transactions.
-USE_NEXUS_WHERE_FILTER_USDD = os.getenv("USE_NEXUS_WHERE_FILTER_USDD", "true").lower() in ("1","true","yes","on")
+# Credits are always enumerated without a server-side amount predicate.  Nexus transaction
+# contracts are nested arrays and a heuristic WHERE filter could silently omit a real credit
+# while permitting the poller to advance its waterline.  Dust/minimum policy is applied only
+# after the complete result is inspected locally.
 # If true we skip expensive owner lookups for micro credits below threshold.
 SKIP_OWNER_LOOKUP_FOR_MICRO_USDD = os.getenv("SKIP_OWNER_LOOKUP_FOR_MICRO_USDD", "true").lower() in ("1","true","yes","on")
 # If false, micro credits do not count against MAX_CREDITS_PER_LOOP (lets us drain real swaps faster under spam).

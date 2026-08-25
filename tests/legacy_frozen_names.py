@@ -111,7 +111,7 @@ EXPECTED_SCHEMA = {
                          "status", "txid", "reference"],
     "unprocessed_txids": ["txid", "timestamp", "amount_usdd", "from_address", "to_address",
                           "owner_from_address", "confirmations_credit", "status",
-                          "receival_account", "sig", "amount_usdd_units"],
+                          "receival_account", "sig", "amount_usdd_units", "hold_reason"],
     "waterline_proposals": ["chain", "proposed_timestamp"],
 }
 
@@ -167,6 +167,7 @@ EXPECTED_STATUSES = {
     "NEXUS_STATUS_PROCESSED": "processed",
     "NEXUS_STATUS_FEES": "processed as fees",
     "NEXUS_STATUS_REFUND_PENDING": "refund pending",
+    "NEXUS_STATUS_REFUND_HOLD": "refund held for operator review",
     "NEXUS_STATUS_QUARANTINED": "quarantined",
     "NEXUS_STATUS_TRADE_BAL_CHECK": "trade balance to be checked",
     "NEXUS_STATUS_COLLECTING_REFUND": "collecting refund",
@@ -180,9 +181,11 @@ from src import dashboard  # noqa: E402
 
 for s in dashboard.SIG_ISSUE_STATUSES:
     check(f"sig issue status in use: {s!r}", isinstance(s, str) and s != "")
+    check(f"sig issue status has operator action: {s!r}", s in dashboard.SIG_OPERATOR_ACTIONS)
 for s in dashboard.TXID_ISSUE_STATUSES:
     check(f"txid issue status matches a lifecycle value: {s!r}",
           s in EXPECTED_STATUSES.values())
+    check(f"txid issue status has operator action: {s!r}", s in dashboard.TXID_OPERATOR_ACTIONS)
 
 
 # --------------------------------------------------------------------------- env vars

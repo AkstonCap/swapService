@@ -6,6 +6,14 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > previous version contained transitions the code does not perform (notably an
 > auto-refund on debit timeout, and a refund on USDC-confirmation timeout) and omitted the
 > ambiguity-resolution states. Status strings below are copied verbatim from the source.
+>
+> **Resolution note (2026-08-24):** the independent review findings about
+> bounded/failed Nexus lookups, fail-open backing checks, and Nexus waterline
+> advancement are repaired in the working tree and covered by
+> `tests/test_critical_safety.py`. Missing debit and receival-asset lookup values are never actionable
+> automatically; incomplete enumeration holds; and only the poller may
+> advance a Nexus checkpoint from scan evidence. Live-chain verification is
+> still required.
 
 ---
 
@@ -24,9 +32,7 @@ flowchart TD
     DebitInFlight -->|"exception / timeout / unparsable body"| DebitUnverified["debit unverified"]
 
     DebitUnverified -->|reference FOUND on-chain| DebitedAwaiting
-    DebitUnverified -->|"not found, within grace"| DebitUnverified
-    DebitUnverified -->|"not found past grace, attempts left"| ReadyForProcessing
-    DebitUnverified -->|"not found past grace, attempts spent"| ToBeRefunded
+    DebitUnverified -->|"lookup negative, failed, or incomplete"| DebitUnverified
     DebitUnverified -->|no reference recorded| ToBeQuarantined["to be quarantined"]
 
     DebitedAwaiting -->|">= min confirmations"| Processed["debit_confirmed ✓"]
@@ -56,7 +62,7 @@ flowchart TD
 | **DebitedAwaiting** | Debit confirmed to exist; awaiting confirmations | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
 | **Processed** | Debit fully confirmed | `processed_sigs` | `"debit_confirmed"` |
 | **ProcessedAsFees** | Amount after fees ≤ 0 | `processed_sigs` | `"processed, amount after fees <= 0"` |
-| **ToBeRefunded** | Validation failed, over cap, or debit provably never landed | `unprocessed_sigs` | `"to be refunded"` |
+| **ToBeRefunded** | Validation failed or amount exceeds the configured cap; ambiguity alone never refunds | `unprocessed_sigs` | `"to be refunded"` |
 | **RefundSent** | USDC refund broadcast | `unprocessed_sigs` | `"refund sent, awaiting confirmation"` |
 | **RefundConfirmed** | Refund finalized | `refunded_sigs` | `"awaiting confirmation"` → `"refund_confirmed"` |
 | **ToBeQuarantined** | Refund impossible or attempts spent | `unprocessed_sigs` | `"to be quarantined"` |
@@ -85,9 +91,10 @@ flowchart TD
     Credit -->|normal| Pending["pending_receival"]
 
     Pending -->|"asset found, owner matches, valid USDC account"| Ready["ready for processing"]
+    Pending -->|"lookup failed / malformed / incomplete"| Pending
     Pending -->|owner mismatch| Pending
-    Pending -->|"receival_account invalid"| RefundPending
-    Pending -->|"no asset after REFUND_TIMEOUT_SEC"| TradeBal["trade balance to be checked"]
+    Pending -->|"complete mapping has invalid receival_account"| RefundPending
+    Pending -->|"complete absence after REFUND_TIMEOUT_SEC"| TradeBal["trade balance to be checked"]
 
     Ready -->|"vault cannot cover payout"| Ready
     Ready -->|"net ≤ 0"| FeesRecorded
@@ -103,7 +110,8 @@ flowchart TD
     Awaiting -->|"not confirmed and age > SOLANA_CONFIRM_TIMEOUT_SEC"| Quarantined["quarantined — manual review ✗"]
 
     TradeBal -->|asset appeared| Ready
-    TradeBal -->|still missing| Collecting["collecting refund"]
+    TradeBal -->|"lookup failed / malformed / incomplete"| TradeBal
+    TradeBal -->|"complete lookup still absent"| Collecting["collecting refund"]
 
     Collecting -->|USDD returned| Refunded["refunded ✓"]
     Collecting -->|"attempts spent / no sender"| Quarantined
@@ -166,9 +174,9 @@ alert is emitted.
 | Timeout | Config | Default | Applies to | Handler |
 |---------|--------|---------|-----------|---------|
 | Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **USDD→USDC only** | `process_unprocessed_txids()` P1 |
-| Debit-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD (tx never appeared) | `check_unconfirmed_debits()` |
+| Debit-confirmation observation window | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD; a negative/incomplete lookup still holds for manual resolution | `check_unconfirmed_debits()` |
 | USDC-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
-| Ambiguous-debit grace | `DEBIT_VERIFY_GRACE_SEC` | 300s | USDC→USDD | `resolve_unverified_debits()` |
+| Ambiguous-debit observation grace | `DEBIT_VERIFY_GRACE_SEC` | 300s | USDC→USDD; no automatic retry/refund on a negative scan | `resolve_unverified_debits()` |
 | Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | USDC→USDD | `_process_stale_deposits()` |
 
 **Retry:** `MAX_ACTION_ATTEMPTS` (3) attempts, with `ACTION_RETRY_COOLDOWN_SEC` (300s)
@@ -225,6 +233,22 @@ SQLite runs in **WAL** mode (set in `init_db()`).
 A waterline read ahead of *now* is clamped. **The waterline must never pass a deposit that
 is not durably recorded** — `_fetch_deposits_helius` stops at `ts <= since_ts`, so anything
 left behind it is never seen again.
+
+The Nexus poller applies the same proof rule:
+
+| Nexus enumeration state | Waterline |
+|---|---|
+| CLI exception/non-zero exit, API error, malformed response | **held entirely** |
+| Full page budget or processing budget exhausted | held (`pagination_truncated`), even when active rows exist |
+| Unprocessed credits exist after a complete poll | poller may pin behind the oldest |
+| Complete scan with persisted page data | may advance to the oldest scanned timestamp minus safety |
+| Processing pass | always held; it has no scan evidence and never proposes a waterline |
+
+A missing Nexus transaction or reference is **never** an automatic proof of
+non-execution: the history endpoint is live and offset pagination has no snapshot
+guarantee. Only a positive txid/reference match is actionable automatically. Negative,
+error, and exhausted-pagination results remain `incomplete` and require manual
+resolution rather than authorizing retry or refund.
 
 ---
 
@@ -295,7 +319,7 @@ Alerts (`ALERT_WEBHOOK_URL` / `ALERT_COMMAND`) fire on: `backing_deficit_pause`,
 ## References
 
 - User-facing flow: [SWAP_INITIATOR_STATE_MACHINES.md](SWAP_INITIATOR_STATE_MACHINES.md)
-- Configuration: [CONFIG.md](CONFIG.md)
+- Configuration: [CONFIG.md](../CONFIG.md)
 - Security hardening: [SECURITY.md](SECURITY.md)
-- Operational setup: [SETUP.md](SETUP.md)
+- Operational setup: [SETUP.md](../SETUP.md)
 - Risk assessment: [RISK_ASSESSMENT.md](RISK_ASSESSMENT.md)
