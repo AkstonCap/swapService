@@ -216,6 +216,73 @@ class CriticalSafetyTests(unittest.TestCase):
         update_txid.assert_not_called()
         self.assertFalse(any(call.args and call.args[0] == "NEXUS_PROCESS_ERROR" for call in log.call_args_list))
 
+    @patch.object(swap_nexus.alerts, "critical")
+    @patch.object(swap_nexus.solana_client, "is_valid_solana_token_account", return_value=False)
+    @patch.object(swap_nexus.state_db, "update_unprocessed_txid")
+    @patch.object(swap_nexus.nexus_client, "refund_nexus_token")
+    @patch.object(swap_nexus.nexus_client, "find_asset_receival_account_by_txid_and_owner")
+    @patch.object(swap_nexus.state_db, "get_unprocessed_txids_as_dicts")
+    @patch.object(swap_nexus.time, "time", return_value=10_000)
+    def test_every_nexus_refund_path_holds_and_alerts_without_transfer(
+        self, _time, rows, lookup, refund, update_txid, _valid_account, alert
+    ):
+        cases = (
+            (
+                "invalid receival account",
+                swap_nexus.NEXUS_STATUS_PENDING,
+                nexus_client.AssetLookup(
+                    {"receival_account": "invalid", "owner": "owner"}, True, ""
+                ),
+                9_999,
+            ),
+            (
+                "unresolved receival account timeout",
+                swap_nexus.NEXUS_STATUS_PENDING,
+                nexus_client.AssetLookup(None, True, ""),
+                1,
+            ),
+            (
+                "collecting refund",
+                swap_nexus.NEXUS_STATUS_COLLECTING_REFUND,
+                nexus_client.AssetLookup(None, False, "cli_error"),
+                9_999,
+            ),
+            (
+                "refund pending",
+                swap_nexus.NEXUS_STATUS_REFUND_PENDING,
+                nexus_client.AssetLookup(None, False, "cli_error"),
+                9_999,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                for reason, status, asset_lookup, timestamp in cases:
+                    with self.subTest(reason=reason):
+                        rows.return_value = [{
+                            "txid": f"credit-{reason}", "ts": timestamp,
+                            "comment": status, "confirmations": 2, "owner": "owner",
+                            "from": "sender", "amount_usdd_units": 1_000_000,
+                        }]
+                        lookup.return_value = asset_lookup
+                        swap_nexus.process_unprocessed_txids()
+
+                        refund.assert_not_called()
+                        update_txid.assert_any_call(
+                            txid=f"credit-{reason}",
+                            status=swap_nexus.NEXUS_STATUS_REFUND_HOLD,
+                            hold_reason=reason,
+                        )
+                        alert.assert_called_with(
+                            "nexus_refund_held",
+                            "Automatic Nexus refund disabled; manual operator review required",
+                            txid=f"credit-{reason}", sender="sender", amount_units=1_000_000,
+                            reason=reason, age_sec=10_000 - timestamp,
+                        )
+                        update_txid.reset_mock()
+                        alert.reset_mock()
+
     @patch.object(swap_nexus.state_db, "update_unprocessed_txid")
     @patch.object(
         swap_nexus.nexus_client,
@@ -339,6 +406,30 @@ class CriticalSafetyTests(unittest.TestCase):
 
         self.assertEqual(processed, 0)
         update_status.assert_not_called()
+
+    @patch.object(swap_nexus.config, "USE_NEXUS_WHERE_FILTER_USDD", True, create=True)
+    @patch(
+        "subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    def test_nexus_poller_never_uses_heuristic_server_side_amount_filter(self, run):
+        """A Nexus scan must be complete even when the legacy flag is enabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        command = run.call_args.args[0]
+        self.assertFalse(any(str(argument).startswith("where=") for argument in command))
+
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
+    def test_recovery_enumeration_never_uses_heuristic_server_side_amount_filter(self, run):
+        """Recovery must never skip credits through an unverified nested WHERE clause."""
+        nexus_client.fetch_deposits_since("TREASURY", since_timestamp=0)
+
+        command = run.call_args.args[0]
+        self.assertFalse(any(str(argument).startswith("where=") for argument in command))
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
     @patch("subprocess.run", side_effect=TimeoutError("node timeout"))

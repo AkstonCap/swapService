@@ -32,8 +32,14 @@ state_db.add_unprocessed_sig("SIG_XSS", int(time.time()) - 900, XSS, "=cmd|'/c c
 state_db.set_unprocessed_sig_reference("SIG_XSS", 4242)
 state_db.add_unprocessed_txid(txid="TX1", timestamp=int(time.time()) - 60, amount_usdd=12.5,
                               from_address="userAcct", to_address="treasury",
-                              owner_from_address="own", status="refund pending",
-                              amount_usdd_units=12_500_000)
+                              owner_from_address="own", status="refund held for operator review",
+                              amount_usdd_units=12_500_000,
+                              hold_reason="unresolved receival account timeout")
+# A submitted Nexus debit whose final on-chain confirmation is still unresolved is an
+# operator-visible held state.  It has a chain reference that the operator needs to inspect.
+state_db.add_unprocessed_sig("SIG_AWAITING", int(time.time()) - 120, "nexus:userAcct", "senderAcct",
+                             2_000_000, "debited, awaiting confirmation", "nexus-txid")
+state_db.set_unprocessed_sig_reference("SIG_AWAITING", 4243)
 state_db.record_payout("solana_send", 3_000_000, "sig1")
 state_db.save_metrics_snapshot(vault_usdc_units=100_000_000, circulating_usdd_units=99_000_000,
                                paused=False, payouts_24h_units=3_000_000,
@@ -60,15 +66,28 @@ check("ratio never overstates backing", s["ratio"] <= 100 / 99 + 1e-12)
 check("vault/circulating scaled to token units",
       s["vault_solana"] == 100.0 and s["circulating_nexus"] == 99.0)
 check("payout total surfaced", s["payout_24h_solana"] == 3.0)
-check("counts present", s["counts"]["unprocessed_sigs"] == 1)
+check("counts present", s["counts"]["unprocessed_sigs"] == 2)
 
 i = dashboard.api_issues()
-check("issue rows found", i["counts"]["issues"] == 2, str(i["counts"]))
+check("issue rows found", i["counts"]["issues"] == 3, str(i["counts"]))
 check("issue carries its reference for chain lookup",
       any(x["reference"] == 4242 for x in i["issues"]))
+awaiting = next((x for x in i["issues"] if x["id"] == "SIG_AWAITING"), None)
+check("ambiguous debit confirmation is visible as a held issue",
+      awaiting is not None and awaiting.get("operator_action") == "verify Nexus debit before any disposition",
+      str(awaiting))
+check("held issue carries its chain reference",
+      awaiting is not None and awaiting.get("reference") == 4243, str(awaiting))
+held_refund = next((x for x in i["issues"] if x["id"] == "TX1"), None)
+check("held Nexus refund preserves its reason for the dashboard",
+      held_refund is not None and held_refund.get("detail") == "unresolved receival account timeout",
+      str(held_refund))
+check("held Nexus refund shows a non-retry operator action",
+      held_refund is not None and "do not retry" in held_refund.get("operator_action", ""),
+      str(held_refund))
 
 t = dashboard.api_transactions("pending_solana", 10)
-check("transactions listed", t["count"] == 1)
+check("transactions listed", t["count"] == 2)
 check("unknown source rejected", "error" in dashboard.api_transactions("../../etc/passwd"))
 
 print("\n[2] Read-only enforcement")

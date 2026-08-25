@@ -1381,14 +1381,9 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")  # Newest first
     
-    # Use WHERE filter if available (may reduce bandwidth)
-    # Filter at the dust floor, not the swap minimum: credits in between are real user
-    # funds that must still be fetched so they can be recorded rather than lost.
-    min_credit_threshold = config.DUST_CREDIT_NEXUS_UNITS / (10 ** config.USDD_DECIMALS)
-    try:
-        base_cmd.append(f"where='contracts.amount>={min_credit_threshold}'")
-    except Exception:
-        pass
+    # Do not apply a server-side amount filter to nested contracts.  A target node may
+    # accept the expression but omit matching credits, which makes restart recovery lossy.
+    # Callers apply their policy after receiving the complete transaction enumeration.
     
     for page in range(max_pages):
         cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]

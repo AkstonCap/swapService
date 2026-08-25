@@ -118,7 +118,6 @@ Legend:
 ## Micro / Advanced Handling Flags
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| USE_NEXUS_WHERE_FILTER_USDD | bool | true | Attempt server‑side WHERE filtering for micro skip. |
 | SKIP_OWNER_LOOKUP_FOR_MICRO_USDD | bool | true | Avoid expensive owner queries for tiny credits. |
 | MICRO_CREDIT_COUNT_AGAINST_LIMIT | bool | false | If true micro credits consume per-loop quota. |
 

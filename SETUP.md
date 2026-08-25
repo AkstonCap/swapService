@@ -524,7 +524,7 @@ See `.env.example` for the exhaustive, annotated list. Highlights:
 - Heartbeat: HEARTBEAT_ENABLED, *_WATERLINE_* fields
 - Backing management: BACKING_* vars
 - Poll time budgets: *_POLL_TIME_BUDGET_SEC
-- Adaptive (future extension): USE_NEXUS_WHERE_FILTER_USDD, SKIP_OWNER_LOOKUP_FOR_MICRO_USDD
+- Adaptive (future extension): SKIP_OWNER_LOOKUP_FOR_MICRO_USDD
 
 ---
 LICENSE: Provided as-is; no warranty.

@@ -11,6 +11,7 @@ NEXUS_STATUS_REFUNDED = "refunded"  # (processed file)
 NEXUS_STATUS_PROCESSED = "processed"  # (processed file)
 NEXUS_STATUS_FEES = "processed as fees"
 NEXUS_STATUS_REFUND_PENDING = "refund pending"
+NEXUS_STATUS_REFUND_HOLD = "refund held for operator review"
 NEXUS_STATUS_QUARANTINED = "quarantined"
 NEXUS_STATUS_TRADE_BAL_CHECK = "trade balance to be checked"
 NEXUS_STATUS_COLLECTING_REFUND = "collecting refund"
@@ -23,6 +24,7 @@ _NEXUS_ALLOWED_STATUSES = {
     NEXUS_STATUS_PROCESSED,
     NEXUS_STATUS_FEES,
     NEXUS_STATUS_REFUND_PENDING,
+    NEXUS_STATUS_REFUND_HOLD,
     NEXUS_STATUS_QUARANTINED,
     NEXUS_STATUS_TRADE_BAL_CHECK,
     NEXUS_STATUS_COLLECTING_REFUND,
@@ -84,6 +86,37 @@ def _row_amount_units(r: dict) -> int:
     return int((amt_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
 
 
+def _hold_nexus_refund(r: dict, reason: str) -> None:
+    """Stop an unsafe automatic Nexus refund and make it actionable for an operator.
+
+    Nexus refunds do not yet have a durable intent/reference protocol.  A timeout or
+    process crash can occur after the node accepts the debit but before local state is
+    finalized, so retrying would risk a second transfer.  Keep the source row in the
+    queue and require manual resolution until that protocol is implemented.
+    """
+    txid = str(r.get("txid") or "")
+    sender = r.get("from")
+    amount_units = _row_amount_units(r)
+    timestamp = int(r.get("ts") or 0)
+    age_sec = max(0, int(time.time()) - timestamp) if timestamp else None
+    state_db.update_unprocessed_txid(
+        txid=txid,
+        status=NEXUS_STATUS_REFUND_HOLD,
+        hold_reason=reason,
+    )
+    alerts.critical(
+        "nexus_refund_held",
+        "Automatic Nexus refund disabled; manual operator review required",
+        txid=txid,
+        sender=sender,
+        amount_units=amount_units,
+        reason=reason,
+        age_sec=age_sec,
+    )
+    _log("NEXUS_REFUND_HELD", txid=txid, sender=sender, amount_units=amount_units,
+         reason=reason, age_sec=age_sec)
+
+
 def _quarantine_txid(r: dict, reason: str = "") -> None:
     """Quarantine a stuck Nexus credit: MOVE the funds, then record the full row.
 
@@ -122,12 +155,10 @@ def _quarantine_txid(r: dict, reason: str = "") -> None:
 def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
     """Subtract a fixed Nexus congestion fee (configured in Nexus token units).
 
-    NOT WIRED IN. Nothing calls this, so NEXUS_CONGESTION_FEE_USDD has no effect and every
-    Nexus refund returns the full credited amount, with the operator absorbing the on-chain
-    cost. Deducting it is a change to what users receive, so it is left as an explicit
-    operator decision rather than switched on silently. Wire it into the four
-    refund_nexus_token() call sites below to activate, or delete both if the policy is to
-    refund in full.
+    NOT WIRED IN. Automatic Nexus refunds are intentionally disabled until the durable
+    refund protocol exists. Deducting a congestion fee is a change to what users receive,
+    so it remains an explicit operator decision for that future protocol rather than being
+    switched on silently.
     """
     try:
         fee_dec = _parse_decimal_amount(getattr(config, "NEXUS_CONGESTION_FEE_USDD", "0"))
@@ -209,70 +240,12 @@ def process_unprocessed_txids(paused: bool = False):
             elif recv and asset_owner and str(asset_owner) != str(owner):
                 _log("NEXUS_OWNER_MISMATCH", txid=txid, recv_owner=asset_owner, expected_owner=owner)
             elif recv:
-                # Invalid token account -> refund path
-                amt_units = _row_amount_units(r)
-                sender = r.get("from")
-                if sender:
-                    refund_key = state_db.nexus_refund_attempt_key(txid)
-                    if state_db.should_attempt(refund_key):
-                        state_db.record_attempt(refund_key)
-                        if nexus_client.refund_nexus_token(sender, amt_units, "invalid receival_account"):
-                            # Mark as refunded
-                            state_db.mark_refunded_txid(
-                                txid=txid,
-                                timestamp=r.get("ts"),
-                                amount_usdd=float(r.get("amount_usdd") or 0),
-                                from_address=sender,
-                                to_address=r.get("to"),
-                                owner_from_address=r.get("owner"),
-                                confirmations_credit=r.get("confirmations"),
-                                status=NEXUS_STATUS_REFUNDED
-                            )
-                            # Remove from unprocessed
-                            state_db.remove_unprocessed_txid(txid)
-                        else:
-                            attempts = state_db.get_attempt_count(refund_key)
-                            if state_db.attempts_exhausted(refund_key):
-                                # Quarantine
-                                _quarantine_txid(r)
-                                state_db.remove_unprocessed_txid(txid)
-                                _log("NEXUS_REFUND_QUARANTINED", txid=txid, reason="invalid_receival_account")
-                            else:
-                                # Mark as refund pending
-                                state_db.update_unprocessed_txid(txid=txid, status=NEXUS_STATUS_REFUND_PENDING)
+                _hold_nexus_refund(r, "invalid receival account")
             else:
-                # No receival asset yet; if age exceeds timeout attempt refund
+                # No receival asset yet; a timed-out credit must be held, not refunded.
                 ts_row = int(r.get("ts") or 0)
                 if ts_row and (time.time() - ts_row) > getattr(config, "REFUND_TIMEOUT_SEC", 3600):
-                    sender = r.get("from")
-                    if sender:
-                        amt_units = _row_amount_units(r)
-                        refund_key = state_db.nexus_refund_unresolved_attempt_key(txid)
-                        if state_db.should_attempt(refund_key):
-                            state_db.record_attempt(refund_key)
-                            if nexus_client.refund_nexus_token(sender, amt_units, "unresolved receival_account"):
-                                # Mark as refunded
-                                state_db.mark_refunded_txid(
-                                    txid=txid,
-                                    timestamp=r.get("ts"),
-                                    amount_usdd=float(r.get("amount_usdd") or 0),
-                                    from_address=sender,
-                                    to_address=r.get("to"),
-                                    owner_from_address=r.get("owner"),
-                                    confirmations_credit=r.get("confirmations"),
-                                    status=NEXUS_STATUS_REFUNDED
-                                )
-                                state_db.remove_unprocessed_txid(txid)
-                            else:
-                                attempts = state_db.get_attempt_count(refund_key)
-                                if state_db.attempts_exhausted(refund_key):
-                                    # Quarantine
-                                    _quarantine_txid(r)
-                                    state_db.remove_unprocessed_txid(txid)
-                                    _log("NEXUS_REFUND_QUARANTINED", txid=txid, reason="unresolved_timeout")
-                                else:
-                                    # Mark for trade balance check
-                                    state_db.update_unprocessed_txid(txid=txid, status=NEXUS_STATUS_TRADE_BAL_CHECK)
+                    _hold_nexus_refund(r, "unresolved receival account timeout")
 
         # Refresh unprocessed list for next priorities
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
@@ -521,11 +494,9 @@ def process_unprocessed_txids(paused: bool = False):
                             _log("NEXUS_TRADE_BAL_RECOVERED", txid=txid, receival=recv)
                             continue
                 
-                # No recovery possible - move to collecting refund
-                state_db.update_unprocessed_txid(txid=txid, status=NEXUS_STATUS_COLLECTING_REFUND)
-                _log("NEXUS_TRADE_BAL_TO_REFUND", txid=txid)
+                _hold_nexus_refund(r, "trade balance check did not find a valid receival account")
         
-        # Priority 5: Process 'collecting refund' entries (FIX for stuck state)
+        # Priority 5: Convert legacy 'collecting refund' entries into operator holds.
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
             unprocessed = state_db.get_unprocessed_txids_as_dicts()
             for r in list(unprocessed):
@@ -535,49 +506,9 @@ def process_unprocessed_txids(paused: bool = False):
                 if r.get("comment") != NEXUS_STATUS_COLLECTING_REFUND:
                     continue
                 
-                txid = r.get("txid")
-                sender = r.get("from")
-                
-                if not sender:
-                    # Can't refund without sender address - quarantine
-                    _quarantine_txid(r)
-                    state_db.remove_unprocessed_txid(txid)
-                    _log("NEXUS_COLLECT_REFUND_NO_SENDER", txid=txid)
-                    continue
-                
-                amt_units = _row_amount_units(r)
-                
-                refund_key = state_db.nexus_collect_refund_attempt_key(txid)
-                if state_db.should_attempt(refund_key):
-                    state_db.record_attempt(refund_key)
-                    if nexus_client.refund_nexus_token(sender, amt_units, f"collecting_refund_txid:{txid}"):
-                        # Mark as refunded
-                        state_db.mark_refunded_txid(
-                            txid=txid,
-                            timestamp=r.get("ts"),
-                            amount_usdd=float(r.get("amount_usdd") or 0),
-                            from_address=sender,
-                            to_address=r.get("to"),
-                            owner_from_address=r.get("owner"),
-                            confirmations_credit=r.get("confirmations"),
-                            status=NEXUS_STATUS_REFUNDED
-                        )
-                        state_db.remove_unprocessed_txid(txid)
-                        _log("NEXUS_COLLECT_REFUND_SUCCESS", txid=txid)
-                    else:
-                        attempts = state_db.get_attempt_count(refund_key)
-                        if state_db.attempts_exhausted(refund_key):
-                            _quarantine_txid(r)
-                            state_db.remove_unprocessed_txid(txid)
-                            _log("NEXUS_COLLECT_REFUND_QUARANTINED", txid=txid, attempts=attempts)
-                        else:
-                            _log("NEXUS_COLLECT_REFUND_RETRY", txid=txid, attempts=attempts)
-                elif state_db.attempts_exhausted(refund_key):
-                    _quarantine_txid(r, "collect refund attempts exhausted")
-                    state_db.remove_unprocessed_txid(txid)
-                    _log("NEXUS_COLLECT_REFUND_MAX_ATTEMPTS", txid=txid)
+                _hold_nexus_refund(r, "collecting refund")
         
-        # Priority 6: Process 'refund pending' entries
+        # Priority 6: Convert legacy 'refund pending' entries into operator holds.
         if time.time() - process_start <= PROCESS_BUDGET_SEC:
             unprocessed = state_db.get_unprocessed_txids_as_dicts()
             for r in list(unprocessed):
@@ -587,43 +518,7 @@ def process_unprocessed_txids(paused: bool = False):
                 if r.get("comment") != NEXUS_STATUS_REFUND_PENDING:
                     continue
                 
-                txid = r.get("txid")
-                sender = r.get("from")
-                
-                if not sender:
-                    _quarantine_txid(r)
-                    state_db.remove_unprocessed_txid(txid)
-                    _log("NEXUS_REFUND_PENDING_NO_SENDER", txid=txid)
-                    continue
-                
-                amt_units = _row_amount_units(r)
-                
-                refund_key = state_db.nexus_refund_pending_attempt_key(txid)
-                if state_db.should_attempt(refund_key):
-                    state_db.record_attempt(refund_key)
-                    if nexus_client.refund_nexus_token(sender, amt_units, f"refund_pending_txid:{txid}"):
-                        state_db.mark_refunded_txid(
-                            txid=txid,
-                            timestamp=r.get("ts"),
-                            amount_usdd=float(r.get("amount_usdd") or 0),
-                            from_address=sender,
-                            to_address=r.get("to"),
-                            owner_from_address=r.get("owner"),
-                            confirmations_credit=r.get("confirmations"),
-                            status=NEXUS_STATUS_REFUNDED
-                        )
-                        state_db.remove_unprocessed_txid(txid)
-                        _log("NEXUS_REFUND_PENDING_SUCCESS", txid=txid)
-                    else:
-                        attempts = state_db.get_attempt_count(refund_key)
-                        if state_db.attempts_exhausted(refund_key):
-                            _quarantine_txid(r)
-                            state_db.remove_unprocessed_txid(txid)
-                            _log("NEXUS_REFUND_PENDING_QUARANTINED", txid=txid)
-                else:
-                    _quarantine_txid(r)
-                    state_db.remove_unprocessed_txid(txid)
-                    _log("NEXUS_REFUND_PENDING_MAX_ATTEMPTS", txid=txid)
+                _hold_nexus_refund(r, "refund pending")
             
         # Processing has no chain-scan evidence, so it must never advance a checkpoint.
         # The poller alone may propose Nexus waterlines after a complete enumeration.
@@ -657,23 +552,9 @@ def poll_nexus_deposits():
     base_cmd.append("sort=timestamp")
     base_cmd.append("order=desc")
 
-    # Proper WHERE clause (Query DSL) for server-side filtering if enabled.
-    # Filter at the DUST floor, not the swap minimum: credits between the two are real
-    # user funds that must still be fetched so they can be recorded (see below).
-    # DSL operates over 'results' root; transactions list returns objects where contracts[] nested.
-    # We cannot address array members directly with > filter per doc, so we still download all then client-filter by OP/to.
-    # However if CLI supports simple amount filter we'll keep backward compatibility.
-    # Use WHERE only if flagged to avoid incompatibility on older CLI.
-    where_threshold = getattr(config, "DUST_CREDIT_USDD", None)
-    if getattr(config, "USE_NEXUS_WHERE_FILTER_USDD", True) and where_threshold:
-        # Attempt to filter by amount and OP CREDIT *heuristically*; if unsupported the CLI should ignore or error (logged).
-        # Syntax example from docs: command WHERE 'results.balance>10'
-        # For nested contracts we fall back to 'where=contracts.amount>THRESHOLD' if supported; else rely on local filtering.
-        try:
-            # Prefer a conservative filter just on amount to reduce small tx volume (OP/to filtered client-side anyway)
-            base_cmd.append(f"where='contracts.amount>={where_threshold}'")
-        except Exception:
-            pass
+    # Do not filter nested contracts on the server.  An accepted-but-lossy Nexus WHERE
+    # expression could return an empty page and make a real treasury credit fall below the
+    # advanced waterline.  Apply dust/minimum handling only after local enumeration.
     limit = 100
     max_pages = int(getattr(config, "NEXUS_MAX_PAGES", 5))
     # Anti-DoS: Limit processing per loop iteration

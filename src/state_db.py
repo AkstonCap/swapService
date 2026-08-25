@@ -143,7 +143,9 @@ def init_db():
             confirmations_credit INTEGER,
             status TEXT,
             receival_account TEXT,
-            sig TEXT
+            sig TEXT,
+            amount_usdd_units INTEGER,
+            hold_reason TEXT
         )
     """)
     cursor.execute("""
@@ -313,6 +315,10 @@ def init_db():
     # round-trips through binary float (8.29 -> 8289999 base units, a 1-unit shortfall).
     if "amount_usdd_units" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN amount_usdd_units INTEGER")
+    # A held credit must retain why automated processing stopped so the dashboard
+    # shows actionable evidence instead of only an opaque lifecycle label.
+    if "hold_reason" not in _utx_cols:
+        cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN hold_reason TEXT")
 
     # unprocessed_sigs.reference records the Nexus debit reference BEFORE the debit is
     # attempted, so a crash or an unparsed CLI response can be resolved against the
@@ -1405,15 +1411,16 @@ def add_unprocessed_txid(
     receival_account: str | None = None,
     sig: str | None = None,
     amount_usdd_units: int | None = None,
+    hold_reason: str | None = None,
 ) -> None:
     """Add or update an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO unprocessed_txids
-        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units))
+        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason))
     conn.commit()
     conn.close()
 
@@ -1427,7 +1434,7 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units
+        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason
         FROM unprocessed_txids
         ORDER BY timestamp ASC
         LIMIT ?
@@ -1448,6 +1455,7 @@ def update_unprocessed_txid(
     status: str | None = None,
     receival_account: str | None = None,
     sig: str | None = None,
+    hold_reason: str | None = None,
 ):
     """Update specific fields of an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
@@ -1482,6 +1490,9 @@ def update_unprocessed_txid(
     if sig is not None:
         fields.append("sig = ?")
         values.append(sig)
+    if hold_reason is not None:
+        fields.append("hold_reason = ?")
+        values.append(hold_reason)
 
     if not fields:
         conn.close()
@@ -1565,7 +1576,8 @@ def get_unprocessed_txids_as_dicts(limit: int = 1000) -> list[dict]:
             "comment": t[7],  # status
             "receival_account": t[8] if len(t) > 8 else None,
             "sig": t[9] if len(t) > 9 else None,
-            "amount_usdd_units": t[10] if len(t) > 10 else None
+            "amount_usdd_units": t[10] if len(t) > 10 else None,
+            "hold_reason": t[11] if len(t) > 11 else None,
         }
         for t in tuples
     ]

@@ -11,11 +11,12 @@ Configuration reference: **`CONFIG.md`**.
 
 | Document | Status | Read it for |
 |----------|--------|-------------|
-| [`docs/DEVELOPMENT_REVIEW_2026-08-24.md`](docs/DEVELOPMENT_REVIEW_2026-08-24.md) | **Current / Critical repaired locally** | The three Critical findings and fail-open backing check have regression-tested code fixes. Deployment remains blocked pending independent/live verification and the remaining High findings. |
+| [`docs/EVALUATION.md`](docs/EVALUATION.md) | **Current remediation plan** | Authoritative issue register, severity, repair priority, exit criteria and deployment definition. |
+| [`docs/POST_CHANGE_REVIEW_2026-08-24.md`](docs/POST_CHANGE_REVIEW_2026-08-24.md) | Review evidence | Independent/static review evidence for commit `1e4f20c` that feeds the current evaluation. |
+| [`docs/DEVELOPMENT_REVIEW_2026-08-24.md`](docs/DEVELOPMENT_REVIEW_2026-08-24.md) | Fix history | Original review, Critical findings, and the repair sequence that led to `1e4f20c`. |
 | [`docs/RISK_ASSESSMENT.md`](docs/RISK_ASSESSMENT.md) | History with current update | Whole-system risk history and current safety-gate note. |
 | [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) | Current with resolution note | Server-side state machines and repaired ambiguity/waterline invariants. |
 | [`docs/SWAP_INITIATOR_STATE_MACHINES.md`](docs/SWAP_INITIATOR_STATE_MACHINES.md) | Current user-flow description | User-facing flow only; it is not fund-safety verification. |
-| [`docs/EVALUATION.md`](docs/EVALUATION.md) | History | Code-level findings and fix history (F/H/L/N/R). Line numbers refer to pre-fix code. |
 | [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) | History | The first audit pass, superseded. |
 
 </details>
@@ -94,7 +95,9 @@ Done! The service will detect your credit, verify the asset owner matches, and s
 - The same asset is reused for multiple swaps—just update `txid_toService` each time
 - Your Solana wallet must already have a USDC ATA (most wallets auto-create on first receive)
 - Minimum: `1.0 USDD` (`MIN_CREDIT_USDD`). Smaller amounts are recorded and treated as fees — no USDC is sent
-- If no asset mapping within `REFUND_TIMEOUT_SEC` (default 1 hour) → USDD is refunded
+- If no asset mapping within `REFUND_TIMEOUT_SEC` (default 1 hour) → the credit is held
+  for operator review. Automatic Nexus refunds are disabled until their durable,
+  crash-safe protocol is implemented.
 
 High‑level flow:
 1. You send USDD to the service treasury.
@@ -103,7 +106,8 @@ High‑level flow:
   - `txid_toService` : the txid from step 2
   - `receival_account` : either your Solana USDC token account (ATA) OR your Solana wallet address (the service will derive the ATA if it already exists). 
 4. Service detects the credit, queries assets filtering by `txid_toService=<txid>` AND `owner=<sender_owner_hash>`, validates the receival account, then sends net USDC.
-5. If no matching asset appears before the refund timeout, the credit is moved into a refund / trade-balance check flow and ultimately refunded.
+5. If no matching asset appears before the refund timeout, the credit is held for
+   operator review; it is not automatically refunded.
 
 Detailed steps:
 
@@ -144,16 +148,17 @@ Detailed steps:
   - On success it sends net USDC (after flat + dynamic fees, if configured) with a memo referencing the originating Nexus txid.
 
 5) Refund / fallback cases
-  - No asset found within `REFUND_TIMEOUT_SEC`: credit moves to refund logic (may quarantine after repeated failures).
-  - Invalid/malformed `receival_account`: refunded.
-  - Solana send fails repeatedly: refunded.
+  - No asset found within `REFUND_TIMEOUT_SEC`: credit is held for operator review.
+  - Invalid/malformed `receival_account`: credit is held for operator review.
+  - Solana send failures enter the separately tracked payout-confirmation/quarantine flow;
+    they are not a reason to retry a Nexus refund automatically.
   - Micro credit (< threshold): recorded as fees instantly; no asset lookup needed.
 
 Notes
 - Asset owner must match the sender’s `owner` field of the USDD credit; otherwise it is ignored.
 - You can batch multiple swaps by using multiple assets or updating the same asset sequentially (only the row with matching `txid_toService` is considered).
 - Tiny USDD credits below `MIN_CREDIT_USDD` (default 1.0) are treated as fees (100% micro fee policy). They are recorded in the service database (sender, amount, txid) so they can be traced; credits below `DUST_CREDIT_USDD` (default 0.01) are ignored entirely as spam.
-- Keep the asset published before the refund timeout to avoid unnecessary refunds.
+- Keep the asset published before the timeout to avoid manual operator intervention.
 
 ---
 
@@ -167,14 +172,17 @@ Notes
 ### USDD → USDC (Nexus to Solana)
 1. Send USDD to treasury (`NEXUS_USDD_TREASURY_ACCOUNT`).
 2. Publish asset with `txid_toService` + `receival_account` (Solana wallet or USDC ATA).
-3. Service finds mapping, validates address / existing ATA, sends net USDC. If mapping missing past timeout → refund.
+3. Service finds mapping, validates address / existing ATA, and sends net USDC. If the
+   mapping is missing past the timeout → hold for operator review (no automatic Nexus refund).
 
 ---
 
 ## Common Questions
 **Q: How fast are swaps?**  Depends on polling and chain confirmation. Typical: a few Solana blocks (USDC→USDD) or one Nexus credit + mapping publish cycle (USDD→USDC).  
 **Q: Can I reuse the same asset?** Yes—just update its fields for each new `txid_toService`, or create per‑swap assets.  
-**Q: What if I forget to publish the asset?** After the refund timeout the USDD is refunded (minus any congestion or micro handling fees).  
+**Q: What if I forget to publish the asset?** After the timeout the credit is held for
+operator review. Automatic Nexus refunds are intentionally disabled pending a durable
+idempotent refund protocol.
 **Q: Do you create my USDC ATA?** No. Ensure it already exists (most wallets auto‑create on first receive).  
 **Q: Are sub‑threshold amounts lost?** They are treated as fees/donations per policy; do not send below the published minimum.  
 
@@ -217,7 +225,11 @@ Notes:
 2. User creates or updates a Nexus asset with `txid_toService` set to the debit transaction hash and `receival_account` set to their Solana USDC ATA or wallet address.
 3. Service detects the credit, queries assets filtering by `txid_toService` and `owner` (must match the sender's genesis ID).
 4. If valid mapping found, the service sends USDC from the vault to the `receival_account`. The recipient must already have a USDC ATA (the service will not create it).
-5. If no mapping is found within `REFUND_TIMEOUT_SEC` (default 1 hour), the USDD is refunded. If the receival_account is invalid or the USDC send fails, USDD is refunded with a reason. On successful sends, a flat fee (`FLAT_FEE_USDC`) and optional dynamic fee (`DYNAMIC_FEE_BPS`) are deducted from the USDC output.
+5. If no mapping is found within `REFUND_TIMEOUT_SEC` (default 1 hour), the USDD is held
+   for operator review. Invalid receival accounts also hold; automatic Nexus refunds remain
+   disabled until a durable idempotent protocol exists. On successful sends, a flat fee
+   (`FLAT_FEE_USDC`) and optional dynamic fee (`DYNAMIC_FEE_BPS`) are deducted from the
+   USDC output.
 
 Policy notes on USDD → USDC:
 - Tiny USDD credits ≤ `MIN_CREDIT_USDD` are treated as fees (no USDC is sent).
