@@ -88,12 +88,12 @@ Legend:
 ## Fees & Thresholds
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **USDD→USDC** path (deducted from the USDC output). Named for the output token, not the input. |
-| FLAT_FEE_USDD | decimal | 0.1 | Tiny USDD threshold / micro gating. |
-| DYNAMIC_FEE_BPS | int | 10 | Applied both directions on success (0 = disable). |
-| MIN_DEPOSIT_USDC | decimal | 0.2 | Minimum USDC swapped (= 2x FLAT_FEE_USDD, nets ~0.0998 USDD). Values below 2x the flat fee are raised to it at startup and logged. |
-| MIN_CREDIT_USDD | decimal | 1.0 | Minimum USDD swapped (= 2x FLAT_FEE_USDC, nets ~0.499 USDC). Values below 2x the flat fee are raised to it at startup and logged. Credits below it are recorded and booked as fees. |
-| DUST_CREDIT_USDD | decimal | 0.01 | Anti-DoS dust floor. Credits below this are ignored entirely (no state, no accounting). Credits between this and MIN_CREDIT_USDD are recorded so the funds remain traceable. |
+| FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **Nexus→Solana** path, represented in Solana output base units. Must be exactly representable at both configured token precisions. |
+| FLAT_FEE_USDD | decimal | 0.1 | Fixed fee on the **Solana→Nexus** path, represented in Nexus output base units; the same token value is converted independently to Solana base units for refunds. Must be exactly representable at both configured precisions. |
+| DYNAMIC_FEE_BPS | int | 10 | Applied to the input amount in each direction, in that input token’s base-unit scale (0 = disable). |
+| MIN_DEPOSIT_USDC | decimal | 0.2 | Minimum Solana-side input (default = 2x the Solana-equivalent `FLAT_FEE_USDD`); values below the floor are raised at startup and logged. |
+| MIN_CREDIT_USDD | decimal | 1.0 | Minimum Nexus-side input (default = 2x the Nexus-equivalent `FLAT_FEE_USDC`); values below the floor are raised at startup and logged. Credits below it are recorded and booked as fees. |
+| DUST_CREDIT_USDD | decimal | 0.01 | Nexus-side anti-DoS floor (default = one tenth of the Nexus-equivalent `FLAT_FEE_USDC`). Credits below it are ignored; credits up to `MIN_CREDIT_USDD` remain traceable. |
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
 | NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | **Currently inert.** Intended to cover the on-chain cost of a Nexus refund, but no code path deducts it: all four refund sites return the full credited amount, so the operator absorbs the Nexus transaction cost. Set it if you like — nothing reads it beyond the unused `_apply_congestion_fee()` helper. |

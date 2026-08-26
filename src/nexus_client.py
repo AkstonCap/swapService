@@ -156,46 +156,62 @@ def is_expected_token(account_info: Dict[str, Any], expected: str) -> bool:
     return False
 
 
-def _format_nexus_amount(amount_units: int) -> str:
-    """Convert internal base units (USDD_DECIMALS) into decimal string required by Nexus CLI.
-
-    Nexus finance API expects human-readable whole/decimal token amounts, not raw base units.
-    Example: with USDD_DECIMALS=6, 110000 base units -> "0.11".
-    """
+def _format_amount_units(amount_units: int, decimals: int) -> str:
+    """Format integer base units as a plain fixed-point token amount."""
     try:
-        decs = int(getattr(config, 'USDD_DECIMALS', 6))
+        decs = int(decimals)
         if decs <= 0:
             return str(int(amount_units))
-        q = Decimal(amount_units) / (Decimal(10) ** decs)
-        # Normalize: remove trailing zeros while keeping at least one digit
-        s = format(q.normalize(), 'f')
-        if '.' in s:
-            s = s.rstrip('0').rstrip('.') or '0'
-        return s
+        value = Decimal(int(amount_units)) / (Decimal(10) ** decs)
+        result = format(value.normalize(), "f")
+        return result.rstrip("0").rstrip(".") if "." in result else result
     except Exception:
         return str(int(amount_units))
 
 
+def format_solana_units(amount_units: int) -> str:
+    """Format Solana-side base units using the configured Solana token scale."""
+    return _format_amount_units(amount_units, config.USDC_DECIMALS)
 
-def get_nexus_send_amount_units(amount_usdc_units: int) -> int:
-    """Net Nexus-side amount to send, in BASE UNITS, for a Solana deposit in base units.
 
-    Exact integer/Decimal arithmetic throughout. The previous float version returned
-    values like 8.989999999847731e-07, which was interpolated straight into the CLI
-    command as `amount=8.989999999847731e-07` - scientific notation a decimal parser
-    will not accept, with 17 significant digits against a 6-decimal token.
+def format_nexus_units(amount_units: int) -> str:
+    """Format Nexus-side base units using the configured Nexus token scale."""
+    return _format_amount_units(amount_units, config.USDD_DECIMALS)
+
+
+def _format_nexus_amount(amount_units: int) -> str:
+    """Backward-compatible Nexus CLI formatter; prefer ``format_nexus_units``."""
+    return format_nexus_units(amount_units)
+
+
+
+def _dynamic_fee_units(amount_units: int, bps: int) -> int:
+    """Floor the percentage fee in the input token's own base units."""
+    return max(0, int(amount_units)) * max(0, int(bps)) // 10_000
+
+
+def get_nexus_send_amount_units(amount_solana_units: int) -> int:
+    """Net Nexus output for a Solana deposit, in Nexus base units.
+
+    The input is rescaled once, rounded down so the bridge cannot over-credit an
+    unrepresentable fractional Nexus unit, then all fees are computed in that same
+    Nexus-unit domain.
     """
-    try:
-        gross = Decimal(int(amount_usdc_units)) / (Decimal(10) ** config.USDC_DECIMALS)
-    except Exception:
-        return 0
-    flat_fee = Decimal(str(config.FLAT_FEE_USDD))
-    dyn_bps = Decimal(max(0, int(config.DYNAMIC_FEE_BPS)))
-    net = gross - (gross * dyn_bps / Decimal(10000)) - flat_fee
-    if net <= 0:
-        return 0
-    # Round DOWN to whole base units: never pay out a fraction we cannot represent.
-    return int((net * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN))
+    gross_nexus_units = config.solana_units_to_nexus(int(amount_solana_units), round_up=False)
+    dynamic_fee = _dynamic_fee_units(gross_nexus_units, config.DYNAMIC_FEE_BPS)
+    return max(0, gross_nexus_units - int(config.FLAT_FEE_TO_NEXUS_UNITS) - dynamic_fee)
+
+
+def get_solana_send_amount_units(amount_nexus_units: int) -> int:
+    """Net Solana output for a Nexus credit, in Solana base units.
+
+    This mirrors ``get_nexus_send_amount_units`` with the opposite input and
+    output scales.  A conversion remainder is rounded down before fees, so a
+    decimal mismatch can never cause an overpayment.
+    """
+    gross_solana_units = config.nexus_units_to_solana(int(amount_nexus_units), round_up=False)
+    dynamic_fee = _dynamic_fee_units(gross_solana_units, config.DYNAMIC_FEE_BPS)
+    return max(0, gross_solana_units - int(config.FLAT_FEE_TO_SOLANA_UNITS) - dynamic_fee)
 
 
 def get_nexus_send_amount(amount_solana: int) -> Decimal:
@@ -369,7 +385,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         
         # Case 3: Transaction fully confirmed
         # Recalculate the Nexus amount from the deposit (same fee logic as the debit), in BASE UNITS.
-        nexus_out_base = get_nexus_send_amount_units(amount_usdc_units or 0)
+        nexus_out_base = get_nexus_send_amount_units(int(amount_usdc_units or 0))
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
 
         # Bug #10 fix: Track fees when debit is confirmed.
@@ -1175,8 +1191,8 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         "fee_flat_to_nexus": str(config.FLAT_FEE_USDD),
         "fee_flat_to_solana": str(config.FLAT_FEE_USDC),
         "fee_bps": str(int(config.DYNAMIC_FEE_BPS)),
-        "min_to_nexus": _format_nexus_amount(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
-        "min_to_solana": _format_nexus_amount(int(config.MIN_CREDIT_NEXUS_UNITS)),
+        "min_to_nexus": format_solana_units(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
+        "min_to_solana": format_nexus_units(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }
     return rec
 

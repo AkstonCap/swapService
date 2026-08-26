@@ -207,21 +207,36 @@ HEARTBEAT_WATERLINE_SOLANA_FIELD = os.getenv("HEARTBEAT_WATERLINE_SOLANA_FIELD",
 HEARTBEAT_WATERLINE_NEXUS_FIELD = os.getenv("HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
 HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC", "120"))  # safety margin (seconds) subtracted from waterline when filtering
 
-# Fees (optional)
-# Flat fees (in token units before conversion to base units):
-# - FLAT_FEE_USDC: Charged on USDD->USDC swap direction
-# - FLAT_FEE_USDD: Charged on USDC->USDD swap direction (also used as USDC refund fee since 1:1 parity)
-FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.5")  # fixed fee in USDC token units for USDD->USDC swaps
-FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")  # flat fee in USDD/USDC token units for USDC->USDD swaps & USDC refunds
-def _to_units(s: str, decimals: int) -> int:
-    from decimal import Decimal
-    return int((Decimal(s) * (Decimal(10) ** decimals)).to_integral_value())
-FLAT_FEE_TO_SOLANA_UNITS = _to_units(FLAT_FEE_USDC, USDC_DECIMALS)
-# FLAT_FEE_TO_NEXUS_UNITS uses FLAT_FEE_USDD value since USDC/USDD have same decimals and 1:1 parity
-# This is the fee deducted when refunding USDC to sender (on failed Solana->Nexus swaps)
-FLAT_FEE_TO_NEXUS_UNITS = _to_units(FLAT_FEE_USDD, USDC_DECIMALS)
+# Fees are configured in whole-token values, then represented independently in the
+# base units of every chain-side operation they govern.  Do not re-use an amount
+# expressed on one chain for a threshold or payout on the other: the decimals may differ.
+# - FLAT_FEE_USDC: Charged on Nexus->Solana payouts.
+# - FLAT_FEE_USDD: Charged on Solana->Nexus payouts and deducted from a Solana refund.
+FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.5")
+FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")
 
-# Single dynamic fee setting (bps of Solana amount). Applies to both directions.
+def _to_units(s: str, decimals: int) -> int:
+    """Parse an operator token value only if it is exactly representable on-chain."""
+    from decimal import Decimal
+    value = Decimal(str(s)) * (Decimal(10) ** int(decimals))
+    integral = value.to_integral_value()
+    if value != integral:
+        raise ValueError(f"{s!r} cannot be represented with {decimals} decimals")
+    return int(integral)
+
+# Fee charged on an output sent to Nexus, in Nexus base units.
+FLAT_FEE_TO_NEXUS_UNITS = _to_units(FLAT_FEE_USDD, USDD_DECIMALS)
+# Fee charged on an output sent to Solana, in Solana base units.
+FLAT_FEE_TO_SOLANA_UNITS = _to_units(FLAT_FEE_USDC, USDC_DECIMALS)
+# A failed Solana deposit is returned on Solana, so its USDD-denominated refund fee
+# must be represented in Solana base units, not Nexus base units.
+FLAT_FEE_REFUND_SOLANA_UNITS = _to_units(FLAT_FEE_USDD, USDC_DECIMALS)
+# The Solana-output fee re-expressed in Nexus base units for Nexus-side input thresholds.
+FLAT_FEE_TO_SOLANA_NEXUS_UNITS = _to_units(FLAT_FEE_USDC, USDD_DECIMALS)
+
+# A single bps rate is deliberately applied to the input of each direction.  Callers use
+# direction-named helpers/inputs so the source scale is explicit: Nexus units for a
+# Nexus->Solana payout and Solana units for a Solana->Nexus payout.
 DYNAMIC_FEE_BPS = int(os.getenv("DYNAMIC_FEE_BPS", "10"))  # 10 bps = 0.1%
 FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 
@@ -232,32 +247,34 @@ NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 # Default is DERIVED from the flat fee (2x), not a fixed dollar figure: a hardcoded "0.2"
 # would mean 0.2 BTC on a wBTC bridge. An explicit MIN_DEPOSIT_USDC still wins.
 _MIN_DEPOSIT_ENV = _first_env("MIN_DEPOSIT_SOLANA_TOKEN", "MIN_DEPOSIT_USDC")
+# Defined below from the Nexus-output fee after both token scales are available.
 _MIN_DEPOSIT_SOLANA_CONFIGURED = (_to_units(_MIN_DEPOSIT_ENV, USDC_DECIMALS)
-                                if _MIN_DEPOSIT_ENV else 2 * FLAT_FEE_TO_NEXUS_UNITS)
+                                if _MIN_DEPOSIT_ENV else 0)
 MIN_DEPOSIT_USDC = _MIN_DEPOSIT_ENV or "(2x flat fee)"
-# A minimum at or below the flat fee means the user nets ~nothing while the swap is still
-# recorded as successful (with a 6-decimal pair, 0.100101 in against a 0.1 fee netted 0.0000009 - below one
-# base unit). Enforce a floor of 2x the flat fee so the output is always at least the fee.
-MIN_DEPOSIT_SOLANA_UNITS = max(_MIN_DEPOSIT_SOLANA_CONFIGURED, 2 * FLAT_FEE_TO_NEXUS_UNITS)
+# A minimum at or below the output-side flat fee means the user nets ~nothing while the
+# swap is still recorded as successful.  The fee is first converted to the *input*
+# Solana scale, then doubled; never compare base units from different tokens directly.
+_MIN_DEPOSIT_FEE_SOLANA_UNITS = nexus_units_to_solana(FLAT_FEE_TO_NEXUS_UNITS, round_up=True)
+MIN_DEPOSIT_SOLANA_UNITS = max(_MIN_DEPOSIT_SOLANA_CONFIGURED, 2 * _MIN_DEPOSIT_FEE_SOLANA_UNITS)
 MIN_DEPOSIT_SOLANA_RAISED = MIN_DEPOSIT_SOLANA_UNITS > _MIN_DEPOSIT_SOLANA_CONFIGURED
-# Minimum Nexus credit that is swapped for USDC. Must stay ABOVE the Nexus->Solana fee
-# (FLAT_FEE_USDC + dynamic), or the swap nets <= 0 and the whole credit becomes a fee.
+# Minimum Nexus credit that is swapped for Solana tokens. Must stay ABOVE the Solana
+# output fee (plus dynamic fee), or the swap nets <= 0 and the credit becomes a fee.
 # Keep README.md / CONFIG.md / .env.example in sync with this value: users who follow a
 # documented minimum lower than this one previously had their credit silently destroyed.
 _MIN_CREDIT_ENV = _first_env("MIN_CREDIT_NEXUS_TOKEN", "MIN_CREDIT_USDD")
 _MIN_CREDIT_NEXUS_CONFIGURED = (_to_units(_MIN_CREDIT_ENV, USDD_DECIMALS)
-                               if _MIN_CREDIT_ENV else 2 * FLAT_FEE_TO_SOLANA_UNITS)
+                               if _MIN_CREDIT_ENV else 2 * FLAT_FEE_TO_SOLANA_NEXUS_UNITS)
 MIN_CREDIT_USDD = _MIN_CREDIT_ENV or "(2x flat fee)"
-# Same floor rule as MIN_DEPOSIT_USDC: this direction's flat fee is FLAT_FEE_USDC.
-MIN_CREDIT_NEXUS_UNITS = max(_MIN_CREDIT_NEXUS_CONFIGURED, 2 * FLAT_FEE_TO_SOLANA_UNITS)
+# Same floor rule as MIN_DEPOSIT_SOLANA_UNITS, but this threshold is in Nexus units.
+MIN_CREDIT_NEXUS_UNITS = max(_MIN_CREDIT_NEXUS_CONFIGURED, 2 * FLAT_FEE_TO_SOLANA_NEXUS_UNITS)
 MIN_CREDIT_NEXUS_RAISED = MIN_CREDIT_NEXUS_UNITS > _MIN_CREDIT_NEXUS_CONFIGURED
 # Anti-DoS dust floor. Credits BELOW this are ignored entirely (no state, no accounting).
 # Credits between this floor and MIN_CREDIT_USDD are real user funds: they are recorded
-# and booked as fees rather than dropped without trace.
-# Spam floor, also derived so it scales with the token's denomination (1/10 of the fee).
+# and booked as fees rather than dropped without trace.  This is a Nexus-side input
+# threshold, so it uses the Nexus representation of the Solana-output fee.
 _DUST_ENV = _first_env("DUST_CREDIT_NEXUS_TOKEN", "DUST_CREDIT_USDD")
 DUST_CREDIT_NEXUS_UNITS = (_to_units(_DUST_ENV, USDD_DECIMALS) if _DUST_ENV
-                          else max(1, FLAT_FEE_TO_SOLANA_UNITS // 10))
+                          else max(1, FLAT_FEE_TO_SOLANA_NEXUS_UNITS // 10))
 DUST_CREDIT_USDD = _DUST_ENV or "(flat fee / 10)"
 MAX_DEPOSITS_PER_LOOP = int(os.getenv("MAX_DEPOSITS_PER_LOOP", "100"))  # batch processing limit
 MAX_CREDITS_PER_LOOP = int(os.getenv("MAX_CREDITS_PER_LOOP", "100"))  # batch processing limit for Nexus credits

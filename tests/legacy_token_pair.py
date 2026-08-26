@@ -131,7 +131,49 @@ cfgEq, _ = load({**BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
 check("equal decimals is an identity", cfgEq.nexus_units_to_solana(12_345_678) == 12_345_678
       and cfgEq.solana_units_to_nexus(12_345_678) == 12_345_678)
 
+print("\n[6] Fees, thresholds and public terms retain their own token scales")
+# Every threshold must be held in the base units of the token it governs.  In
+# particular, a 0.5 Solana-side flat fee is 50_000_000 units at 8dp but
+# 500_000 units at 6dp; it must never be re-used as a Nexus-side threshold.
+# The zero-decimal pair uses whole-token fees because fractional fees cannot be
+# represented by that configured pair.
+for label, sol_decimals, nexus_decimals, fee_to_nexus, fee_to_solana, expected in (
+    ("6/6", 6, 6, "0.1", "0.5", (200_000, 1_000_000, 50_000, "0.2", "1", 9_890_000, 9_490_000)),
+    ("8/6", 8, 6, "0.1", "0.5", (20_000_000, 1_000_000, 50_000, "0.2", "1", 9_890_000, 949_000_000)),
+    ("6/8", 6, 8, "0.1", "0.5", (200_000, 100_000_000, 5_000_000, "0.2", "1", 989_000_000, 9_490_000)),
+    ("9/6", 9, 6, "0.1", "0.5", (200_000_000, 1_000_000, 50_000, "0.2", "1", 9_890_000, 9_490_000_000)),
+    ("0/0", 0, 0, "2", "5", (4, 10, 1, "4", "10", 8, 5)),
+):
+    cfg_case, nc_case = load({
+        **BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
+        "SOLANA_TOKEN_DECIMALS": str(sol_decimals),
+        "NEXUS_TOKEN_DECIMALS": str(nexus_decimals),
+        "NEXUS_TOKEN_NAME": "PAIR", "NEXUS_USDD_TREASURY_ACCOUNT": "T",
+        "FLAT_FEE_USDD": fee_to_nexus, "FLAT_FEE_USDC": fee_to_solana,
+    })
+    (expected_deposit, expected_credit, expected_dust, expected_to_nexus,
+     expected_to_solana, expected_nexus_output, expected_solana_output) = expected
+    check(f"{label}: enforced Solana deposit minimum", cfg_case.MIN_DEPOSIT_SOLANA_UNITS == expected_deposit,
+          str(cfg_case.MIN_DEPOSIT_SOLANA_UNITS))
+    check(f"{label}: enforced Nexus credit minimum", cfg_case.MIN_CREDIT_NEXUS_UNITS == expected_credit,
+          str(cfg_case.MIN_CREDIT_NEXUS_UNITS))
+    check(f"{label}: enforced Nexus dust floor", cfg_case.DUST_CREDIT_NEXUS_UNITS == expected_dust,
+          str(cfg_case.DUST_CREDIT_NEXUS_UNITS))
+    terms = nc_case.build_service_record(last_poll=1)
+    check(f"{label}: published min_to_nexus", terms["min_to_nexus"] == expected_to_nexus,
+          terms["min_to_nexus"])
+    check(f"{label}: published min_to_solana", terms["min_to_solana"] == expected_to_solana,
+          terms["min_to_solana"])
+    ten_solana_units = 10 * (10 ** sol_decimals)
+    ten_nexus_units = 10 * (10 ** nexus_decimals)
+    check(f"{label}: exact Solana-to-Nexus output",
+          nc_case.get_nexus_send_amount_units(ten_solana_units) == expected_nexus_output,
+          str(nc_case.get_nexus_send_amount_units(ten_solana_units)))
+    check(f"{label}: exact Nexus-to-Solana output",
+          nc_case.get_solana_send_amount_units(ten_nexus_units) == expected_solana_output,
+          str(nc_case.get_solana_send_amount_units(ten_nexus_units)))
+
 print()
 if fails:
     print(f"❌ {len(fails)} failed: {', '.join(fails)}"); sys.exit(1)
-print("✅ bridge is token-pair agnostic; registration record complete; backing math scale-correct")
+print("✅ bridge is token-pair agnostic; registration record complete; backing math and money terms scale-correct")

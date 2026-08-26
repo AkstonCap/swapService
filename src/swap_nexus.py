@@ -284,29 +284,25 @@ def process_unprocessed_txids(paused: bool = False):
                 if not recv_account:
                     continue  # Will be resolved in Priority 1 next cycle
                 
-                # Calculate net Solana amount after fees.
-                # Derive from the exact integer column, not the legacy REAL one: this is the
-                # figure that decides how much leaves the vault, and every refund and
-                # quarantine path already reads it through _row_amount_units. Reading the
-                # float here made the payout the one money decision in this module still
-                # exposed to a binary round-trip.
-                amt_nexus = Decimal(_row_amount_units(r)) / (Decimal(10) ** config.USDD_DECIMALS)
-                flat_fee = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDC", "0.1"))
-                dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 10))
-                dyn_fee = (amt_nexus * Decimal(dyn_bps)) / Decimal(10000)
-                net_nexus = amt_nexus - flat_fee - dyn_fee
-                
-                if net_nexus <= 0:
-                    # Bug #14 fix: Track the fee (entire Nexus amount is kept as fee)
-                    nexus_decimals = int(getattr(config, "NEXUS_TOKEN_DECIMALS", 6))
-                    total_fee_nexus_units = int((amt_nexus * (Decimal(10) ** nexus_decimals)).to_integral_value(rounding=ROUND_DOWN))
-                    if total_fee_nexus_units > 0:
+                amount_nexus_units = _row_amount_units(r)
+                nexus_decimals = int(getattr(config, "NEXUS_TOKEN_DECIMALS", 6))
+                amt_nexus = Decimal(amount_nexus_units) / (Decimal(10) ** nexus_decimals)
+                # All payout math stays in integer base units.  The helper converts the
+                # Nexus input to the Solana scale (rounding down) before charging the
+                # Solana-output flat and dynamic fees, so no cross-decimal float can
+                # decide how much leaves the vault.
+                net_solana_units = nexus_client.get_solana_send_amount_units(amount_nexus_units)
+
+                if net_solana_units <= 0:
+                    # Track the whole input as an accounted Nexus-side fee when it cannot
+                    # fund even one output base unit after fees.
+                    if amount_nexus_units > 0:
                         state_db.add_fee_entry(
                             sig=None,
                             txid=txid,
                             kind="fee_only_nexus_process",
                             amount_usdc_units=None,
-                            amount_usdd_units=total_fee_nexus_units
+                            amount_usdd_units=amount_nexus_units
                         )
                     # Mark as fee-only processed
                     state_db.mark_processed_txid(
@@ -321,15 +317,6 @@ def process_unprocessed_txids(paused: bool = False):
                     )
                     state_db.remove_unprocessed_txid(txid)
                     _log("NEXUS_FEE_ONLY", txid=txid, amount_usdd=str(amt_nexus))
-                    continue
-                
-                # Convert Nexus token units to Solana base units (accounting for decimal differences)
-                solana_decimals = int(getattr(config, "SOLANA_TOKEN_DECIMALS", 6))
-                nexus_decimals = int(getattr(config, "NEXUS_TOKEN_DECIMALS", 6))
-                # net_nexus is already in token units (not base units), convert to Solana base units
-                net_solana_units = int((net_nexus * (Decimal(10) ** solana_decimals)).to_integral_value(rounding=ROUND_DOWN))
-                
-                if net_solana_units <= 0:
                     continue
 
                 # Liquidity pre-check: do not promise a payout the vault cannot cover.
@@ -370,9 +357,14 @@ def process_unprocessed_txids(paused: bool = False):
                     ok, sig = solana_client.send_solana_token_to_account_with_sig(recv_account, net_solana_units, memo)
                     
                     if ok and sig:
-                        # Bug #13 fix: Track the fee (Nexus amount - net Solana equivalent)
-                        total_fee_nexus = flat_fee + dyn_fee
-                        total_fee_nexus_units = int((total_fee_nexus * (Decimal(10) ** nexus_decimals)).to_integral_value(rounding=ROUND_DOWN))
+                        # Fee ledger stays in Nexus base units: the received credit minus
+                        # the exact Solana output re-expressed conservatively in Nexus units.
+                        total_fee_nexus_units = max(
+                            0,
+                            amount_nexus_units - config.solana_units_to_nexus(
+                                net_solana_units, round_up=False
+                            ),
+                        )
                         if total_fee_nexus_units > 0:
                             state_db.add_fee_entry(
                                 sig=None,

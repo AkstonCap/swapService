@@ -38,7 +38,7 @@ Those controls are valuable and their focused regression suite passes. They do n
 |---|---|
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds are disabled; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed; target-node enumeration evidence remains required |
-| Exact money math for arbitrary configured decimals | **FAIL** |
+| Exact money math for arbitrary configured decimals | **PASS locally** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
 | Durable completed-state data supports reconciliation | **FAIL** |
 | One composable automated test command | **PASS locally** — `python -m pytest -q` runs the complete suite |
 | CI enforces tests and static checks | **ENFORCED** — `.github/workflows/ci.yml` runs dependency, compilation, Markdown-link, test and whitespace gates on push/PR |
@@ -115,36 +115,27 @@ This behavior has not been observed against the target node. For a money-ingesti
 
 ### E-003 — Mixed-decimal thresholds and published terms use the wrong scale
 
-**Severity:** High
+**Severity:** High — **remediated locally; target-chain evidence still required**
 **Priority:** P1 — fix before claiming token-pair agnosticism
 
-The service is configurable for different decimals, but several minimum/dust values cross token scales incorrectly:
+**Resolution (current branch):** fees are parsed only when exactly representable and are
+stored separately in the base units of each chain-side operation. Nexus input thresholds
+now derive from the Nexus representation of the Solana-output fee; Solana input thresholds
+derive from the Solana representation of the Nexus-output fee. Refunds use their explicit
+Solana-scale fee. `format_solana_units()` and `format_nexus_units()` format public terms
+with the source-side scale, and both output calculations use integer base units end-to-end.
 
-- `MIN_CREDIT_NEXUS_UNITS` derives from `FLAT_FEE_TO_SOLANA_UNITS` (`src/config.py:219,247-253`).
-- `DUST_CREDIT_NEXUS_UNITS` derives from the same Solana-scaled value (`src/config.py:258-260`).
-- `build_service_record()` formats `MIN_DEPOSIT_SOLANA_UNITS` with `_format_nexus_amount()`, which always uses Nexus decimals (`src/nexus_client.py:1174-1179`; formatter at `src/nexus_client.py:159-174`).
-- `tests/legacy_token_pair.py:89-91` checks only that a published minimum contains a digit or decimal point; it does not assert exact cross-decimal values.
+`tests/legacy_token_pair.py` now has exact assertions for 6/6, 8/6, 6/8, 9/6 and 0/0
+decimal pairs. For each case it verifies enforced deposit/minimum/dust thresholds, both
+published terms and both 10-token output calculations. The former 8-decimal Solana /
+6-decimal Nexus failure now produces the intended `1.0` Nexus minimum, `0.05` dust floor
+and `0.2` `min_to_nexus`, rather than `100.0`, `5.0` and `20.0`.
 
-Executed 8-decimal Solana / 6-decimal Nexus example with default 0.5/0.1 flat fees:
+#### Remaining release evidence
 
-| Value | Current | Intended |
-|---|---:|---:|
-| Nexus minimum | 100.0 tokens | 1.0 token |
-| Nexus dust floor | 5.0 tokens | 0.05 token |
-| Published `min_to_nexus` | 20.0 | 0.2 |
-
-Valid user credits can be ignored as dust or retained as fees, and the public service record gives unsafe terms.
-
-#### Required repair
-
-- Compute every fee/minimum/dust value directly in the base units of the token it applies to.
-- Use explicit `format_solana_units()` and `format_nexus_units()` helpers; never infer scale from the destination.
-- Define direction-specific dynamic-fee inputs clearly.
-- Add exact assertions for 6/6, 8/6, 6/8, 9/6 and zero-decimal configurations.
-
-#### Exit criteria
-
-For every supported decimal pairing, published terms exactly match enforced thresholds and a client can compute the actual output before sending funds.
+- Run the decimal matrix against the configured target Nexus node and Solana devnet/testnet.
+- Verify operator fee values are exactly representable in both configured precisions before
+  deploying a non-default token pair.
 
 ---
 
@@ -305,11 +296,12 @@ A timeout is not failure, an empty bounded scan is not absence, and a warning is
 1. ✅ Convert legacy executable checks into isolated pytest cases (one fresh interpreter per case; no import-time `sys.exit()`).
 2. ✅ Make one command run the complete suite.
 3. ✅ Add CI and static/document checks.
-4. Add exact mixed-decimal regression cases and failing reconciliation fixtures before production changes.
+4. ✅ Add exact mixed-decimal regression cases (6/6, 8/6, 6/8, 9/6, 0/0) before production changes; reconciliation fixtures remain open.
 
 **Progress:** `python -m pytest -q` now collects and runs the entire local suite. CI gates
-the same suite plus dependency, compilation, Markdown-link and whitespace checks. The
-pre-production mixed-decimal and reconciliation regression fixtures remain open.
+the same suite plus dependency, compilation, Markdown-link and whitespace checks. Exact
+mixed-decimal thresholds, published terms and both directional output calculations are
+covered locally; the failing reconciliation fixtures remain open.
 
 ### Batch 2 — Durable Nexus refund protocol
 
@@ -317,7 +309,9 @@ Implement intent, unique reference, txid capture, ambiguous-outcome resolution a
 
 ### Batch 3 — Exact cross-decimal money contract
 
-Separate token scales for all fees, thresholds, dust, output calculations and public terms. Keep every persisted/computed amount in integer base units.
+**Implemented locally:** separate base-unit representations now cover fees, thresholds,
+dust, output calculations and public terms; exact regression coverage spans 6/6, 8/6, 6/8,
+9/6 and 0/0 configurations. Target-chain matrix evidence remains part of Batch 5.
 
 ### Batch 4 — Durable completed-state model and reconciliation
 
@@ -338,7 +332,7 @@ Move secrets out of argv where supported, remove dead paths/config, fix document
 | Check | Current result |
 |---|---|
 | `tests/legacy_smoke.py` | Enforced as an isolated pytest case |
-| `tests/legacy_token_pair.py` | Enforced as an isolated pytest case, but cross-decimal threshold assertions are insufficient |
+| `tests/legacy_token_pair.py` | Enforced as an isolated pytest case with exact thresholds, public terms and bidirectional outputs for 6/6, 8/6, 6/8, 9/6 and 0/0 |
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
