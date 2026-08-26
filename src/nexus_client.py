@@ -383,10 +383,15 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             # Wait for more confirmations - do not timeout a partially confirmed transaction.
             continue
         
-        # Case 3: Transaction fully confirmed
-        # Recalculate the Nexus amount from the deposit (same fee logic as the debit), in BASE UNITS.
+        # Case 3: Transaction fully confirmed.  Archive the full immutable mint
+        # evidence before deleting the queue row; balance reconciliation must never
+        # depend on an unprocessed row surviving this transition.
         nexus_out_base = get_nexus_send_amount_units(int(amount_usdc_units or 0))
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
+        nexus_destination = None
+        prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
+        if memo and str(memo).lower().startswith(prefix.lower()):
+            nexus_destination = str(memo)[len(prefix):].strip() or None
 
         # Bug #10 fix: Track fees when debit is confirmed.
         # The fee is what the deposit gave up: deposit in, minus what was credited out.
@@ -411,7 +416,13 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         # Get reference from latest if needed (or pass None since it's optional)
         reference = state_db.get_latest_reference()
         
-        state_db.mark_processed_sig(sig, timestamp, amount_usdc_units, txid, amount_nexus_debited, "debit_confirmed", reference)
+        state_db.mark_processed_sig(
+            sig, timestamp, int(amount_usdc_units or 0), txid, amount_nexus_debited,
+            "debit_confirmed", reference,
+            amount_usdd_units=nexus_out_base,
+            nexus_destination=nexus_destination,
+            memo=memo,
+        )
         state_db.remove_unprocessed_sig(sig)
         processed_count += 1
         

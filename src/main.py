@@ -314,11 +314,19 @@ def run():
                     try:
                         from . import balance_reconciler
                         bal_result = _safe_call(balance_reconciler.run_balance_reconciliation, dry_run=True, timeout_sec=15)
+                        if not isinstance(bal_result, dict):
+                            raise RuntimeError("balance reconciliation returned no result")
+                        if not bal_result.get('healthy', False):
+                            alerts.critical("balance_reconciliation_incomplete",
+                                            "double-mint reconciliation is not healthy; no green result is valid",
+                                            checked_addresses=bal_result.get('checked_addresses', 0),
+                                            incomplete_reasons=bal_result.get('incomplete_reasons', []),
+                                            account_errors=bal_result.get('account_errors', []))
                         if bal_result.get('discrepancies'):
                             alerts.critical("unbacked_nexus_surplus",
                                             "addresses hold more of the Nexus-side token than their deposits justify (possible double-mint)",
                                             addresses=len(bal_result['discrepancies']),
-                                            total_surplus_units=bal_result.get('total_surplus_nexus', 0))
+                                            total_surplus_units=bal_result.get('total_surplus_nexus_units', 0))
                     except Exception as e:
                         print(f"[balance_check] error: {e}")
                 

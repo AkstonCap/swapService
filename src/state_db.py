@@ -93,6 +93,9 @@ def init_db():
             amount_usdc_units INTEGER,
             txid TEXT,
             amount_usdd REAL,
+            amount_usdd_units INTEGER,
+            nexus_destination TEXT,
+            memo TEXT,
             status TEXT,
             reference INTEGER
         )
@@ -153,6 +156,7 @@ def init_db():
             txid TEXT PRIMARY KEY,
             timestamp INTEGER,
             amount_usdd REAL,
+            amount_usdd_units INTEGER,
             from_address TEXT,
             to_address TEXT,
             owner TEXT,
@@ -328,6 +332,28 @@ def init_db():
     _usig_cols = {row[1] for row in cursor.fetchall()}
     if "reference" not in _usig_cols:
         cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN reference INTEGER")
+
+    # Completed Solana->Nexus mints must retain all evidence required for later
+    # reconciliation.  The queue row is deliberately removed after confirmation, so
+    # recovering its memo or destination by joining back to unprocessed_sigs makes a
+    # missing-evidence reconciliation look healthy.
+    cursor.execute("PRAGMA table_info(processed_sigs)")
+    _psig_cols = {row[1] for row in cursor.fetchall()}
+    for _column, _definition in (
+        ("amount_usdd_units", "INTEGER"),
+        ("nexus_destination", "TEXT"),
+        ("memo", "TEXT"),
+    ):
+        if _column not in _psig_cols:
+            cursor.execute(f"ALTER TABLE processed_sigs ADD COLUMN {_column} {_definition}")
+
+    # The legacy REAL token amount cannot safely participate in reconciliation.
+    # Current processed Nexus credits record their source amount in base units; older
+    # rows remain explicitly incomplete rather than being silently rounded.
+    cursor.execute("PRAGMA table_info(processed_txids)")
+    _ptx_cols = {row[1] for row in cursor.fetchall()}
+    if "amount_usdd_units" not in _ptx_cols:
+        cursor.execute("ALTER TABLE processed_txids ADD COLUMN amount_usdd_units INTEGER")
 
     conn.commit()
     conn.close()
@@ -569,6 +595,10 @@ def mark_processed_sig(
     amount_usdd: float | None = None,
     status: str | None = None,
     reference: int | None = None,
+    *,
+    amount_usdd_units: int | None = None,
+    nexus_destination: str | None = None,
+    memo: str | None = None,
 ):
     """Insert/update a processed signature record.
 
@@ -586,10 +616,13 @@ def mark_processed_sig(
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT OR REPLACE INTO processed_sigs (sig, timestamp, amount_usdc_units, txid, amount_usdd, status, reference)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO processed_sigs
+        (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
+         nexus_destination, memo, status, reference)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (sig, timestamp, amount_usdc_units, txid, amount_usdd, status, reference),
+        (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
+         nexus_destination, memo, status, reference),
     )
     conn.commit()
     conn.close()
@@ -717,16 +750,19 @@ def mark_processed_txid(
     owner: str,
     sig: str,
     status: str | None = None,
+    *,
+    amount_usdd_units: int | None = None,
 ):
     """Insert/update processed txid. Status optional (e.g. 'credited', 'skipped')."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT OR REPLACE INTO processed_txids (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO processed_txids
+        (txid, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status),
+        (txid, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status),
     )
     conn.commit()
     conn.close()

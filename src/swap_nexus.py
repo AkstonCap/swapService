@@ -313,7 +313,8 @@ def process_unprocessed_txids(paused: bool = False):
                         to_address=r.get("to"),
                         owner=r.get("owner") or "",
                         sig="",
-                        status=NEXUS_STATUS_FEES
+                        status=NEXUS_STATUS_FEES,
+                        amount_usdd_units=amount_nexus_units,
                     )
                     state_db.remove_unprocessed_txid(txid)
                     _log("NEXUS_FEE_ONLY", txid=txid, amount_usdd=str(amt_nexus))
@@ -425,7 +426,8 @@ def process_unprocessed_txids(paused: bool = False):
                             to_address=r.get("to"),
                             owner=r.get("owner") or "",
                             sig=found_sig,
-                            status=NEXUS_STATUS_PROCESSED
+                            status=NEXUS_STATUS_PROCESSED,
+                            amount_usdd_units=_row_amount_units(r),
                         )
                         state_db.remove_unprocessed_txid(txid)
                         _log("NEXUS_SOLANA_CONFIRMED", txid=txid, sig=found_sig)
@@ -739,6 +741,7 @@ def poll_nexus_deposits():
                             owner=owner or "",
                             sig="",
                             status=NEXUS_STATUS_FEES,
+                            amount_usdd_units=below_min_units,
                         )
                         processed_txids.add(txid)
                         processed_count += 1
@@ -790,7 +793,8 @@ def poll_nexus_deposits():
                             to_address=to_addr,
                             owner=owner or "",
                             sig="",
-                            status=NEXUS_STATUS_FEES
+                            status=NEXUS_STATUS_FEES,
+                            amount_usdd_units=total_fee_nexus_units,
                         )
                         processed_txids.add(txid)
                         processed_count += 1

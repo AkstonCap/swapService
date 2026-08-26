@@ -57,7 +57,7 @@ os.environ.setdefault("NEXUS_USDD_TREASURY_ACCOUNT", "TREASURY")
 os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
-from src import fees, nexus_client, solana_client, state_db, swap_nexus  # noqa: E402
+from src import balance_reconciler, fees, nexus_client, solana_client, state_db, swap_nexus  # noqa: E402
 
 
 class CriticalSafetyTests(unittest.TestCase):
@@ -535,6 +535,57 @@ class CriticalSafetyTests(unittest.TestCase):
                 swap_nexus.poll_nexus_deposits()
 
         propose_waterline.assert_not_called()
+
+    def test_reconciliation_uses_durable_completed_mint_evidence_after_queue_removal(self):
+        """A completed mint remains checkable after its transient queue row is gone."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                solana_units = 2_000_000
+                nexus_units = nexus_client.get_nexus_send_amount_units(solana_units)
+                state_db.mark_processed_sig(
+                    "mint-sig", 100, solana_units, "mint-tx", 0.0,
+                    "debit_confirmed", 77,
+                    amount_usdd_units=nexus_units,
+                    nexus_destination="recipient",
+                    memo="nexus:recipient",
+                )
+                self.assertFalse(state_db.is_unprocessed_sig("mint-sig"))
+
+                healthy = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+                self.assertTrue(healthy["healthy"])
+                self.assertEqual(healthy["checked_addresses"], 1)
+                self.assertEqual(healthy["total_surplus_nexus_units"], 0)
+
+                # A second treasury debit to the same recipient is observable as a
+                # positive exact-base-unit discrepancy rather than a false green.
+                state_db.mark_processed_txid(
+                    "duplicate-mint", 101, 0.0, "TREASURY", "recipient", "", "",
+                    "processed", amount_usdd_units=nexus_units,
+                )
+                duplicate = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+                self.assertFalse(duplicate["healthy"])
+                self.assertEqual(duplicate["total_surplus_nexus_units"], nexus_units)
+                self.assertEqual(duplicate["discrepancies"], [{
+                    "account": "recipient", "surplus_nexus_units": nexus_units,
+                }])
+
+    def test_reconciliation_fails_closed_when_completed_mint_lacks_durable_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.mark_processed_sig(
+                    "legacy-mint", 100, 2_000_000, "mint-tx", 1.0,
+                    "debit_confirmed", 1,
+                )
+                result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertEqual(result["checked_addresses"], 0)
+        self.assertTrue(any("durable Nexus destination" in reason
+                            for reason in result["incomplete_reasons"]))
 
 
 if __name__ == "__main__":

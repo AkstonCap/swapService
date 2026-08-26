@@ -27,8 +27,8 @@ The repair work through the evaluated head materially improved the bridge:
 
 Those controls are valuable and verified locally and in CI. They do not make the service
 production-ready. Automatic Nexus refunds remain disabled because no durable intent protocol
-exists; the double-mint detector can still report a false green; and the standing live-chain
-acceptance matrix has not been run.
+- the new durable reconciliation path still needs target-chain evidence; and the standing
+live-chain acceptance matrix has not been run.
 
 ### Current severity summary
 
@@ -46,8 +46,8 @@ acceptance matrix has not been run.
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **FAIL** |
-| One composable automated test command | **PASS** — `python -m pytest -q` runs the complete suite: 32 tests plus 4 subtests at this head |
+| Durable completed-state data supports reconciliation | **PASS locally** — completed mints retain immutable destination, memo and exact base-unit input/output; target-chain read-back remains required |
+| One composable automated test command | **PASS** — `python -m pytest -q` runs the complete suite: 34 tests plus 4 subtests at this head |
 | CI enforces tests and static checks | **ENFORCED and green** — run `32967131178` passed on the exact evaluated head |
 | Live devnet/testnet matrix | **NOT RUN** |
 
@@ -157,9 +157,9 @@ and `0.2` `min_to_nexus`, rather than `100.0`, `5.0` and `20.0`.
 
 ---
 
-### E-004 — Double-mint reconciliation is blind and unit-inconsistent
+### E-004 — Double-mint reconciliation was blind and unit-inconsistent
 
-**Severity:** High
+**Severity:** High — **remediated locally; target-chain evidence still required**
 **Priority:** P1 — safety detector must fail closed before deployment
 
 The current reconciler cannot reliably discover completed mint recipients:
@@ -182,19 +182,32 @@ Executed 10.5-token example:
 - reconciler fallback: 9.9895 tokens;
 - archived/comparison values truncate to whole tokens.
 
-A green result is not evidence of balance correctness.
+A green result was not evidence of balance correctness.
 
-#### Required repair
+#### Resolution (current branch)
 
-1. Migrate `processed_sigs` to persist immutable destination, original memo, exact Solana input base units and exact Nexus output base units.
-2. Populate those fields atomically when completing a swap; never recover required context from a deleted queue row.
-3. Rebuild all reconciliation math in integer base units using the same production fee function as the debit path.
-4. Return `healthy=False` when no expected addresses are checked, rows cannot be parsed, history is incomplete or any account calculation fails.
-5. Alert on incomplete reconciliation separately from a confirmed discrepancy.
+- Append-only SQLite migration adds `processed_sigs.amount_usdd_units`,
+  `processed_sigs.nexus_destination`, and `processed_sigs.memo`; completed Nexus credits
+  likewise retain `processed_txids.amount_usdd_units`.
+- Confirmation persists the original memo, destination, integer Solana input and integer
+  Nexus output before deleting `unprocessed_sigs`.
+- Reconciliation uses only those immutable rows and the production
+  `get_nexus_send_amount_units()` function. It never joins a completed row back to the
+  transient queue and never converts a token float with `int()`.
+- Results include `healthy`, explicit incomplete reasons and account errors. Zero checked
+  recipients, missing/malformed evidence, legacy REAL-only relevant history and per-account
+  calculation failures are unhealthy. The service emits a distinct critical alert for that
+  state as well as one for a confirmed positive surplus.
+- Regression coverage proves a completed mint reconciles to zero after its source queue row
+  is gone, a seeded extra treasury debit creates an exact positive discrepancy, and missing
+  durable evidence cannot produce a green result.
 
-#### Exit criteria
+#### Remaining release evidence
 
-A seeded completed mint is discovered after the queue row is deleted, checked in exact base units, and produces zero delta. A deliberately duplicated mint produces a positive discrepancy. Zero checked addresses cannot report healthy.
+- Execute the reconciliation fixture matrix and authoritative transaction-history read-back
+  against the configured target Nexus node and Solana devnet/testnet.
+- Establish a reviewed backfill/disposition procedure for existing legacy completed rows;
+  they intentionally remain incomplete rather than being reconstructed from float data.
 
 ---
 
@@ -346,23 +359,23 @@ filter can authorize a checkpoint. This is containment, not permission to deploy
 **Exit met:** the current local suite and GitHub Actions run `32967131178` are green. The
 mixed-decimal contract still requires target-chain evidence in Batch 4.
 
-### Batch 2 — Durable completed-state model and fail-closed reconciliation **NEXT**
+### Batch 2 — Durable completed-state model and fail-closed reconciliation ✅ (local)
 
 **Goal:** make a green balance result trustworthy before adding another automated money path.
 
-1. Add a reversible migration for immutable completed-swap fields: destination, original
-   memo, exact input/output base units, fee components and fee-rule version.
-2. Persist those values atomically before deleting the source queue row.
-3. Reuse the production integer payout function; delete the duplicate float-based fee path.
-4. Return an explicit `healthy`, `incomplete` or `discrepancy` result.
-5. Treat zero expected recipients, missing context, parse errors, skipped accounts and
-   unavailable history as `incomplete`, never green.
-6. Alert separately on incomplete evidence and confirmed imbalance.
-7. Add fixtures for balanced, duplicate-mint, deleted-source-row, mixed-decimal, zero-address
-   and malformed-row cases.
+1. ✅ Add append-only migration for immutable completed-swap destination, original memo and
+   exact input/output base units.
+2. ✅ Persist evidence before deleting the source queue row.
+3. ✅ Reuse the production integer payout function; remove the duplicate float-based fee path.
+4. ✅ Return `healthy` plus explicit incomplete reasons and discrepancies.
+5. ✅ Treat zero expected recipients, missing context, parse errors and account failures as
+   unhealthy, never green.
+6. ✅ Alert separately on incomplete evidence and confirmed imbalance.
+7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 
-**Exit:** a known balanced completed swap returns zero delta after its queue row is gone; a
-seeded duplicate is detected; and zero checked addresses cannot report healthy.
+**Local exit met:** a known balanced completed swap returns zero delta after its queue row is
+gone; a seeded duplicate is detected; and zero checked addresses cannot report healthy. The
+target-chain integration matrix remains required before deployment.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol
 
@@ -420,12 +433,12 @@ checkpoint advance from incomplete evidence.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 25 passed, 4 subtests passed |
+| `python -m pytest -q tests/test_critical_safety.py` | 27 passed, 4 subtests passed |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 32 passed, 4 subtests passed |
+| Full `python -m pytest -q` | 34 passed, 4 subtests passed |
 | CI workflow | Passed on `e2f83a2` — [run 32967131178](https://github.com/distordialabs-brutus/swapService/actions/runs/32967131178) |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | Live integration | Not run |
