@@ -40,8 +40,8 @@ Those controls are valuable and their focused regression suite passes. They do n
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed; target-node enumeration evidence remains required |
 | Exact money math for arbitrary configured decimals | **FAIL** |
 | Durable completed-state data supports reconciliation | **FAIL** |
-| One composable automated test command | **FAIL** |
-| CI enforces tests and static checks | **FAIL** |
+| One composable automated test command | **PASS locally** — `python -m pytest -q` runs the complete suite |
+| CI enforces tests and static checks | **ENFORCED** — `.github/workflows/ci.yml` runs dependency, compilation, Markdown-link, test and whitespace gates on push/PR |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -190,19 +190,19 @@ A seeded completed mint is discovered after the queue row is deleted, checked in
 
 ## 4. Medium and operational issues
 
-### E-005 — No enforceable full-suite test command or CI
+### E-005 — Enforceable full-suite test command and CI
 
 **Priority:** P1, before large repair batches
 
-- All five legacy scripts pass when run separately.
-- `python -m pytest -q tests/test_critical_safety.py` passes 22 tests.
-- `python -m pytest -q` exits 3 during collection with `SystemExit`; no tests run.
-- Test results depend on import order and shared module/environment mutation.
-- `python -m unittest discover` reports zero tests.
-- No GitHub Actions workflow exists.
-- `SETUP.md:373-380` labels a pre-flight sequence but omits `tests/test_critical_safety.py`.
+**Status: contained.** The legacy scripts now run as pytest-managed subprocess cases, so
+`python -m pytest -q` is the complete local command. GitHub Actions workflow
+`.github/workflows/ci.yml` runs on pushes and pull requests and enforces dependency
+consistency, byte-compilation, local Markdown-link verification, the complete pytest suite
+and whitespace checking. The checked-in link verifier also caught and corrected the stale
+Copilot-instructions security-document path.
 
-**Repair:** convert executable scripts to isolated pytest modules with fixtures, one temporary database per test, scoped environment/module reloads and no import-time `sys.exit()`. Add CI for the full suite, byte-compilation, static checks, dependency checks, Markdown-link verification and `git diff --check`.
+**Remaining release evidence:** every production candidate still needs a green remote CI run
+from GitHub, plus the separate live-chain matrix in E-006.
 
 ### E-006 — No live-chain acceptance matrix
 
@@ -304,10 +304,12 @@ A timeout is not failure, an empty bounded scan is not absence, and a warning is
 
 1. ✅ Convert legacy executable checks into isolated pytest cases (one fresh interpreter per case; no import-time `sys.exit()`).
 2. ✅ Make one command run the complete suite.
-3. Add CI and static/document checks.
+3. ✅ Add CI and static/document checks.
 4. Add exact mixed-decimal regression cases and failing reconciliation fixtures before production changes.
 
-**Progress:** `python -m pytest -q` now collects and runs the entire local suite. CI and the pre-production regression fixtures remain open.
+**Progress:** `python -m pytest -q` now collects and runs the entire local suite. CI gates
+the same suite plus dependency, compilation, Markdown-link and whitespace checks. The
+pre-production mixed-decimal and reconciliation regression fixtures remain open.
 
 ### Batch 2 — Durable Nexus refund protocol
 
@@ -344,7 +346,7 @@ Move secrets out of argv where supported, remove dead paths/config, fix document
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Full `python -m pytest -q` | Passed locally (30 collected tests) |
-| CI workflow | Missing |
+| CI workflow | `.github/workflows/ci.yml` — push/PR quality gate |
 | Live integration | Not run |
 
 ## 9. Definition of deployment-ready

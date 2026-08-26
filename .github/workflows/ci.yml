@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Test and static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Check dependency consistency
+        run: python -m pip check
+
+      - name: Compile Python sources
+        run: python -m compileall -q src *.py tests
+
+      - name: Check local Markdown links
+        run: python scripts/check_markdown_links.py
+
+      - name: Run complete test suite
+        run: python -m pytest -q
+
+      - name: Check whitespace errors
+        run: git diff --check HEAD~1 HEAD

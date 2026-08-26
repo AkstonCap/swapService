@@ -186,7 +186,7 @@ Timeout handlers: `check_unconfirmed_debits()` marks stuck debits for refund aft
 - User-facing swap guide: [README.md](../README.md)
 - Operator setup: [SETUP.md](../SETUP.md)
 - Full config reference: [CONFIG.md](../CONFIG.md)
-- Security hardening: [SECURITY.md](../SECURITY.md)
+- Security hardening: [SECURITY.md](../docs/SECURITY.md)
 - Nexus API patterns: `Nexus API docs/` directory
 
 ## Integration Points
