@@ -32,6 +32,7 @@ def test_ci_workflow_runs_the_required_quality_gates():
         "pull_request:",
         "push:",
         "actions/checkout@",
+        "fetch-depth: 0",
         "actions/setup-python@",
         "python -m pip install -r requirements.txt",
         "python -m pip check",
