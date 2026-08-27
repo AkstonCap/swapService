@@ -264,6 +264,30 @@ class TransferExecution:
     remote_txid: str | None = None
 
 
+@dataclass(frozen=True)
+class TransferDebitEvidence:
+    """A fully specified on-chain debit observed for a persisted transfer intent."""
+
+    remote_txid: str
+    from_address: str
+    to_address: str
+    amount_usdd_units: int
+
+
+def _parse_exact_nexus_units(value: object) -> int | None:
+    """Parse a chain amount only when it exactly fits the configured Nexus scale."""
+    try:
+        amount = Decimal(str(value).strip())
+        if not amount.is_finite() or amount < 0:
+            return None
+        units = amount * (Decimal(10) ** int(config.USDD_DECIMALS))
+        if units != units.to_integral_value():
+            return None
+        return int(units)
+    except Exception:
+        return None
+
+
 def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
     """Execute one prepared intent and persist its outcome before returning.
 
@@ -320,23 +344,35 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
 
 
 def resolve_nexus_transfer_intents(limit: int = 200) -> int:
-    """Mark only positively observed transfer references complete; never re-debit."""
+    """Complete only an exact observed debit; never re-debit an ambiguous intent."""
     intents = state_db.get_nexus_transfer_intents_by_status(
         ("executing", "submitted", "outcome_unknown"), limit=limit
     )
     if not intents:
         return 0
-    lookup = find_nexus_debits_by_references([intent["reference"] for intent in intents])
+    lookup = find_nexus_transfer_debits_by_references(
+        [intent["reference"] for intent in intents]
+    )
     resolved = 0
     for intent in intents:
-        remote_txid = lookup.values.get(str(intent["reference"]).strip())
-        if not remote_txid:
+        reference = str(intent["reference"]).strip()
+        candidates = [
+            evidence for evidence in lookup.values.get(reference, [])
+            if evidence.from_address == str(intent["from_address"])
+            and evidence.to_address == str(intent["to_address"])
+            and evidence.amount_usdd_units == int(intent["amount_usdd_units"])
+            and (intent["status"] != "submitted"
+                 or evidence.remote_txid == str(intent.get("remote_txid") or ""))
+        ]
+        matching_txids = {evidence.remote_txid for evidence in candidates}
+        if len(matching_txids) != 1:
             print("[NEXUS_TRANSFER_HOLD] intent=%s reference=%s lookup=%s" % (
-                intent["id"], intent["reference"], lookup.reason or "not_observed"
+                intent["id"], reference, lookup.reason or "no_exact_debit_match"
             ))
             continue
+        remote_txid = matching_txids.pop()
         state_db.update_nexus_transfer_intent(
-            intent["id"], status="completed", remote_txid=str(remote_txid), resolved=True
+            intent["id"], status="completed", remote_txid=remote_txid, resolved=True
         )
         resolved += 1
     return resolved
@@ -812,6 +848,79 @@ def find_asset_receival_account_by_txid_and_owner(
         )
     except Exception:
         return AssetLookup(None, False, "exception")
+
+
+def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> BatchLookup:
+    """Return complete debit terms keyed by reference for durable transfer resolution.
+
+    A transfer reference is only an identifier.  Finalization additionally requires a
+    debit's exact source account, destination account, and integer Nexus amount to
+    match the durable local intent.  Malformed candidates are deliberately ignored,
+    leaving the intent held rather than authorizing a disposition.
+    """
+    wanted = {str(reference).strip() for reference in references if reference is not None}
+    out: dict[str, list[TransferDebitEvidence]] = {}
+    if not wanted:
+        return BatchLookup(out, True)
+
+    page_size = max(1, int(limit))
+    max_pages = max(1, int(getattr(config, "NEXUS_LOOKUP_MAX_PAGES", 5)))
+    for page in range(max_pages):
+        cmd = [
+            config.NEXUS_CLI,
+            "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
+            f"name={config.NEXUS_TOKEN_NAME}",
+            "sort=timestamp",
+            "order=desc",
+            f"limit={page_size}",
+            f"offset={page * page_size}",
+        ]
+        try:
+            code, cli_out, err = _run(
+                cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
+            )
+            if code != 0:
+                print("Nexus: transfer-debit lookup error:", redact(err or cli_out))
+                return BatchLookup(out, False, "cli_error")
+            data = _parse_json_lenient(cli_out)
+            if isinstance(data, dict) and data.get("error"):
+                return BatchLookup(out, False, "api_error")
+            if data is None:
+                return BatchLookup(out, False, "invalid_response")
+            txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+            for tx in txs:
+                if not isinstance(tx, dict) or not tx.get("txid"):
+                    continue
+                for contract in (tx.get("contracts") or []):
+                    if not isinstance(contract, dict):
+                        continue
+                    if str(contract.get("OP") or "").upper() != "DEBIT":
+                        continue
+                    reference = contract.get("reference")
+                    if reference is None:
+                        continue
+                    key = str(reference).strip()
+                    if key not in wanted:
+                        continue
+                    amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
+                    from_address = contract.get("from")
+                    to_address = contract.get("to")
+                    if (amount_usdd_units is None or from_address is None or to_address is None or
+                            not str(from_address).strip() or not str(to_address).strip()):
+                        continue
+                    out.setdefault(key, []).append(TransferDebitEvidence(
+                        remote_txid=str(tx["txid"]),
+                        from_address=str(from_address).strip(),
+                        to_address=str(to_address).strip(),
+                        amount_usdd_units=amount_usdd_units,
+                    ))
+            if len(txs) < page_size:
+                return BatchLookup(out, False, "not_found_unverified")
+        except Exception as exc:
+            print("Nexus: transfer-debit lookup exception:", redact(str(exc)))
+            return BatchLookup(out, False, "exception")
+
+    return BatchLookup(out, False, "pagination_truncated")
 
 
 def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup:

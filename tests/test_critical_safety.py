@@ -673,7 +673,7 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["remote_txid"], "chain-tx")
         self.assertIsNotNone(stored["resolved_timestamp"])
 
-    @patch.object(nexus_client, "find_nexus_debits_by_references")
+    @patch.object(nexus_client, "find_nexus_transfer_debits_by_references")
     @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timed out"))
     def test_unknown_nexus_transfer_outcome_holds_until_positive_reference_resolution(
         self, run, find_by_reference
@@ -695,7 +695,11 @@ class CriticalSafetyTests(unittest.TestCase):
                 find_by_reference.return_value = nexus_client.BatchLookup({}, False, "timeout")
                 unresolved = nexus_client.resolve_nexus_transfer_intents()
                 find_by_reference.return_value = nexus_client.BatchLookup(
-                    {intent["reference"]: "chain-txid"}, True
+                    {intent["reference"]: [nexus_client.TransferDebitEvidence(
+                        remote_txid="chain-txid", from_address="TREASURY",
+                        to_address="QUARANTINE", amount_usdd_units=2_000_000,
+                    )]},
+                    True,
                 )
                 resolved = nexus_client.resolve_nexus_transfer_intents()
                 stored = state_db.get_nexus_transfer_intent(intent["id"])
@@ -706,6 +710,41 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(resolved, 1)
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(stored["remote_txid"], "chain-txid")
+        self.assertEqual(run.call_count, 1)
+
+    def test_transfer_resolution_rejects_reference_match_with_wrong_debit_terms(self):
+        """A public reference alone must not release a held credit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-wrong-terms", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(intent["id"], status="outcome_unknown")
+                response = [{
+                    "txid": "unrelated-debit",
+                    "contracts": [{
+                        "OP": "DEBIT",
+                        "reference": intent["reference"],
+                        "from": "UNRELATED_SOURCE",
+                        "to": "UNRELATED_DESTINATION",
+                        "amount": "999.0",
+                    }],
+                }]
+                with patch.object(nexus_client, "_run", return_value=(0, json.dumps(response), "")) as run:
+                    resolved = nexus_client.resolve_nexus_transfer_intents()
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(resolved, 0)
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
         self.assertEqual(run.call_count, 1)
 
     @patch.object(nexus_client, "transfer_nexus_between_accounts", return_value=True)
