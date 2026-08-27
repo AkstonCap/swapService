@@ -471,6 +471,46 @@ Run the tests before exposing it:
 python -m pytest -q tests/test_legacy_scripts.py
 ```
 
+## Nexus Held-Credit Disposition
+
+Automatic Nexus refunds and treasury-to-quarantine movements are intentionally disabled.
+Use `nexus_transfer_operator.py` only after independently reviewing the source credit and
+target-chain evidence. The service loop never invokes this CLI.
+
+Every movement has six durable, inspectable steps. `--operator` and `--reason` are required
+on each human decision; the reference and remote txid must be copied exactly from the prior
+output. Do **not** rerun `execute` after a timeout, non-zero exit, or unparsable response.
+
+```bash
+# 1. Create an immutable intent only for an existing `refund held for operator review` credit.
+python3 nexus_transfer_operator.py prepare --kind refund --txid <CREDIT_TXID> \
+  --operator <NAME> --reason "asset mapping permanently absent"
+
+# 2. Inspect immutable intent inputs, reference, and previous operator events.
+python3 nexus_transfer_operator.py show --intent <INTENT_ID>
+
+# 3. Authorize the exact displayed reference (a separate durable action).
+python3 nexus_transfer_operator.py authorize --intent <INTENT_ID> \
+  --confirm-reference <REFERENCE> --operator <NAME> --reason "evidence reviewed"
+
+# 4. Invoke the Nexus CLI once. A failure is `outcome_unknown`, not permission to retry.
+python3 nexus_transfer_operator.py execute --intent <INTENT_ID> \
+  --operator <NAME> --reason "approved one-time debit"
+
+# 5. Resolve only by a positive on-chain reference match; this command never debits.
+python3 nexus_transfer_operator.py resolve
+
+# 6. Move the held source row to refunded/quarantined only after the exact remote txid matches.
+python3 nexus_transfer_operator.py finalize --intent <INTENT_ID> \
+  --confirm-remote-txid <REMOTE_TXID> --operator <NAME> \
+  --reason "target-node reference and txid confirmed"
+```
+
+Use `prepare --kind quarantine` only when the independently reviewed disposition is a move
+to `NEXUS_USDD_QUARANTINE_ACCOUNT`. `list` and `show` are read-only. The local ledger retains
+who authorized, requested execution, and finalized a disposition; it is not a substitute for
+the required target-node timeout/crash acceptance matrix.
+
 ## Fees & Economics
 
 ### Fee Direction Map

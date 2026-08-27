@@ -93,8 +93,11 @@ EXPECTED_SCHEMA = {
     "metrics_snapshot": ["id", "timestamp", "vault_usdc_units", "circulating_usdd_units",
                          "ratio_bps", "paused", "payouts_24h_units", "fees_usdc_units",
                          "fees_usdd_units"],
-    # Persistent cross-chain debit protocol: immutable inputs and the unique Nexus
-    # reference survive a crash so the outcome can be resolved rather than retried.
+    # Every state-changing Nexus transfer must be tied to a durable, attributable
+    # operator decision. The event table is append-only and the action field is unique
+    # per intent, so repeating a CLI command cannot rewrite past authorization evidence.
+    "nexus_transfer_audit_events": ["id", "intent_id", "action", "actor", "rationale",
+                                    "evidence", "timestamp"],
     "nexus_transfer_intents": ["id", "kind", "source_txid", "from_address", "to_address",
                                "amount_usdd_units", "reference", "status", "remote_txid",
                                "created_timestamp", "last_attempt_timestamp", "resolved_timestamp"],

@@ -625,6 +625,10 @@ class CriticalSafetyTests(unittest.TestCase):
                     kind="refund", source_txid="credit-2", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
 
                 result = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 repeated = nexus_client.execute_nexus_transfer_intent(intent["id"])
@@ -649,6 +653,10 @@ class CriticalSafetyTests(unittest.TestCase):
                 intent = state_db.create_nexus_transfer_intent(
                     kind="quarantine", source_txid="credit-3", from_address="TREASURY",
                     to_address="QUARANTINE", amount_usdd_units=2_000_000,
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
                 )
                 result = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 again = nexus_client.execute_nexus_transfer_intent(intent["id"])
@@ -684,6 +692,61 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0]["kind"], "refund")
         self.assertEqual(intents[0]["source_txid"], "credit-4")
+
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"refund-tx"}', ""))
+    def test_nexus_transfer_requires_explicit_authorization_and_audited_disposition(self, run):
+        """Only a named operator can release a held credit after durable chain evidence."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_txid(
+                    txid="credit-operator", timestamp=1, amount_usdd=1.0,
+                    from_address="sender", to_address="TREASURY", owner_from_address="owner",
+                    confirmations_credit=2, status=swap_nexus.NEXUS_STATUS_REFUND_HOLD,
+                    amount_usdd_units=1_000_000, hold_reason="missing mapping",
+                )
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-operator", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+
+                blocked = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                with self.assertRaises(ValueError):
+                    state_db.authorize_nexus_transfer_intent(
+                        intent["id"], actor="alice", rationale="reviewed", expected_reference="wrong"
+                    )
+                authorized = state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="alice", rationale="mapping absent; refund approved",
+                    expected_reference=intent["reference"],
+                )
+                executed = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="completed", remote_txid="refund-tx", resolved=True
+                )
+                self.assertFalse(state_db.finalize_nexus_transfer_disposition(
+                    intent["id"], actor="alice", rationale="wrong txid rejected", expected_remote_txid="wrong"
+                ))
+                finalized = state_db.finalize_nexus_transfer_disposition(
+                    intent["id"], actor="alice", rationale="reference confirmed on target node",
+                    expected_remote_txid="refund-tx",
+                )
+                source_rows = state_db.get_unprocessed_txids_as_dicts()
+                events = state_db.get_nexus_transfer_audit_events(intent["id"])
+                is_refunded = state_db.is_refunded_txid("credit-operator")
+
+        self.assertFalse(blocked.executed)
+        self.assertEqual(blocked.status, "prepared")
+        self.assertEqual(authorized["status"], "authorized")
+        self.assertTrue(executed.executed)
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue(finalized)
+        self.assertTrue(is_refunded)
+        self.assertEqual(source_rows, [])
+        self.assertEqual([event["action"] for event in events], [
+            "authorized_execution", "finalized_refund",
+        ])
+        self.assertTrue(all(event["actor"] == "alice" for event in events))
 
 
 if __name__ == "__main__":

@@ -69,10 +69,12 @@ It atomically permits a single execution; parsed remote txids are retained and t
 interruptions, non-zero exits and unparsed output become `outcome_unknown`. Resolution only
 completes an intent after a positive on-chain reference match; it never retries a debit.
 
-Automatic refunds and quarantine moves remain disabled: there is no operator-authorized
-execution/disposition workflow or target-node fault-injection evidence yet. The transfer
-primitive below was therefore changed to fail closed rather than exposing a bypass around the
-intent ledger.
+Automatic refunds and quarantine moves remain disabled in the service loop. A separate
+`nexus_transfer_operator.py` workflow now requires a named operator, rationale, exact intent
+reference confirmation, a one-time execution request and a final exact remote-txid confirmation
+before it archives the held source row. Each authorization, requested execution and disposition
+is append-only/auditable. Focused fault injection and target-node evidence are still required;
+the transfer primitive remains fail closed outside the durable-intent workflow.
 
 **Historical root cause (pre-intent ledger):** `refund_nexus_token()` called
 `transfer_nexus_between_accounts()` directly. The operation:
@@ -400,7 +402,10 @@ target-chain integration matrix remains required before deployment.
 3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
 4. ✅ Resolve a positive reference match to completed; never retry a debit from the resolver.
 5. ✅ Persist and retain all in-flight intents across restart.
-6. ⏳ Build the operator-authorized execution/disposition workflow; keep automatic refunds and quarantine moves disabled until focused fault injection and the live matrix pass.
+6. ✅ Provide an operator-only prepare → reference-confirm → authorize → execute-once →
+   resolve → remote-txid-confirmed finalization workflow with an append-only attribution log;
+   automatic refunds and quarantine moves remain disabled until focused fault injection and the
+   live matrix pass.
 
 **Remaining exit evidence:** crashes at every intent/action/finalization boundary, duplicate
 invocation and target-node timeout behavior must prove exactly one remote transfer.

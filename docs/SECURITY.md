@@ -41,6 +41,10 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 ## Refund Safety
 - Attempts are bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion, USDC may move to `USDC_QUARANTINE_ACCOUNT`; USDD→USDC credits instead remain held because automatic Nexus refunds and quarantine moves are disabled.
 - Any future Nexus account debit must first create a durable intent containing source, destination, exact base units and a unique reference. Timeout, non-zero CLI exit or unparsed output is `outcome_unknown` and requires positive chain-reference resolution; it is never retried blindly.
+- The only supported Nexus held-credit disposition is `nexus_transfer_operator.py`: a named
+  operator prepares an intent, confirms its exact reference, authorizes it, then issues one
+  debit. Finalization also requires the exact positively observed remote txid and records
+  immutable authorization/execution/disposition evidence in SQLite. See `SETUP.md`.
 - Keep quarantine accounts separate from active treasury/vault to simplify reconciliation and avoid accidental reuse.
 
 ## Heartbeat & Liveness

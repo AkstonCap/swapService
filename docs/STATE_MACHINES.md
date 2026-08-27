@@ -113,6 +113,10 @@ flowchart TD
     TradeBal -->|"lookup failed / malformed / incomplete"| TradeBal
     TradeBal -->|"complete lookup still absent"| RefundHold["refund held for operator review"]
 
+    RefundHold -->|"operator prepares, confirms reference and authorizes"| IntentAuthorized["durable transfer intent authorized"]
+    IntentAuthorized -->|"one CLI attempt"| IntentOutcome["submitted / outcome_unknown"]
+    IntentOutcome -->|"positive on-chain reference match + exact remote txid confirmation"| Disposition["refunded or quarantined ✓"]
+
     Collecting -->|legacy state| RefundHold
     RefundPending -->|legacy state| RefundHold
 ```
@@ -132,6 +136,9 @@ flowchart TD
 | **Collecting** | Legacy refund state converted to a hold | `unprocessed_txids` | `"collecting refund"` |
 | **RefundPending** | Legacy refund state converted to a hold | `unprocessed_txids` | `"refund pending"` |
 | **RefundHold** | Refund/quarantine requires operator review; no automatic Nexus debit | `unprocessed_txids` | `"refund held for operator review"` |
+| **IntentAuthorized** | Operator has confirmed the immutable reference and authorized exactly one CLI debit | `nexus_transfer_intents` | `"authorized"` |
+| **IntentOutcome** | CLI result is submitted or unknown; resolver only accepts a positive on-chain reference match | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
+| **Disposition** | A named operator confirms the exact remote txid, then the source moves to its terminal archive | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
 | **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
 
 > **A USDC-confirmation timeout quarantines — it does not refund.** The USDC may in fact
@@ -192,6 +199,7 @@ transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`.
 | `unprocessed_sigs` / `processed_sigs` / `refunded_sigs` / `quarantined_sigs` | USDC→USDD lifecycle |
 | `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | USDD→USDC lifecycle |
 | `attempts` | Retry counters + `last_timestamp` (cooldown) |
+| `nexus_transfer_intents` / `nexus_transfer_audit_events` | Immutable Nexus debit inputs plus named operator authorization, execution-request and final-disposition evidence |
 | `reservations` | Cross-worker mutual exclusion on money actions |
 | `counters` | Atomic Nexus debit `reference` sequence |
 | `payouts` | Outbound USDC ledger for the rolling 24h cap |
@@ -262,6 +270,7 @@ resolution rather than authorizing retry or refund.
 | USDD→USDC polling | `src/swap_nexus.py` | `poll_nexus_deposits()` |
 | USDD→USDC processing | `src/swap_nexus.py` | `process_unprocessed_txids()` |
 | USDD quarantine transfer | `src/nexus_client.py` | `quarantine_nexus_token()` |
+| Held-credit operator disposition | `nexus_transfer_operator.py` | `prepare`, `authorize`, `execute`, `resolve`, `finalize` |
 | Alerting | `src/alerts.py` | `critical()`, `warning()`, `info()` |
 | Startup recovery | `src/startup_recovery.py` | `perform_startup_recovery()` |
 
