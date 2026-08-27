@@ -111,12 +111,10 @@ flowchart TD
 
     TradeBal -->|asset appeared| Ready
     TradeBal -->|"lookup failed / malformed / incomplete"| TradeBal
-    TradeBal -->|"complete lookup still absent"| Collecting["collecting refund"]
+    TradeBal -->|"complete lookup still absent"| RefundHold["refund held for operator review"]
 
-    Collecting -->|USDD returned| Refunded["refunded ✓"]
-    Collecting -->|"attempts spent / no sender"| Quarantined
-    RefundPending -->|USDD returned| Refunded
-    RefundPending -->|"attempts spent / no sender"| Quarantined
+    Collecting -->|legacy state| RefundHold
+    RefundPending -->|legacy state| RefundHold
 ```
 
 ### USDD → USDC State Descriptions
@@ -130,11 +128,11 @@ flowchart TD
 | **Sending** | USDC send attempted | `unprocessed_txids` | `"sending"` |
 | **Awaiting** | Signature stored, awaiting finality | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
 | **Processed** | USDC delivered | `processed_txids` | `"processed"` |
-| **TradeBal** | Mapping timed out; one more lookup before refunding | `unprocessed_txids` | `"trade balance to be checked"` |
-| **Collecting** | Refund being collected | `unprocessed_txids` | `"collecting refund"` |
-| **RefundPending** | Refund queued | `unprocessed_txids` | `"refund pending"` |
-| **Refunded** | USDD returned to sender | `refunded_txids` | `"refunded"` |
-| **Quarantined** | Manual review; USDD **moved** to `NEXUS_USDD_QUARANTINE_ACCOUNT` | `quarantined_txids` | `"quarantined"`, or `"quarantined (USDD NOT moved)"` if that account is unset |
+| **TradeBal** | Legacy mapping-timeout recheck; complete absence now holds | `unprocessed_txids` | `"trade balance to be checked"` |
+| **Collecting** | Legacy refund state converted to a hold | `unprocessed_txids` | `"collecting refund"` |
+| **RefundPending** | Legacy refund state converted to a hold | `unprocessed_txids` | `"refund pending"` |
+| **RefundHold** | Refund/quarantine requires operator review; no automatic Nexus debit | `unprocessed_txids` | `"refund held for operator review"` |
+| **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
 
 > **A USDC-confirmation timeout quarantines — it does not refund.** The USDC may in fact
 > have been sent and only the lookup failed; refunding would pay twice.
@@ -146,9 +144,9 @@ flowchart TD
 | 1 | `pending_receival` (confirmations > 1) | Resolve `receival_account` by (`txid_toService`, `owner`) | No |
 | 2 | `ready for processing` | Liquidity check, then send USDC with memo `nexus_txid:<txid>` | **Yes** |
 | 3 | `sig created, awaiting confirmations` | Confirm the stored signature; memo scan only as fallback | No |
-| 4 | `trade balance to be checked` | Retry lookup, else → `collecting refund` | No |
-| 5 | `collecting refund` | Refund USDD, else quarantine | No |
-| 6 | `refund pending` | Refund USDD, else quarantine | No |
+| 4 | `trade balance to be checked` | Retry lookup, else hold for operator review | No |
+| 5 | `collecting refund` | Convert legacy state to an operator hold | No |
+| 6 | `refund pending` | Convert legacy state to an operator hold | No |
 
 ---
 

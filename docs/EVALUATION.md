@@ -60,23 +60,39 @@ live-chain acceptance matrix has not been run.
 **Severity:** Critical
 **Priority:** P0 — contain immediately, then implement durable protocol
 
-**Current status:** **contained, not repaired.** Every automatic Nexus refund branch now
-transitions the source credit to `refund held for operator review`, records `hold_reason`,
-emits a Critical alert and leaves the source row in place. Focused tests prove the major
-refund paths do not call `refund_nexus_token()`. The transfer primitive below remains unsafe
-to retry after an ambiguous result, so automatic refunds must stay disabled.
+**Current status:** **contained; durable-protocol foundation implemented, not yet released.**
+Every automatic Nexus refund branch transitions the source credit to `refund held for operator
+review`, records `hold_reason`, emits a Critical alert and leaves the source row in place.
+A new append-only `nexus_transfer_intents` ledger now persists the source credit, destination,
+exact base units and deterministic unique reference before a Nexus account debit can be issued.
+It atomically permits a single execution; parsed remote txids are retained and timeouts,
+interruptions, non-zero exits and unparsed output become `outcome_unknown`. Resolution only
+completes an intent after a positive on-chain reference match; it never retries a debit.
 
-`refund_nexus_token()` calls `transfer_nexus_between_accounts()` directly
-(`src/nexus_client.py:507-538`). The operation:
+Automatic refunds and quarantine moves remain disabled: there is no operator-authorized
+execution/disposition workflow or target-node fault-injection evidence yet. The transfer
+primitive below was therefore changed to fail closed rather than exposing a bypass around the
+intent ledger.
 
-- writes no durable refund intent before `finance/debit/account`;
-- does not persist a returned Nexus transaction id;
-- maps CLI timeout, exception and non-zero result to `False`, even though the node may have accepted the debit;
-- performs no on-chain reference lookup before a retry.
+**Historical root cause (pre-intent ledger):** `refund_nexus_token()` called
+`transfer_nexus_between_accounts()` directly. The operation:
 
-Four automatic refund paths call this boolean operation and retry it (`src/swap_nexus.py:215-255, 549-569, 600-620`). A process crash or timeout after Nexus accepts the refund but before the local `refunded_txids` write can therefore send the same refund twice.
+- wrote no durable refund intent before `finance/debit/account`;
+- did not persist a returned Nexus transaction id;
+- mapped CLI timeout, exception and non-zero result to `False`, even though the node may have accepted the debit;
+- performed no on-chain reference lookup before a retry.
 
-The current `is_processed_txid()` check does not provide idempotency. The source credit remains in `unprocessed_txids`, while a completed refund is archived in `refunded_txids`, not `processed_txids`.
+The direct transfer function is now a fail-closed legacy shim; only
+`execute_nexus_transfer_intent()` can form an account debit, and only from a prepared durable
+intent. Automatic callers still do not invoke it.
+
+Before containment, four automatic refund paths called that boolean operation and retried it. A
+process crash or timeout after Nexus accepted the refund but before a local completion write
+could therefore send the same refund twice. Those paths now only hold and alert.
+
+The prior `is_processed_txid()` check never provided refund idempotency: the source credit
+remained in `unprocessed_txids`, while a completed refund was archived elsewhere. The durable
+intent row and its reference now carry that identity explicitly.
 
 #### Immediate containment
 
@@ -377,17 +393,17 @@ mixed-decimal contract still requires target-chain evidence in Batch 4.
 gone; a seeded duplicate is detected; and zero checked addresses cannot report healthy. The
 target-chain integration matrix remains required before deployment.
 
-### Batch 3 — Durable Nexus refund and quarantine protocol
+### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
-1. Persist intent, destination, exact units and unique reference before every transfer.
-2. Execute once and capture the Nexus txid.
-3. Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
-4. Resolve the reference on-chain before retry, completion or compensation.
-5. Recover all in-flight intents after restart.
-6. Keep automatic refunds disabled until focused fault injection and the live matrix pass.
+1. ✅ Persist intent, destination, exact units and a deterministic unique reference before every eligible transfer.
+2. ✅ Allow exactly one CLI execution from an atomically claimed intent and persist a parsed Nexus txid.
+3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
+4. ✅ Resolve a positive reference match to completed; never retry a debit from the resolver.
+5. ✅ Persist and retain all in-flight intents across restart.
+6. ⏳ Build the operator-authorized execution/disposition workflow; keep automatic refunds and quarantine moves disabled until focused fault injection and the live matrix pass.
 
-**Exit:** crashes at every intent/action/finalization boundary and duplicate invocation produce
-exactly one remote transfer.
+**Remaining exit evidence:** crashes at every intent/action/finalization boundary, duplicate
+invocation and target-node timeout behavior must prove exactly one remote transfer.
 
 ### Batch 4 — Live integration and external-semantics evidence
 

@@ -243,8 +243,10 @@ Policy notes on USDD → USDC:
 - Solana transfers include confirmation attempts.
  - If all refund attempts fail:
    - USDC→USDD path: the remaining refundable amount (after the last attempt's flat fee) is moved from the vault USDC token account to a self-owned quarantine USDC token account.
-   - USDD→USDC path: the remaining refundable USDD is moved from the treasury to a self-owned Nexus USDD quarantine account.
-   - In both cases, the event is recorded in the `quarantined_sigs` or `quarantined_txids` database table for manual inspection.
+   - USDD→USDC path: no automatic Nexus quarantine or refund debit is issued. The source
+     credit is held for operator review; any future Nexus move must use a durable intent,
+     chain-reference resolution and separately authorized disposition.
+   - In both cases, the event is recorded for manual inspection.
 
 ## Finding and verifying a bridge
 

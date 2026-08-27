@@ -587,6 +587,104 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertTrue(any("durable Nexus destination" in reason
                             for reason in result["incomplete_reasons"]))
 
+    def test_nexus_transfer_intent_is_durable_and_reuses_its_unique_reference(self):
+        """A refund/quarantine transfer is uniquely identified before the CLI can run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                first = state_db.create_nexus_transfer_intent(
+                    kind="refund",
+                    source_txid="credit-1",
+                    from_address="TREASURY",
+                    to_address="sender",
+                    amount_usdd_units=1_000_000,
+                )
+                second = state_db.create_nexus_transfer_intent(
+                    kind="refund",
+                    source_txid="credit-1",
+                    from_address="TREASURY",
+                    to_address="sender",
+                    amount_usdd_units=1_000_000,
+                )
+
+                self.assertEqual(first["status"], "prepared")
+                self.assertEqual(first["reference"], second["reference"])
+                self.assertEqual(first["id"], second["id"])
+                self.assertEqual(
+                    state_db.get_nexus_transfer_intent(first["id"]), first
+                )
+
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"refund-tx"}', ""))
+    def test_nexus_transfer_intent_executes_once_and_persists_remote_txid(self, run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-2", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+
+                result = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                repeated = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.status, "submitted")
+        self.assertFalse(repeated.executed)
+        self.assertEqual(stored["status"], "submitted")
+        self.assertEqual(stored["remote_txid"], "refund-tx")
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(nexus_client, "find_nexus_debits_by_references")
+    @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timed out"))
+    def test_unknown_nexus_transfer_outcome_holds_until_positive_reference_resolution(
+        self, run, find_by_reference
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="quarantine", source_txid="credit-3", from_address="TREASURY",
+                    to_address="QUARANTINE", amount_usdd_units=2_000_000,
+                )
+                result = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                again = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                find_by_reference.return_value = nexus_client.BatchLookup({}, False, "timeout")
+                unresolved = nexus_client.resolve_nexus_transfer_intents()
+                find_by_reference.return_value = nexus_client.BatchLookup(
+                    {intent["reference"]: "chain-txid"}, True
+                )
+                resolved = nexus_client.resolve_nexus_transfer_intents()
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(result.status, "outcome_unknown")
+        self.assertFalse(again.executed)
+        self.assertEqual(unresolved, 0)
+        self.assertEqual(resolved, 1)
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(stored["remote_txid"], "chain-txid")
+        self.assertEqual(run.call_count, 1)
+
+    @patch.object(nexus_client, "transfer_nexus_between_accounts", return_value=True)
+    def test_legacy_refund_wrapper_only_prepares_durable_intent(self, raw_transfer):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                refunded = nexus_client.refund_nexus_token(
+                    "sender", 1_000_000, "missing mapping txid: credit-4"
+                )
+                intents = state_db.get_nexus_transfer_intents_by_status(("prepared",))
+
+        self.assertFalse(refunded)
+        raw_transfer.assert_not_called()
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0]["kind"], "refund")
+        self.assertEqual(intents[0]["source_txid"], "credit-4")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

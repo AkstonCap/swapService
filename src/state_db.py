@@ -1,6 +1,7 @@
-import sqlite3
+import hashlib
 import os
-from typing import List, Optional, Tuple
+import sqlite3
+import time
 from typing import List, Optional, Tuple
 
 DB_PATH = os.getenv("STATE_DB_PATH", "swap_service.db")
@@ -227,6 +228,28 @@ def init_db():
             last_timestamp INTEGER
         )
     """)
+
+    # Every Nexus-side transfer must first have a durable local intent.  The unique
+    # (kind, source_txid) and reference keys mean a restart or duplicate invocation
+    # gets the same operation record rather than a second remote debit.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS nexus_transfer_intents (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            source_txid TEXT NOT NULL,
+            from_address TEXT NOT NULL,
+            to_address TEXT NOT NULL,
+            amount_usdd_units INTEGER NOT NULL,
+            reference TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            remote_txid TEXT,
+            created_timestamp INTEGER NOT NULL,
+            last_attempt_timestamp INTEGER,
+            resolved_timestamp INTEGER,
+            UNIQUE(kind, source_txid)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nexus_transfer_intents_status ON nexus_transfer_intents(status, created_timestamp)")
     
     # Counters table for atomic sequence generation (e.g., reference numbers)
     cursor.execute("""
@@ -357,6 +380,184 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+# Nexus transfer intents -------------------------------------------------------
+#
+# A Nexus CLI timeout/non-zero result is not proof the node did not accept a
+# debit.  These rows capture all debit inputs before invocation and make the
+# persisted reference the only identifier used for post-crash resolution.
+_NEXUS_TRANSFER_COLUMNS = (
+    "id", "kind", "source_txid", "from_address", "to_address",
+    "amount_usdd_units", "reference", "status", "remote_txid",
+    "created_timestamp", "last_attempt_timestamp", "resolved_timestamp",
+)
+
+
+def _nexus_transfer_intent_id(kind: str, source_txid: str) -> str:
+    material = f"{kind}\0{source_txid}".encode("utf-8")
+    return "nexus-transfer-" + hashlib.sha256(material).hexdigest()[:32]
+
+
+def _nexus_transfer_reference(intent_id: str) -> str:
+    # Reference fields are visible on-chain and may be length-limited. The durable
+    # database row holds the expanded context; this compact value is unique/stable.
+    return "bridge-xfer:" + intent_id.rsplit("-", 1)[-1]
+
+
+def _nexus_transfer_intent_dict(row) -> dict | None:
+    return dict(zip(_NEXUS_TRANSFER_COLUMNS, row)) if row else None
+
+
+def create_nexus_transfer_intent(
+    *,
+    kind: str,
+    source_txid: str,
+    from_address: str,
+    to_address: str,
+    amount_usdd_units: int,
+) -> dict:
+    """Persist a deterministic Nexus transfer intent before any CLI invocation.
+
+    Repeating the exact request returns the existing row. Reusing the same source
+    with different transfer inputs is rejected: it would be a distinct remote debit
+    without a distinct source authorization.
+    """
+    kind = str(kind or "").strip()
+    source_txid = str(source_txid or "").strip()
+    from_address = str(from_address or "").strip()
+    to_address = str(to_address or "").strip()
+    units = int(amount_usdd_units)
+    if not kind or not source_txid or not from_address or not to_address or units <= 0:
+        raise ValueError("Nexus transfer intent requires kind, source, addresses and positive units")
+
+    intent_id = _nexus_transfer_intent_id(kind, source_txid)
+    reference = _nexus_transfer_reference(intent_id)
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
+            " FROM nexus_transfer_intents WHERE kind = ? AND source_txid = ?",
+            (kind, source_txid),
+        ).fetchone()
+        if row:
+            existing = _nexus_transfer_intent_dict(row)
+            if existing is None:  # pragma: no cover - row is truthy above
+                raise RuntimeError("could not decode existing Nexus transfer intent")
+            expected = (from_address, to_address, units)
+            observed = (existing["from_address"], existing["to_address"],
+                        int(existing["amount_usdd_units"]))
+            if observed != expected:
+                raise ValueError("existing Nexus transfer intent conflicts with requested inputs")
+            conn.commit()
+            return existing
+        conn.execute(
+            """INSERT INTO nexus_transfer_intents
+               (id, kind, source_txid, from_address, to_address, amount_usdd_units,
+                reference, status, created_timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?)""",
+            (intent_id, kind, source_txid, from_address, to_address, units, reference, now),
+        )
+        conn.commit()
+        created = get_nexus_transfer_intent(intent_id, conn=conn)
+        if created is None:  # pragma: no cover - same transaction inserted the row
+            raise RuntimeError("could not read newly created Nexus transfer intent")
+        return created
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_nexus_transfer_intent(intent_id: str, *, conn=None) -> dict | None:
+    """Return the complete durable transfer record, if it exists."""
+    owns_connection = conn is None
+    conn = conn or sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
+            " FROM nexus_transfer_intents WHERE id = ?", (intent_id,)
+        ).fetchone()
+        return _nexus_transfer_intent_dict(row)
+    finally:
+        if owns_connection:
+            conn.close()
+
+
+def claim_nexus_transfer_intent(intent_id: str) -> dict | None:
+    """Atomically claim one prepared intent for its sole allowed remote invocation."""
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        updated = conn.execute(
+            """UPDATE nexus_transfer_intents
+               SET status = 'executing', last_attempt_timestamp = ?
+               WHERE id = ? AND status = 'prepared'""",
+            (now, intent_id),
+        ).rowcount
+        if not updated:
+            conn.commit()
+            return None
+        row = get_nexus_transfer_intent(intent_id, conn=conn)
+        if row is None:  # pragma: no cover - UPDATE succeeded for an existing row
+            raise RuntimeError("could not read claimed Nexus transfer intent")
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def update_nexus_transfer_intent(
+    intent_id: str,
+    *,
+    status: str,
+    remote_txid: str | None = None,
+    resolved: bool = False,
+) -> None:
+    """Record the remote identity or an unknown outcome; never reset to prepared."""
+    if status == "prepared":
+        raise ValueError("a Nexus transfer intent cannot be reset to prepared")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        now = int(time.time())
+        conn.execute(
+            """UPDATE nexus_transfer_intents
+               SET status = ?, remote_txid = COALESCE(?, remote_txid),
+                   resolved_timestamp = CASE WHEN ? THEN ? ELSE resolved_timestamp END
+               WHERE id = ?""",
+            (status, remote_txid, 1 if resolved else 0, now, intent_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_nexus_transfer_intents_by_status(statuses: tuple[str, ...], limit: int = 200) -> list[dict]:
+    """List nonterminal intents for positive on-chain reference resolution."""
+    if not statuses:
+        return []
+    marks = ",".join("?" for _ in statuses)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
+            f" FROM nexus_transfer_intents WHERE status IN ({marks}) "
+            "ORDER BY created_timestamp ASC LIMIT ?",
+            tuple(statuses) + (int(limit),),
+        ).fetchall()
+        return [intent for row in rows
+                if (intent := _nexus_transfer_intent_dict(row)) is not None]
+    finally:
+        conn.close()
 
 
 ## Unprocessed Signatures

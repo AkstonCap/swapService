@@ -39,7 +39,8 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Consider raising `SOLANA_POLL_INTERVAL` or lowering `SOLANA_MAX_TX_FETCH_PER_POLL` under sustained attack.
 
 ## Refund Safety
-- Attempts bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion USDC moves to `USDC_QUARANTINE_ACCOUNT` and USDD is transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`; if the latter is unset the USDD stays in the treasury and the row records `quarantined (USDD NOT moved)`.
+- Attempts are bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion, USDC may move to `USDC_QUARANTINE_ACCOUNT`; USDD→USDC credits instead remain held because automatic Nexus refunds and quarantine moves are disabled.
+- Any future Nexus account debit must first create a durable intent containing source, destination, exact base units and a unique reference. Timeout, non-zero CLI exit or unparsed output is `outcome_unknown` and requires positive chain-reference resolution; it is never retried blindly.
 - Keep quarantine accounts separate from active treasury/vault to simplify reconciliation and avoid accidental reuse.
 
 ## Heartbeat & Liveness

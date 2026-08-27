@@ -93,6 +93,11 @@ EXPECTED_SCHEMA = {
     "metrics_snapshot": ["id", "timestamp", "vault_usdc_units", "circulating_usdd_units",
                          "ratio_bps", "paused", "payouts_24h_units", "fees_usdc_units",
                          "fees_usdd_units"],
+    # Persistent cross-chain debit protocol: immutable inputs and the unique Nexus
+    # reference survive a crash so the outcome can be resolved rather than retried.
+    "nexus_transfer_intents": ["id", "kind", "source_txid", "from_address", "to_address",
+                               "amount_usdd_units", "reference", "status", "remote_txid",
+                               "created_timestamp", "last_attempt_timestamp", "resolved_timestamp"],
     "payouts": ["id", "kind", "amount_usdc_units", "reference", "timestamp"],
     # These append-only fields are intentionally introduced by the E-004 durable
     # reconciliation migration. Existing rows retain their original columns and are

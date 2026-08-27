@@ -256,6 +256,93 @@ def debit_nexus_token_with_txid(to_addr: str, amount_usdd_units: int, reference:
 
 
 @dataclass(frozen=True)
+class TransferExecution:
+    """Result of exactly one persisted Nexus account-to-account debit attempt."""
+
+    executed: bool
+    status: str
+    remote_txid: str | None = None
+
+
+def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
+    """Execute one prepared intent and persist its outcome before returning.
+
+    This function deliberately never retries an ``executing``, ``submitted`` or
+    ``outcome_unknown`` intent. A process loss, timeout, non-zero CLI result or
+    unparseable successful output can all occur after the Nexus node accepted the
+    debit, so each requires positive reference resolution rather than another debit.
+    """
+    intent = state_db.claim_nexus_transfer_intent(intent_id)
+    if intent is None:
+        existing = state_db.get_nexus_transfer_intent(intent_id)
+        return TransferExecution(False, (existing or {}).get("status", "missing"),
+                                 (existing or {}).get("remote_txid"))
+
+    if not config.NEXUS_PIN:
+        state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        return TransferExecution(False, "outcome_unknown")
+
+    amount_str = _format_nexus_amount(int(intent["amount_usdd_units"]))
+    cmd = [
+        config.NEXUS_CLI,
+        "finance/debit/account",
+        f"from={intent['from_address']}",
+        f"to={intent['to_address']}",
+        f"amount={amount_str}",
+        f"reference={intent['reference']}",
+        f"pin={config.NEXUS_PIN}",
+    ]
+    try:
+        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
+    except Exception as exc:
+        print("Nexus transfer outcome unknown:", redact(str(exc)))
+        state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        return TransferExecution(True, "outcome_unknown")
+
+    if code != 0:
+        print("Nexus transfer outcome unknown:", redact(err or out))
+        state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        return TransferExecution(True, "outcome_unknown")
+
+    data = _parse_json_lenient(out)
+    remote_txid = data.get("txid") if isinstance(data, dict) else None
+    if not remote_txid:
+        # Text-only success is deliberately not treated as a safe retry.  The
+        # persisted reference is resolved against the chain in a later pass.
+        state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        return TransferExecution(True, "outcome_unknown")
+
+    remote_txid = str(remote_txid)
+    state_db.update_nexus_transfer_intent(
+        intent_id, status="submitted", remote_txid=remote_txid
+    )
+    return TransferExecution(True, "submitted", remote_txid)
+
+
+def resolve_nexus_transfer_intents(limit: int = 200) -> int:
+    """Mark only positively observed transfer references complete; never re-debit."""
+    intents = state_db.get_nexus_transfer_intents_by_status(
+        ("executing", "submitted", "outcome_unknown"), limit=limit
+    )
+    if not intents:
+        return 0
+    lookup = find_nexus_debits_by_references([intent["reference"] for intent in intents])
+    resolved = 0
+    for intent in intents:
+        remote_txid = lookup.values.get(str(intent["reference"]).strip())
+        if not remote_txid:
+            print("[NEXUS_TRANSFER_HOLD] intent=%s reference=%s lookup=%s" % (
+                intent["id"], intent["reference"], lookup.reason or "not_observed"
+            ))
+            continue
+        state_db.update_nexus_transfer_intent(
+            intent["id"], status="completed", remote_txid=str(remote_txid), resolved=True
+        )
+        resolved += 1
+    return resolved
+
+
+@dataclass(frozen=True)
 class BatchLookup:
     """Values returned by a bounded chain lookup plus proof of completeness.
 
@@ -488,65 +575,72 @@ def resolve_unverified_debits(limit: int = 200) -> int:
 
 
 def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") -> bool:
-    """Actually MOVE quarantined funds out of the treasury.
+    """Prepare (but never automatically execute) a treasury-to-quarantine transfer.
 
-    README/CONFIG/SETUP/SECURITY all state that funds from exhausted refunds is moved to
-    NEXUS_USDD_QUARANTINE_ACCOUNT so it stops counting toward the backing ratio. Nothing
-    ever moved it - only a DB status was written - so the funds stayed in the live
-    treasury and the ratio was overstated by exactly the quarantined amount.
-
-    Returns True if the transfer succeeded (or there was nothing to move).
+    Automatic quarantine movement has the same ambiguous debit semantics as a refund.
+    It stays held until a separately authorized caller executes and resolves the durable
+    intent through ``execute_nexus_transfer_intent``.
     """
     dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
-    if not dest:
-        print("[quarantine_nexus_token] NEXUS_USDD_QUARANTINE_ACCOUNT not set; funds stay in the treasury "
-              "and will keep counting toward the backing ratio")
+    treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+    if not dest or not treas or int(amount_usdd_units or 0) <= 0 or not txid:
+        print("[quarantine_nexus_token] cannot prepare durable quarantine intent")
         return False
-    if int(amount_usdd_units or 0) <= 0:
-        return True
-    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
-    if not treas:
-        print("[quarantine_nexus_token] NEXUS_USDD_TREASURY_ACCOUNT not set")
+    try:
+        intent = state_db.create_nexus_transfer_intent(
+            kind="quarantine",
+            source_txid=str(txid),
+            from_address=str(treas),
+            to_address=str(dest),
+            amount_usdd_units=int(amount_usdd_units),
+        )
+    except ValueError as exc:
+        print("[quarantine_nexus_token] intent conflict:", redact(str(exc)))
         return False
-    ref = f"quarantine:{txid}" if txid else (reason or "quarantine")
-    ok = transfer_nexus_between_accounts(treas, dest, int(amount_usdd_units), ref[:120])
-    if ok:
-        print(f"[quarantine_nexus_token] moved {amount_usdd_units} base units to {dest} ({ref})")
-    return ok
+    print("[quarantine_nexus_token] prepared intent=%s reason=%s; manual authorization required" %
+          (intent["id"], redact(reason)))
+    return False
+
+
+def _refund_source_txid(reason: str) -> str | None:
+    """Extract the source credit identifier retained by legacy refund call sites."""
+    marker = "txid:"
+    if marker not in str(reason):
+        return None
+    value = str(reason).split(marker, 1)[1].strip().split()
+    return value[0] if value else None
 
 
 def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
-    """Refund by transferring from treasury to the recipient (amount in base units)."""
-    # Check if this refund was already processed by checking for txid in reason
-    from . import state_db
-    if "txid:" in reason:
-        potential_txid = reason.split("txid:")[-1].strip().split()[0]
-        if state_db.is_processed_txid(potential_txid):
-            return True  # Already refunded this transaction
-    
-    ref = reason if len(reason) <= 120 else reason[:117] + "..."
-    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
-    if not treas:
-        print("Refund failed: NEXUS_USDD_TREASURY_ACCOUNT not set")
+    """Prepare a refund intent and hold; automatic Nexus refunds remain disabled."""
+    source_txid = _refund_source_txid(reason)
+    treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+    if not source_txid or not treas or not to_addr or int(amount_usdd_units or 0) <= 0:
+        print("[refund_nexus_token] cannot prepare durable refund intent; holding for review")
         return False
-    return transfer_nexus_between_accounts(treas, to_addr, amount_usdd_units, ref)
+    try:
+        intent = state_db.create_nexus_transfer_intent(
+            kind="refund",
+            source_txid=source_txid,
+            from_address=str(treas),
+            to_address=str(to_addr),
+            amount_usdd_units=int(amount_usdd_units),
+        )
+    except ValueError as exc:
+        print("[refund_nexus_token] intent conflict:", redact(str(exc)))
+        return False
+    print("[refund_nexus_token] prepared intent=%s; automatic execution disabled" % intent["id"])
+    return False
+
 
 def transfer_nexus_between_accounts(from_addr: str, to_addr: str, amount_usdd_units: int, reference: str) -> bool:
-    """Transfer the Nexus-side token between two Nexus token accounts. Amount is base units internally, formatted for CLI."""
-    if not config.NEXUS_PIN:
-        print("ERROR: NEXUS_PIN not set")
-        return False
-    amount_str = _format_nexus_amount(int(amount_usdd_units))
-    cmd = [config.NEXUS_CLI, "finance/debit/account", f"from={from_addr}", f"to={to_addr}", f"amount={amount_str}", f"reference={reference}", f"pin={config.NEXUS_PIN}"]
-    try:
-        code, out, err = _run(cmd, timeout=30)
-        if code != 0:
-            print("Nexus transfer error:", redact(err or out))
-            return False
-        return True
-    except Exception as e:
-        print("Nexus transfer exception:", e)
-        return False
+    """Legacy unsafe entrypoint retained only to fail closed.
+
+    Callers must first create an immutable ``nexus_transfer_intents`` row and then use
+    ``execute_nexus_transfer_intent``. This function deliberately cannot issue a debit.
+    """
+    print("Nexus transfer blocked: durable transfer intent required")
+    return False
 
 def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, reference: int | str) -> tuple[bool, str | None]:
     """Debit from a specific account (e.g., treasury) to recipient and parse txid.
