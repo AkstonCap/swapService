@@ -641,6 +641,38 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["remote_txid"], "refund-tx")
         self.assertEqual(run.call_count, 1)
 
+    def test_completed_nexus_transfer_intent_cannot_be_regressed_to_an_ambiguous_state(self):
+        """Terminal chain evidence must not be overwritten by a later recovery path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-terminal", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="chain-tx"
+                )
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="completed", remote_txid="chain-tx", resolved=True
+                )
+
+                with self.assertRaises(ValueError):
+                    state_db.update_nexus_transfer_intent(
+                        intent["id"], status="outcome_unknown"
+                    )
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(stored["remote_txid"], "chain-tx")
+        self.assertIsNotNone(stored["resolved_timestamp"])
+
     @patch.object(nexus_client, "find_nexus_debits_by_references")
     @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timed out"))
     def test_unknown_nexus_transfer_outcome_holds_until_positive_reference_resolution(

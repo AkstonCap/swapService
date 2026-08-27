@@ -735,11 +735,35 @@ def update_nexus_transfer_intent(
     remote_txid: str | None = None,
     resolved: bool = False,
 ) -> None:
-    """Record the remote identity or an unknown outcome; never reset to prepared."""
-    if status == "prepared":
-        raise ValueError("a Nexus transfer intent cannot be reset to prepared")
+    """Advance one execution intent without allowing ambiguous state regression.
+
+    The row is a durable record of the sole permitted Nexus debit.  In particular,
+    completed chain evidence must never be replaced by ``outcome_unknown`` by a
+    delayed recovery path; that would hide proof needed for operator disposition.
+    """
+    transitions = {
+        "executing": {"submitted", "outcome_unknown", "completed"},
+        "submitted": {"completed"},
+        "outcome_unknown": {"completed"},
+    }
+    status = str(status or "").strip()
     conn = sqlite3.connect(DB_PATH)
     try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is None:
+            raise ValueError("Nexus transfer intent does not exist")
+        current_status = str(intent["status"])
+        if status not in transitions.get(current_status, set()):
+            raise ValueError(
+                f"cannot transition Nexus transfer intent from {current_status!r} to {status!r}"
+            )
+        next_remote_txid = str(remote_txid or intent.get("remote_txid") or "").strip()
+        if status in {"submitted", "completed"} and not next_remote_txid:
+            raise ValueError("submitted or completed Nexus transfer intent requires a remote txid")
+        if resolved and status != "completed":
+            raise ValueError("only a completed Nexus transfer intent may be marked resolved")
         now = int(time.time())
         conn.execute(
             """UPDATE nexus_transfer_intents
@@ -749,6 +773,9 @@ def update_nexus_transfer_intent(
             (status, remote_txid, 1 if resolved else 0, now, intent_id),
         )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
