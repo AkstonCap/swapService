@@ -73,10 +73,10 @@ destination account and exact base-unit amount all match the immutable intent. F
 submitted intent, the observed txid must also match the persisted txid. It never retries a debit.
 
 Automatic refunds and quarantine moves remain disabled in the service loop. A separate
-`nexus_transfer_operator.py` workflow now requires a named operator, rationale, exact intent
-reference confirmation, a one-time execution request and a final exact remote-txid confirmation
-before it archives the held source row. Each authorization, requested execution and disposition
-is append-only/auditable. Focused fault injection and target-node evidence are still required;
+`nexus_transfer_operator.py` workflow now requires a named operator, rationale, an audited
+preparation event tied to the deterministic intent reference, exact intent reference confirmation,
+a one-time execution request and a final exact remote-txid confirmation before it archives the
+held source row. Each authorization, requested execution and disposition is append-only/auditable. Focused fault injection and target-node evidence are still required;
 the transfer primitive remains fail closed outside the durable-intent workflow.
 
 **Historical root cause (pre-intent ledger):** `refund_nexus_token()` called

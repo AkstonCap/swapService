@@ -591,6 +591,13 @@ def authorize_nexus_transfer_intent(
             raise ValueError("Nexus transfer reference confirmation does not match")
         if intent["status"] != "prepared":
             raise ValueError("only a prepared Nexus transfer intent may be authorized")
+        preparation = conn.execute(
+            """SELECT 1 FROM nexus_transfer_audit_events
+               WHERE intent_id = ? AND action = ? AND evidence = ?""",
+            (intent_id, f"prepared_{intent['kind']}", str(intent["reference"])),
+        ).fetchone()
+        if preparation is None:
+            raise ValueError("Nexus transfer requires an audited preparation before authorization")
         conn.execute("UPDATE nexus_transfer_intents SET status = 'authorized' WHERE id = ?", (intent_id,))
         _record_nexus_transfer_audit_event(
             conn, intent_id=intent_id, action="authorized_execution", actor=actor,
