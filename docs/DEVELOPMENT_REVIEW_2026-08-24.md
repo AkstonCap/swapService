@@ -1,7 +1,7 @@
 # Independent Development and Architecture Review — 2026-08-24
 
-**Review window:** 2026-08-17 00:00 CEST through 2026-08-24 15:51 CEST  
-**Baseline:** `12c23998b698548a1fc9196468d6195856bdc00a`  
+**Review window:** 2026-08-17 00:00 CEST through 2026-08-24 15:51 CEST
+**Baseline:** `12c23998b698548a1fc9196468d6195856bdc00a`
 **Reviewed head:** `492153607224ad9bfc650051177f6b4c2130fbc5`
 
 ## Verdict

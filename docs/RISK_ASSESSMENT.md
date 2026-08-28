@@ -13,6 +13,17 @@
 > enumeration cannot advance the waterline. Backing checks now fail closed.
 > Deployment remains blocked pending independent/live verification and the
 > remaining High findings.
+>
+> **Weekly review update (2026-08-28, `f614897`):** the original negative-lookup,
+> unresolved-liability, explicit enumeration-failure, fail-open backing and mixed-decimal
+> defects are closed in local logic, and the complete suite/CI are green. A durable,
+> operator-only Nexus transfer ledger now provides strong at-most-once local controls, but
+> automatic execution remains disabled pending crash-boundary and target-node evidence.
+> Deployment is still hard-blocked: empty Nexus enumeration can advance the checkpoint
+> without proven stable-range semantics, and reconciliation remains High because startup
+> can print a green result when the producer is unhealthy and no authoritative remote
+> transaction-history read-back has been demonstrated. See
+> [`DEVELOPMENT_REVIEW_2026-08-28.md`](DEVELOPMENT_REVIEW_2026-08-28.md).
 
 **Method:** Static review of the money paths, state machine, polling loop, recovery logic, helper tooling, configuration, and documentation, plus targeted reasoning about Solana/Nexus finality and SQLite semantics. Arithmetic and SQL claims were executed in isolation to confirm them. **No live run was possible** — the runtime dependencies (`solana`, `solders`, `python-dotenv`) and RPC/Nexus access are unavailable in this environment.
 

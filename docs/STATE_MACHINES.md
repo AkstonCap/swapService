@@ -14,6 +14,15 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > automatically; incomplete enumeration holds; and only the poller may
 > advance a Nexus checkpoint from scan evidence. Live-chain verification is
 > still required.
+>
+> **Weekly review update (2026-08-28, `f614897`):** automatic Nexus refunds and
+> treasury-to-quarantine movements remain disabled in the service loop. A separate
+> intent-first operator workflow now persists one disposition per source credit,
+> requires audited preparation/authorization/execution request, executes once, holds
+> ambiguous outcomes, resolves only an exact positive reference/source/destination/
+> amount/txid match, and archives only after explicit remote-txid confirmation. This
+> protocol and empty Nexus enumeration semantics have not passed the target-node
+> crash/pagination matrix, so they are release gates rather than production evidence.
 
 ---
 
@@ -248,6 +257,7 @@ The Nexus poller applies the same proof rule:
 | Full page budget or processing budget exhausted | held (`pagination_truncated`), even when active rows exist |
 | Unprocessed credits exist after a complete poll | poller may pin behind the oldest |
 | Complete scan with persisted page data | may advance to the oldest scanned timestamp minus safety |
+| Empty successful unfiltered response | implementation advances to `now − safety`; **deployment-blocked until the target endpoint proves this is a complete stable range** |
 | Processing pass | always held; it has no scan evidence and never proposes a waterline |
 
 A missing Nexus transaction or reference is **never** an automatic proof of

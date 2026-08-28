@@ -1,10 +1,10 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Date:** 2026-08-26
-**Evaluated code:** `e2f83a28177072227d4547087a381fafeff94078`
+**Date:** 2026-08-28
+**Evaluated code:** `f61489773935b5b3b5bc47ebdc91f76e4075961b`
 **Status:** Current issue register and repair priority for `swapService`
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The independent post-change evidence behind this evaluation is in [`POST_CHANGE_REVIEW_2026-08-24.md`](POST_CHANGE_REVIEW_2026-08-24.md).
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-28.md`](DEVELOPMENT_REVIEW_2026-08-28.md); the earlier containment review remains in [`POST_CHANGE_REVIEW_2026-08-24.md`](POST_CHANGE_REVIEW_2026-08-24.md).
 
 ## 1. Executive verdict
 
@@ -26,16 +26,17 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command and a green GitHub Actions gate now exist.
 
 Those controls are valuable and verified locally and in CI. They do not make the service
-production-ready. Automatic Nexus refunds remain disabled because no durable intent protocol
-- the new durable reconciliation path still needs target-chain evidence; and the standing
-live-chain acceptance matrix has not been run.
+production-ready. Automatic Nexus refunds remain disabled while the new durable intent protocol
+awaits crash-boundary and target-node evidence; reconciliation still has a startup false-green
+consumer and no authoritative remote transaction-history proof; and the standing live-chain
+acceptance matrix has not been run.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
 | Critical release gate | 2 | Permanent refund safety and live-boundary evidence remain absent |
-| High | 1 | Reconciliation can report healthy from missing or incorrect evidence |
+| High | 1 | Reconciliation producer is fail-closed locally, but startup can print false green and remote ledger completeness is unproven |
 | Medium / operational | 6 | Response, custody, exposure-control, dependency or maintenance gap |
 | Low / hygiene | 3 | Documentation and dead-code cleanup |
 
@@ -46,9 +47,9 @@ live-chain acceptance matrix has not been run.
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PASS locally** — completed mints retain immutable destination, memo and exact base-unit input/output; target-chain read-back remains required |
-| One composable automated test command | **PASS** — `python -m pytest -q` runs the complete suite: 34 tests plus 4 subtests at this head |
-| CI enforces tests and static checks | **ENFORCED and green** — run `32967131178` passed on the exact evaluated head |
+| Durable completed-state data supports reconciliation | **PARTIAL** — durable producer rows and fail-closed result exist; startup ignores `healthy`, and authoritative target-chain read-back remains required |
+| One composable automated test command | **PASS** — `python -m pytest -q` runs the complete suite: 45 tests plus 4 subtests at this head |
+| CI enforces tests and static checks | **ENFORCED and green** — run `33169510993` passed on the exact evaluated head |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -63,7 +64,7 @@ live-chain acceptance matrix has not been run.
 **Current status:** **contained; durable-protocol foundation implemented, not yet released.**
 Every automatic Nexus refund branch transitions the source credit to `refund held for operator
 review`, records `hold_reason`, emits a Critical alert and leaves the source row in place.
-A new append-only `nexus_transfer_intents` ledger now permits exactly one intent per source
+A new durable, monotonic `nexus_transfer_intents` ledger now permits exactly one intent per source
 credit and persists its destination, exact base units and deterministic unique reference before a
 Nexus account debit can be issued. It atomically permits a single execution; parsed remote txids
 are retained and timeouts,
@@ -180,7 +181,7 @@ and `0.2` `min_to_nexus`, rather than `100.0`, `5.0` and `20.0`.
 
 ### E-004 — Double-mint reconciliation was blind and unit-inconsistent
 
-**Severity:** High — **remediated locally; target-chain evidence still required**
+**Severity:** High — **partially remediated locally; release gate remains open**
 **Priority:** P1 — safety detector must fail closed before deployment
 
 The current reconciler cannot reliably discover completed mint recipients:
@@ -223,10 +224,22 @@ A green result was not evidence of balance correctness.
   is gone, a seeded extra treasury debit creates an exact positive discrepancy, and missing
   durable evidence cannot produce a green result.
 
+#### 2026-08-28 independent-review correction
+
+- The producer is fail-closed, but the startup consumer at `src/main.py:234-245` checks only
+  `discrepancies`. An unhealthy result with zero checked recipients therefore prints
+  `✓ Balance check: All 0 ... match expected balances`. The periodic consumer correctly checks
+  `healthy`, so operator output is inconsistent.
+- The reconciliation totals are derived from local completed tables. `include_remote_balance`
+  is display-only. A crash-created duplicate remote mint need not create a second local row;
+  authoritative Nexus transaction-history identity/amount read-back is still required.
+
 #### Remaining release evidence
 
 - Execute the reconciliation fixture matrix and authoritative transaction-history read-back
   against the configured target Nexus node and Solana devnet/testnet.
+- Require every consumer, including startup, to alert/hold unless `healthy is True`, with a
+  caller-level regression for zero checked and malformed evidence.
 - Establish a reviewed backfill/disposition procedure for existing legacy completed rows;
   they intentionally remain incomplete rather than being reconstructed from float data.
 
@@ -246,7 +259,7 @@ and whitespace checking. The checked-in link verifier also caught and corrected 
 Copilot-instructions security-document path.
 
 The exact evaluated head passed GitHub Actions run
-[`32967131178`](https://github.com/distordialabs-brutus/swapService/actions/runs/32967131178).
+[`33169510993`](https://github.com/distordialabs-brutus/swapService/actions/runs/33169510993).
 Every later production candidate still needs its own green run plus the separate live-chain
 matrix in E-006.
 
@@ -268,15 +281,15 @@ Required matrix:
 - Solana finalized/confirmed behavior;
 - waterline monotonicity and no skipped deposits.
 
-### E-007 — Ambiguous items can remain held without a complete operator-resolution workflow
+### E-007 — Operator-resolution workflow exists locally but is not operationally accepted
 
 **Priority:** P2
 
-The fail-closed lookup changes correctly hold uncertain rows. The dashboard now includes
-`debited, awaiting confirmation`, Nexus refund holds, hold reasons, age and safe operator-action
-text. What remains is a complete operator lifecycle: evidence display sufficient to resolve
-the ambiguity, documented manual commands, a separately authorized disposition, attribution,
-and an audit record. Visibility is not yet resolution.
+The fail-closed lookup changes correctly hold uncertain rows. The dashboard includes held-state
+evidence, and `nexus_transfer_operator.py` now implements documented prepare → authorize →
+execute-once → positive-reference resolve → exact-txid finalize with named attribution. What
+remains is target-node acceptance, crash/restart rehearsal, hold aging/escalation, and a reviewed
+two-person production policy. A locally executable workflow is not yet operational acceptance.
 
 ### E-008 — Nexus PIN and session are exposed in process arguments
 
@@ -377,10 +390,10 @@ filter can authorize a checkpoint. This is containment, not permission to deploy
 4. Implement exact integer fees, thresholds, outputs and public terms for 6/6, 8/6, 6/8,
    9/6 and 0/0 decimal configurations.
 
-**Exit met:** the current local suite and GitHub Actions run `32967131178` are green. The
-mixed-decimal contract still requires target-chain evidence in Batch 4.
+**Exit met:** the current local suite and exact-head GitHub Actions run `33169510993` are green.
+The mixed-decimal contract still requires target-chain evidence in Batch 4.
 
-### Batch 2 — Durable completed-state model and fail-closed reconciliation ✅ (local)
+### Batch 2 — Durable completed-state model and fail-closed reconciliation **PARTIAL**
 
 **Goal:** make a green balance result trustworthy before adding another automated money path.
 
@@ -394,9 +407,10 @@ mixed-decimal contract still requires target-chain evidence in Batch 4.
 6. ✅ Alert separately on incomplete evidence and confirmed imbalance.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 
-**Local exit met:** a known balanced completed swap returns zero delta after its queue row is
-gone; a seeded duplicate is detected; and zero checked addresses cannot report healthy. The
-target-chain integration matrix remains required before deployment.
+**Producer exit met locally:** a known balanced completed swap returns zero delta after its queue
+row is gone; a seeded local duplicate is detected; and zero checked addresses return
+`healthy=False`. **Consumer/authority exit is not met:** startup can still print that unhealthy
+zero-check result as green, and target-chain transaction-history read-back is absent.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
@@ -425,7 +439,8 @@ Run the full matrix on the target Nexus build plus Solana devnet/testnet:
 - malformed API bodies, Solana finality and waterline monotonicity.
 
 **Exit:** authoritative chain read-back proves no duplicate payout, skipped deposit or
-checkpoint advance from incomplete evidence.
+checkpoint advance from incomplete evidence; startup and periodic consumers both refuse green
+unless reconciliation explicitly returns `healthy=True`.
 
 ### Batch 5 — Production operational gates
 
@@ -457,14 +472,15 @@ checkpoint advance from incomplete evidence.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 27 passed, 4 subtests passed |
+| `python -m pytest -q tests/test_critical_safety.py` | Included in the complete 45-test run |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 34 passed, 4 subtests passed |
-| CI workflow | Passed on `e2f83a2` — [run 32967131178](https://github.com/distordialabs-brutus/swapService/actions/runs/32967131178) |
+| Full `python -m pytest -q` | 45 passed, 4 subtests passed in 8.18s on the final docs tree |
+| CI workflow | Passed on exact head `f614897` — [run 33169510993](https://github.com/distordialabs-brutus/swapService/actions/runs/33169510993) |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
+| `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
 
 ## 9. Definition of deployment-ready
