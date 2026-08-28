@@ -632,6 +632,33 @@ class CriticalSafetyTests(unittest.TestCase):
                         expected_reference=intent["reference"],
                     )
 
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"must-not-run"}', ""))
+    def test_nexus_transfer_intent_requires_audited_execution_request_before_debit(self, run):
+        """A direct API caller cannot consume authorization without a named execution request."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-missing-execution-request",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="alice", rationale="reviewed source credit",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="alice", rationale="approved transfer",
+                    expected_reference=intent["reference"],
+                )
+
+                outcome = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertFalse(outcome.executed)
+        self.assertEqual(outcome.status, "authorized")
+        self.assertEqual(stored["status"], "authorized")
+        run.assert_not_called()
+
     def test_nexus_transfer_intent_rejects_second_disposition_for_same_credit(self):
         """One source credit must never authorize both a refund and quarantine debit."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -701,6 +728,9 @@ class CriticalSafetyTests(unittest.TestCase):
                     intent["id"], actor="test-operator", rationale="test authorization",
                     expected_reference=intent["reference"],
                 )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
 
                 result = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 repeated = nexus_client.execute_nexus_transfer_intent(intent["id"])
@@ -729,6 +759,9 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.authorize_nexus_transfer_intent(
                     intent["id"], actor="test-operator", rationale="test authorization",
                     expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
                 )
                 state_db.claim_nexus_transfer_intent(intent["id"])
                 state_db.update_nexus_transfer_intent(
@@ -768,6 +801,9 @@ class CriticalSafetyTests(unittest.TestCase):
                     intent["id"], actor="test-operator", rationale="test authorization",
                     expected_reference=intent["reference"],
                 )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
                 result = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 again = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 find_by_reference.return_value = nexus_client.BatchLookup({}, False, "timeout")
@@ -806,6 +842,9 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.authorize_nexus_transfer_intent(
                     intent["id"], actor="test-operator", rationale="test authorization",
                     expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
                 )
                 state_db.claim_nexus_transfer_intent(intent["id"])
                 state_db.update_nexus_transfer_intent(intent["id"], status="outcome_unknown")
@@ -875,6 +914,9 @@ class CriticalSafetyTests(unittest.TestCase):
                     intent["id"], actor="alice", rationale="mapping absent; refund approved",
                     expected_reference=intent["reference"],
                 )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="alice", rationale="refund execution requested",
+                )
                 executed = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 state_db.update_nexus_transfer_intent(
                     intent["id"], status="completed", remote_txid="refund-tx", resolved=True
@@ -899,7 +941,7 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertTrue(is_refunded)
         self.assertEqual(source_rows, [])
         self.assertEqual([event["action"] for event in events], [
-            "prepared_refund", "authorized_execution", "finalized_refund",
+            "prepared_refund", "authorized_execution", "execution_requested", "finalized_refund",
         ])
         self.assertTrue(all(event["actor"] == "alice" for event in events))
 

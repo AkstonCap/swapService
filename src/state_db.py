@@ -552,6 +552,15 @@ def claim_nexus_transfer_intent(intent_id: str) -> dict | None:
     try:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
+        requested = conn.execute(
+            """SELECT 1 FROM nexus_transfer_audit_events
+               WHERE intent_id = ? AND action = 'execution_requested' AND evidence =
+               (SELECT reference FROM nexus_transfer_intents WHERE id = ?)""",
+            (intent_id, intent_id),
+        ).fetchone()
+        if requested is None:
+            conn.commit()
+            return None
         updated = conn.execute(
             """UPDATE nexus_transfer_intents
                SET status = 'executing', last_attempt_timestamp = ?
