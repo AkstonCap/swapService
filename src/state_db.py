@@ -229,9 +229,10 @@ def init_db():
         )
     """)
 
-    # Every Nexus-side transfer must first have a durable local intent.  The unique
-    # (kind, source_txid) and reference keys mean a restart or duplicate invocation
-    # gets the same operation record rather than a second remote debit.
+    # Every Nexus-side transfer must first have a durable local intent. A source
+    # credit may authorize exactly one remote debit: allowing one "refund" and one
+    # "quarantine" intent for the same source would permit two dispositions of the
+    # same funds. The source-only unique index below also migrates existing ledgers.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS nexus_transfer_intents (
             id TEXT PRIMARY KEY,
@@ -249,6 +250,19 @@ def init_db():
             UNIQUE(kind, source_txid)
         )
     """)
+    try:
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_transfer_intents_source "
+            "ON nexus_transfer_intents(source_txid)"
+        )
+    except sqlite3.IntegrityError as exc:
+        # Do not guess which pre-upgrade duplicate intent is safe. Refusing startup
+        # preserves both records for manual chain-evidence resolution.
+        conn.close()
+        raise RuntimeError(
+            "unsafe duplicate Nexus transfer intents share a source_txid; "
+            "resolve them manually before starting the service"
+        ) from exc
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_nexus_transfer_intents_status ON nexus_transfer_intents(status, created_timestamp)")
     # The ledger is append-only: authorization and final disposition are not inferred
     # from a mutable status value, but attributable to a named operator and rationale.
@@ -412,9 +426,9 @@ _NEXUS_TRANSFER_AUDIT_COLUMNS = (
 )
 
 
-def _nexus_transfer_intent_id(kind: str, source_txid: str) -> str:
-    material = f"{kind}\0{source_txid}".encode("utf-8")
-    return "nexus-transfer-" + hashlib.sha256(material).hexdigest()[:32]
+def _nexus_transfer_intent_id(source_txid: str) -> str:
+    """Stable identity for the one permissible Nexus transfer per source credit."""
+    return "nexus-transfer-" + hashlib.sha256(source_txid.encode("utf-8")).hexdigest()[:32]
 
 
 def _nexus_transfer_reference(intent_id: str) -> str:
@@ -474,7 +488,7 @@ def create_nexus_transfer_intent(
     if not kind or not source_txid or not from_address or not to_address or units <= 0:
         raise ValueError("Nexus transfer intent requires kind, source, addresses and positive units")
 
-    intent_id = _nexus_transfer_intent_id(kind, source_txid)
+    intent_id = _nexus_transfer_intent_id(source_txid)
     reference = _nexus_transfer_reference(intent_id)
     now = int(time.time())
     conn = sqlite3.connect(DB_PATH)
@@ -483,15 +497,15 @@ def create_nexus_transfer_intent(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
-            " FROM nexus_transfer_intents WHERE kind = ? AND source_txid = ?",
-            (kind, source_txid),
+            " FROM nexus_transfer_intents WHERE source_txid = ?",
+            (source_txid,),
         ).fetchone()
         if row:
             existing = _nexus_transfer_intent_dict(row)
             if existing is None:  # pragma: no cover - row is truthy above
                 raise RuntimeError("could not decode existing Nexus transfer intent")
-            expected = (from_address, to_address, units)
-            observed = (existing["from_address"], existing["to_address"],
+            expected = (kind, from_address, to_address, units)
+            observed = (existing["kind"], existing["from_address"], existing["to_address"],
                         int(existing["amount_usdd_units"]))
             if observed != expected:
                 raise ValueError("existing Nexus transfer intent conflicts with requested inputs")

@@ -3,6 +3,7 @@
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -614,6 +615,58 @@ class CriticalSafetyTests(unittest.TestCase):
                 self.assertEqual(
                     state_db.get_nexus_transfer_intent(first["id"]), first
                 )
+
+    def test_nexus_transfer_intent_rejects_second_disposition_for_same_credit(self):
+        """One source credit must never authorize both a refund and quarantine debit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                refund = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-single-disposition",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                with self.assertRaisesRegex(ValueError, "conflicts"):
+                    state_db.create_nexus_transfer_intent(
+                        kind="quarantine", source_txid="credit-single-disposition",
+                        from_address="TREASURY", to_address="QUARANTINE",
+                        amount_usdd_units=1_000_000,
+                    )
+                intents = state_db.get_nexus_transfer_intents_by_status(("prepared",))
+
+        self.assertEqual(intents, [refund])
+
+    def test_transfer_intent_migration_refuses_preexisting_duplicate_source(self):
+        """An unsafe pre-upgrade ledger is held for manual evidence-based resolution."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("""CREATE TABLE nexus_transfer_intents (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, source_txid TEXT NOT NULL,
+                    from_address TEXT NOT NULL, to_address TEXT NOT NULL,
+                    amount_usdd_units INTEGER NOT NULL, reference TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL, remote_txid TEXT, created_timestamp INTEGER NOT NULL,
+                    last_attempt_timestamp INTEGER, resolved_timestamp INTEGER,
+                    UNIQUE(kind, source_txid)
+                )""")
+                for kind, intent_id, reference in (
+                    ("refund", "old-refund", "bridge-xfer:old-refund"),
+                    ("quarantine", "old-quarantine", "bridge-xfer:old-quarantine"),
+                ):
+                    conn.execute(
+                        """INSERT INTO nexus_transfer_intents
+                           VALUES (?, ?, 'credit-duplicate', 'TREASURY', 'destination', 100,
+                                   ?, 'prepared', NULL, 1, NULL, NULL)""",
+                        (intent_id, kind, reference),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            with patch.object(state_db, "DB_PATH", db_path):
+                with self.assertRaisesRegex(RuntimeError, "unsafe duplicate Nexus transfer intents"):
+                    state_db.init_db()
+
 
     @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"refund-tx"}', ""))
     def test_nexus_transfer_intent_executes_once_and_persists_remote_txid(self, run):

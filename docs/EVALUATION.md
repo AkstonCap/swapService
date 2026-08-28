@@ -63,9 +63,10 @@ live-chain acceptance matrix has not been run.
 **Current status:** **contained; durable-protocol foundation implemented, not yet released.**
 Every automatic Nexus refund branch transitions the source credit to `refund held for operator
 review`, records `hold_reason`, emits a Critical alert and leaves the source row in place.
-A new append-only `nexus_transfer_intents` ledger now persists the source credit, destination,
-exact base units and deterministic unique reference before a Nexus account debit can be issued.
-It atomically permits a single execution; parsed remote txids are retained and timeouts,
+A new append-only `nexus_transfer_intents` ledger now permits exactly one intent per source
+credit and persists its destination, exact base units and deterministic unique reference before a
+Nexus account debit can be issued. It atomically permits a single execution; parsed remote txids
+are retained and timeouts,
 interruptions, non-zero exits and unparsed output become `outcome_unknown`. Resolution only
 completes an intent after a positive on-chain debit whose unique reference, source account,
 destination account and exact base-unit amount all match the immutable intent. For an already
