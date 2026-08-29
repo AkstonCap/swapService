@@ -55,7 +55,7 @@ been run.
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
 | Durable completed-state data supports reconciliation | **PARTIAL** — local and remote evidence fail closed, but unhealthy results do not pause exposure and target-node boundary semantics remain unproven |
 | One composable automated test command | **PASS** — 62 tests plus 4 subtests on `5d92ec0` |
-| CI enforces tests and static checks | **ENFORCED and green** — run [`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) passed on the current documentation head `de4ae8c` (with reconciliation implementation `5d92ec0` as its parent) |
+| CI enforces tests and static checks | **ENFORCED and green** — run [`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) passed on reconciliation evidence head `de4ae8c` (with implementation `5d92ec0` as its parent) |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -286,8 +286,8 @@ consistency, byte-compilation, local Markdown-link verification, the complete py
 and whitespace checking. The checked-in link verifier also caught and corrected the stale
 Copilot-instructions security-document path.
 
-The reconciliation implementation and its current documentation head passed GitHub Actions run
-[`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981).
+The reconciliation implementation and its evaluated documentation evidence head passed GitHub
+Actions run [`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981).
 Every later production candidate still needs its own green run plus the separate live-chain matrix
 in E-006.
 
@@ -521,7 +521,7 @@ and a rejected production startup should return a non-zero process status to its
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
 | Full `python -m pytest -q` | 62 passed, 4 subtests passed in 10.18s on `5d92ec0` |
-| CI workflow | Passed on current documentation head `de4ae8c` — [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981); reconciliation implementation is parent `5d92ec0` |
+| CI workflow | Passed on reconciliation evidence head `de4ae8c` — [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981); implementation is parent `5d92ec0` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
