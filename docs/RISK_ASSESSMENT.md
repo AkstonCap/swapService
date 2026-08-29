@@ -24,6 +24,18 @@
 > can print a green result when the producer is unhealthy and no authoritative remote
 > transaction-history read-back has been demonstrated. See
 > [`DEVELOPMENT_REVIEW_2026-08-28.md`](DEVELOPMENT_REVIEW_2026-08-28.md).
+>
+> **Weekly review update (2026-08-29, committed `5e7d3b8` plus a separately
+> staged proposal):** returned unhealthy startup reconciliation is no longer
+> printed as green, interrupted claimed Nexus transfers restart as
+> `outcome_unknown`, and explicit production mode requires caps and alerting.
+> Deployment remains hard-blocked. Reconciliation failures do not pause new
+> exposure. The staged remote read-back now includes active destinations and
+> fail-closes when one page cannot prove the requested history boundary, but the
+> exact valid first-time-recipient case and target-node boundary/order semantics
+> remain unproven. Invalid `SWAP_PRODUCTION_MODE` text also silently disables the
+> gate. See
+> [`DEVELOPMENT_REVIEW_2026-08-29.md`](DEVELOPMENT_REVIEW_2026-08-29.md).
 
 **Method:** Static review of the money paths, state machine, polling loop, recovery logic, helper tooling, configuration, and documentation, plus targeted reasoning about Solana/Nexus finality and SQLite semantics. Arithmetic and SQL claims were executed in isolation to confirm them. **No live run was possible** — the runtime dependencies (`solana`, `solders`, `python-dotenv`) and RPC/Nexus access are unavailable in this environment.
 

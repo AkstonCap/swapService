@@ -1,10 +1,10 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Date:** 2026-08-28
-**Evaluated code:** `f61489773935b5b3b5bc47ebdc91f76e4075961b`
+**Date:** 2026-08-29
+**Evaluated code:** committed head `5e7d3b853e49b4d3b229b6e7ba8770f158a7edc5`; a separate staged reconciliation proposal is explicitly identified where discussed
 **Status:** Current issue register and repair priority for `swapService`
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-28.md`](DEVELOPMENT_REVIEW_2026-08-28.md); the earlier containment review remains in [`POST_CHANGE_REVIEW_2026-08-24.md`](POST_CHANGE_REVIEW_2026-08-24.md).
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-29.md`](DEVELOPMENT_REVIEW_2026-08-29.md); the 2026-08-28 review and earlier containment review remain historical evidence.
 
 ## 1. Executive verdict
 
@@ -23,21 +23,28 @@ The repair work through the evaluated head materially improved the bridge:
 - every unsafe automatic Nexus refund path now holds and alerts for operator review;
 - the heuristic Nexus server-side amount filter has been removed from normal and recovery scans;
 - exact integer money math covers unequal-decimal pairs in both directions;
-- one composable pytest command and a green GitHub Actions gate now exist.
+- startup no longer reports a returned unhealthy reconciliation as green;
+- interrupted claimed Nexus transfers restart as durable `outcome_unknown` holds;
+- explicit production mode requires positive per-swap/daily caps and an alert route;
+- one composable pytest command and an exact-head green GitHub Actions gate exist.
 
 Those controls are valuable and verified locally and in CI. They do not make the service
-production-ready. Automatic Nexus refunds remain disabled while the new durable intent protocol
-awaits crash-boundary and target-node evidence; reconciliation still has a startup false-green
-consumer and no authoritative remote transaction-history proof; and the standing live-chain
-acceptance matrix has not been run.
+production-ready. Automatic Nexus refunds remain disabled while the durable intent protocol
+awaits crash-boundary and target-node evidence. Reconciliation exceptions or unhealthy results
+alert but do not latch a pause on new exposure, and no authoritative remote transaction-history
+proof exists. The current staged proposal now includes active recipients independently and
+fail-closes instead of attempting multi-page offset pagination. It is still not commit-ready
+because reconciliation failures do not pause exposure, the exact valid first-time-recipient case
+is untested, and target single-page ordering/boundary semantics remain unproven. The standing
+live-chain acceptance matrix has not been run.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
 | Critical release gate | 2 | Permanent refund safety and live-boundary evidence remain absent |
-| High | 1 | Reconciliation producer is fail-closed locally, but startup can print false green and remote ledger completeness is unproven |
-| Medium / operational | 6 | Response, custody, exposure-control, dependency or maintenance gap |
+| High release blocker | 1 | Reconciliation errors and unhealthy results do not pause new exposure |
+| Medium / operational | 6 | Response, custody, configuration, exposure-control, dependency or maintenance gap |
 | Low / hygiene | 3 | Documentation and dead-code cleanup |
 
 ### Release gates
@@ -47,9 +54,9 @@ acceptance matrix has not been run.
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — durable producer rows and fail-closed result exist; startup ignores `healthy`, and authoritative target-chain read-back remains required |
-| One composable automated test command | **PASS** — `python -m pytest -q` runs the complete suite: 45 tests plus 4 subtests at this head |
-| CI enforces tests and static checks | **ENFORCED and green** — run `33169510993` passed on the exact evaluated head |
+| Durable completed-state data supports reconciliation | **PARTIAL** — durable rows and an explicit health result exist; startup checks that result, but failures do not pause exposure and the staged remote read-back is not authoritative |
+| One composable automated test command | **PASS** — committed head: 51 tests plus 4 subtests; active staged tree: 58 tests plus 4 subtests |
+| CI enforces tests and static checks | **ENFORCED and green for committed head** — run `33254976148` passed on exact head `5e7d3b8`; staged code has no CI identity |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -236,9 +243,28 @@ A green result was not evidence of balance correctness.
   is display-only. A crash-created duplicate remote mint need not create a second local row;
   authoritative Nexus transaction-history identity/amount read-back is still required.
 
+#### 2026-08-29 independent-review correction
+
+- Committed head `5e7d3b8` retains the startup `healthy is True` guard, but both startup and
+  periodic reconciliation exceptions only print/alert. An unhealthy result does not latch a
+  safety pause, so exposure-producing pollers continue.
+- The current staged remote-read-back proposal now loads active mint destinations independently
+  (`src/balance_reconciler.py:255-302`) and keeps every valid active intent incomplete until
+  terminal reconciliation (lines 351-367). The exact completed-Alice/active-first-time-Bob case
+  still lacks a regression.
+- The staged Nexus scan now reads one page only (`src/nexus_client.py:892-904`) and returns
+  `complete=False` when a full page cannot prove the requested boundary (lines 981-984). This
+  closes the prior cross-page false-green path at the cost of availability; target short-page,
+  ordering and boundary semantics remain unproven.
+
 #### Remaining release evidence
 
-- Execute the reconciliation fixture matrix and authoritative transaction-history read-back
+- Make every reconciliation error/unhealthy result latch a fail-closed exposure pause until a
+  later explicitly healthy run.
+- Add the exact completed-recipient plus valid active first-time-recipient regression.
+- Prove the one-page boundary, short-page and ordering semantics on the target node; retain
+  fail-closed behavior whenever the boundary cannot be proven.
+- Execute the final reconciliation fixture matrix and authoritative transaction-history read-back
   against the configured target Nexus node and Solana devnet/testnet.
 - ✅ Every local consumer, including startup, alerts unless `healthy is True`; caller-level
   regressions cover zero checked and invalid results.
@@ -260,8 +286,8 @@ consistency, byte-compilation, local Markdown-link verification, the complete py
 and whitespace checking. The checked-in link verifier also caught and corrected the stale
 Copilot-instructions security-document path.
 
-The exact evaluated head passed GitHub Actions run
-[`33169510993`](https://github.com/distordialabs-brutus/swapService/actions/runs/33169510993).
+The exact evaluated committed head passed GitHub Actions run
+[`33254976148`](https://github.com/distordialabs-brutus/swapService/actions/runs/33254976148).
 Every later production candidate still needs its own green run plus the separate live-chain
 matrix in E-006.
 
@@ -398,7 +424,7 @@ filter can authorize a checkpoint. This is containment, not permission to deploy
 4. Implement exact integer fees, thresholds, outputs and public terms for 6/6, 8/6, 6/8,
    9/6 and 0/0 decimal configurations.
 
-**Exit met:** the current local suite and exact-head GitHub Actions run `33169510993` are green.
+**Exit met:** the current committed-head local suite and GitHub Actions run `33254976148` are green.
 The mixed-decimal contract still requires target-chain evidence in Batch 4.
 
 ### Batch 2 — Durable completed-state model and fail-closed reconciliation **PARTIAL**
@@ -417,8 +443,9 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 
 **Producer exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; a seeded local duplicate is detected; zero checked addresses return `healthy=False`;
-and both local consumers alert rather than print green unless `healthy is True`. **Authority exit
-is not met:** target-chain transaction-history read-back is absent.
+and both local consumers refuse the green message unless `healthy is True`. **Authority exit is
+is not met:** failures do not pause exposure, the exact valid first-time-recipient regression is
+missing, and target single-page boundary/order semantics are unproven.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
@@ -460,6 +487,10 @@ unless reconciliation explicitly returns `healthy=True`.
 4. Complete the operator hold-resolution workflow with evidence, authorization and audit.
 5. Document incident response, recovery and key rotation; rehearse them before launch.
 
+**Configuration gap:** if `SWAP_PRODUCTION_MODE` is present with an unrecognized value such as
+`treu`, the current parser silently produces `False`. A present invalid boolean must fail startup,
+and a rejected production startup should return a non-zero process status to its supervisor.
+
 ### Batch 6 — Custody, dependency and maintainability hardening
 
 1. Move Nexus PIN/session values out of argv where the target CLI supports a verified safer
@@ -482,13 +513,13 @@ unless reconciliation explicitly returns `healthy=True`.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | Included in the complete 45-test run |
+| `python -m pytest -q tests/test_critical_safety.py` | Included in the complete committed-head run |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 45 passed, 4 subtests passed in 8.18s on the final docs tree |
-| CI workflow | Passed on exact head `f614897` — [run 33169510993](https://github.com/distordialabs-brutus/swapService/actions/runs/33169510993) |
+| Full `python -m pytest -q` | Committed head: 51 passed, 4 subtests passed; active staged tree: 58 passed, 4 subtests passed |
+| CI workflow | Passed on exact committed head `5e7d3b8` — [run 33254976148](https://github.com/distordialabs-brutus/swapService/actions/runs/33254976148); no CI identity for staged code |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |

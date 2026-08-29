@@ -23,6 +23,15 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > amount/txid match, and archives only after explicit remote-txid confirmation. This
 > protocol and empty Nexus enumeration semantics have not passed the target-node
 > crash/pagination matrix, so they are release gates rather than production evidence.
+>
+> **Weekly review update (2026-08-29, committed `5e7d3b8` plus a separately
+> staged proposal):** startup demotes persisted `executing` Nexus transfer
+> intents to `outcome_unknown`, and explicit production mode requires payout
+> caps and an alert route. Reconciliation still does not latch an exposure pause
+> on error/unhealthy output. The staged remote scan includes active recipients
+> and refuses multi-page ambiguity, but its exact valid new-recipient case and
+> target-node one-page boundary/order semantics remain unproven. See
+> `DEVELOPMENT_REVIEW_2026-08-29.md`.
 
 ---
 
@@ -196,8 +205,10 @@ alert is emitted.
 **Retry:** `MAX_ACTION_ATTEMPTS` (3) attempts, with `ACTION_RETRY_COOLDOWN_SEC` (300s)
 enforced between them. `should_attempt()` returns False for *either* reason;
 `attempts_exhausted()` distinguishes them, so a cooldown never causes a premature
-quarantine. After exhaustion, USDC goes to `USDC_QUARANTINE_ACCOUNT` and USDD is
-transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`.
+quarantine. After exhaustion, eligible USDC-side actions may move USDC to
+`USDC_QUARANTINE_ACCOUNT`. USDD-side automatic treasury-to-quarantine transfers
+remain disabled; the source enters an operator hold and can move only through the
+audited durable-intent workflow.
 
 ---
 
