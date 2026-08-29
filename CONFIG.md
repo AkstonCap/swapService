@@ -104,9 +104,10 @@ Legend:
 values are `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive; surrounding
 whitespace is accepted). Any other present value fails startup rather than silently disabling the
 production gate. When it is `true`, startup refuses to open the state database or start polling
-unless both single-swap caps, the daily Solana payout cap, and one alert route are configured with
-non-zero/non-empty values. This is a configuration admission check, not proof that the alert route
-is deliverable; test the configured channel as part of the live acceptance matrix.
+unless both single-swap caps, the daily Solana payout cap, one alert route, and both chain-side
+quarantine destinations are configured with non-zero/non-empty values. This is a configuration
+admission check, not proof that the alert route is deliverable; test the configured channel as part
+of the live acceptance matrix.
 
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
@@ -117,6 +118,8 @@ is deliverable; test the configured channel as part of the live acceptance matri
 | ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Required in production mode unless `ALERT_COMMAND` is set. |
 | ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. Required in production mode unless `ALERT_WEBHOOK_URL` is set. |
 | ALERT_MIN_INTERVAL_SEC | int | 300 | Per-event dedupe window. |
+| USDC_QUARANTINE_ACCOUNT | pubkey |  | Self-owned Solana SPL token account for failed USDC refunds. Required in production mode. |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | str |  | Self-owned Nexus token account for the separately authorized durable-intent quarantine disposition. Required in production mode. |
 
 ## Operator Dashboard (read-only UI)
 | Var | Type | Default | Notes |
@@ -159,7 +162,8 @@ is deliverable; test the configured channel as part of the live acceptance matri
 ## Quarantine & Accounts
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| USDC_QUARANTINE_ACCOUNT | pubkey |  | Holds USDC from failed refund attempts. |
+| USDC_QUARANTINE_ACCOUNT | pubkey |  | Holds USDC from failed refund attempts. Required in production mode; repeated above with other admission controls. |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | str |  | Holds Nexus-side credits for a separately authorized durable-intent quarantine disposition. Required in production mode; repeated above with other admission controls. |
 
 ## Operational Philosophy
 - All monetary thresholds are enforced before expensive lookups (DoS mitigation).

@@ -180,16 +180,16 @@ Also required in practice:
 - `NEXUS_HEARTBEAT_ASSET_NAME` — without the heartbeat asset the Solana poller cannot start
 
 Before a live production start, set `SWAP_PRODUCTION_MODE=true`, then set positive values for
-`MAX_SWAP_USDC`, `MAX_SWAP_USDD`, and `DAILY_PAYOUT_CAP_USDC`, and configure either
-`ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. The production switch accepts only
+`MAX_SWAP_USDC`, `MAX_SWAP_USDD`, and `DAILY_PAYOUT_CAP_USDC`; configure either
+`ALERT_WEBHOOK_URL` or `ALERT_COMMAND`; and set both `USDC_QUARANTINE_ACCOUNT` and
+`NEXUS_USDD_QUARANTINE_ACCOUNT`. The production switch accepts only
 `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other present value fails startup. The
 service refuses to start in production mode if any admission control is absent and returns a
-non-zero status to its supervisor; send and verify a test alert separately.
+non-zero status to its supervisor. A configured route is not evidence of delivery: send and
+verify a test alert separately.
 
 Optional but recommended:
 - `HELIUS_RPC_URL` or `HELIUS_API_KEY` — optimized Solana deposit polling (1-2 calls vs N+1)
-- `ALERT_WEBHOOK_URL` or `ALERT_COMMAND` — **without one, safety alerts only reach stdout**
-- `NEXUS_USDD_QUARANTINE_ACCOUNT` / `USDC_QUARANTINE_ACCOUNT` — isolating failed refunds
 - `MAX_SWAP_USDC` / `MAX_SWAP_USDD` / `DAILY_PAYOUT_CAP_USDC` — exposure caps (0 = disabled)
 - `SOLANA_DEPOSIT_COMMITMENT` — leave at `finalized`; `confirmed` can be reorged after you have minted
 

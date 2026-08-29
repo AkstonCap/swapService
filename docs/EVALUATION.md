@@ -503,7 +503,7 @@ unless reconciliation explicitly returns `healthy=True`.
 ### Batch 5 — Production operational gates
 
 1. ✅ In explicit `SWAP_PRODUCTION_MODE`, require positive per-swap and daily payout caps and at least one configured alert route before startup.
-2. Require configured quarantine destinations and at least one tested alert channel.
+2. ✅ Require configured Solana and Nexus quarantine destinations before production startup; test at least one alert channel operationally.
 3. ✅ Refuse production mode when mandatory controls are absent.
 4. Complete the operator hold-resolution workflow with evidence, authorization and audit.
 5. Document incident response, recovery and key rotation; rehearse them before launch.
@@ -511,8 +511,11 @@ unless reconciliation explicitly returns `healthy=True`.
 **Configuration gap resolved locally:** `SWAP_PRODUCTION_MODE` now accepts only explicit
 true/false spellings. An unrecognized present value such as `treu` fails configuration loading,
 and a production-control rejection returns `False` to the entrypoint, which exits non-zero for the
-supervisor. Regression tests cover both paths. The remaining Batch 5 work is operational: configure
-quarantine destinations, independently verify alert delivery, and rehearse the documented
+supervisor. Production admission also requires both `USDC_QUARANTINE_ACCOUNT` (a self-owned
+Solana SPL token account) and `NEXUS_USDD_QUARANTINE_ACCOUNT` (the destination for a separately
+authorized durable-intent disposition), preventing failed payout funds from remaining mixed with
+live backing. Regression tests cover the invalid switch and both missing destinations. The remaining
+Batch 5 work is operational: independently verify alert delivery, and rehearse the documented
 hold-resolution, incident-response and key-rotation procedures.
 
 ### Batch 6 — Custody, dependency and maintainability hardening
@@ -537,12 +540,12 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 67 passed plus 4 subtests passed on the latest local verification |
+| `python -m pytest -q tests/test_critical_safety.py` | 68 passed plus 4 subtests passed on the latest local verification |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 74 passed, 4 subtests passed on the latest local verification |
+| Full `python -m pytest -q` | 75 passed, 4 subtests passed on the latest local verification |
 | CI workflow | Latest runtime evidence passed on code head `3533023` — [run 33267576670](https://github.com/distordialabs-brutus/swapService/actions/runs/33267576670); the earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |

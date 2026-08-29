@@ -98,6 +98,8 @@ class CriticalSafetyTests(unittest.TestCase):
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0),
             patch.object(config, "ALERT_WEBHOOK_URL", ""),
             patch.object(config, "ALERT_COMMAND", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
         ):
             self.assertFalse(main.validate_production_controls())
 
@@ -109,6 +111,30 @@ class CriticalSafetyTests(unittest.TestCase):
                 "MAX_SWAP_USDD",
                 "DAILY_PAYOUT_CAP_USDC",
                 "ALERT_WEBHOOK_URL or ALERT_COMMAND",
+            ],
+        )
+
+    @patch.object(main.alerts, "critical")
+    def test_production_controls_require_both_quarantine_destinations(self, critical):
+        """A live bridge cannot strand either chain's failed-payout funds in its vault."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", ""),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", ""),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=[
+                "USDC_QUARANTINE_ACCOUNT",
+                "NEXUS_USDD_QUARANTINE_ACCOUNT",
             ],
         )
 

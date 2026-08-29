@@ -97,6 +97,14 @@ def validate_production_controls() -> bool:
     if not (str(getattr(config, "ALERT_WEBHOOK_URL", "") or "").strip()
             or str(getattr(config, "ALERT_COMMAND", "") or "").strip()):
         missing.append("ALERT_WEBHOOK_URL or ALERT_COMMAND")
+    # A failed Solana refund must move to a self-owned SPL token account and a held
+    # Nexus credit must have a dedicated Nexus account for the separately authorized,
+    # durable-intent disposition.  Without either destination, production would leave
+    # failed payout funds mixed with backing in the live vault/treasury.
+    if not str(getattr(config, "USDC_QUARANTINE_ACCOUNT", "") or "").strip():
+        missing.append("USDC_QUARANTINE_ACCOUNT")
+    if not str(getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "") or "").strip():
+        missing.append("NEXUS_USDD_QUARANTINE_ACCOUNT")
 
     if not missing:
         return True
