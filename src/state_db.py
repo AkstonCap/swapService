@@ -582,6 +582,32 @@ def claim_nexus_transfer_intent(intent_id: str) -> dict | None:
         conn.close()
 
 
+def recover_interrupted_nexus_transfer_intents() -> int:
+    """Turn pre-completion execution claims into explicit restart holds.
+
+    This is called only during startup, after the singleton lock is held. An ``executing``
+    row proves that the sole permitted CLI attempt may already have reached the node, but
+    the process died before recording a parsed result. It must therefore become
+    ``outcome_unknown`` and require positive chain-reference resolution, never another debit.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        recovered = conn.execute(
+            """UPDATE nexus_transfer_intents
+               SET status = 'outcome_unknown'
+               WHERE status = 'executing'"""
+        ).rowcount
+        conn.commit()
+        return int(recovered)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def authorize_nexus_transfer_intent(
     intent_id: str, *, actor: str, rationale: str, expected_reference: str
 ) -> dict:

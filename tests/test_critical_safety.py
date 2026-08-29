@@ -58,7 +58,10 @@ os.environ.setdefault("NEXUS_USDD_TREASURY_ACCOUNT", "TREASURY")
 os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
-from src import balance_reconciler, fees, main, nexus_client, solana_client, state_db, swap_nexus  # noqa: E402
+from src import (  # noqa: E402
+    balance_reconciler, fees, main, nexus_client, solana_client, startup_recovery,
+    state_db, swap_nexus,
+)
 
 
 class CriticalSafetyTests(unittest.TestCase):
@@ -859,6 +862,49 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(stored["remote_txid"], "chain-txid")
         self.assertEqual(run.call_count, 1)
+
+    def test_restart_marks_interrupted_nexus_transfer_as_outcome_unknown_without_reexecution(self):
+        """A crash after claiming an intent leaves an explicit hold, never a second debit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-crash-after-claim",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                self.assertIsNotNone(state_db.claim_nexus_transfer_intent(intent["id"]))
+
+                recovered = state_db.recover_interrupted_nexus_transfer_intents()
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+                repeated = nexus_client.execute_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertFalse(repeated.executed)
+        self.assertEqual(repeated.status, "outcome_unknown")
+
+    @patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99)
+    @patch.object(startup_recovery, "_fallback_recent_scan", return_value={"fallback_mode": True})
+    @patch.object(startup_recovery.nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch.object(state_db, "recover_interrupted_nexus_transfer_intents", return_value=1)
+    def test_startup_recovery_holds_interrupted_nexus_transfers_before_scanning(
+        self, recover, _heartbeat, _fallback, _reference
+    ):
+        stats = startup_recovery.perform_startup_recovery()
+
+        recover.assert_called_once_with()
+        self.assertEqual(stats["interrupted_nexus_transfers_held"], 1)
 
     def test_transfer_resolution_rejects_reference_match_with_wrong_debit_terms(self):
         """A public reference alone must not release a held credit."""

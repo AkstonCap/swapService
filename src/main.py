@@ -264,7 +264,7 @@ def run():
     try:
         from . import startup_recovery
         rec = startup_recovery.perform_startup_recovery()
-        print(f"   Startup recovery: ref_seeded={rec.get('reference_seeded')} added_nexus_processed={rec.get('added_nexus_processed')} added_refunded={rec.get('added_refunded_sigs')} (memos scanned nexus={rec.get('found_nexus_memos')} refunds={rec.get('found_refund_memos')})")
+        print(f"   Startup recovery: ref_seeded={rec.get('reference_seeded')} interrupted_nexus_transfers_held={rec.get('interrupted_nexus_transfers_held', 0)} added_nexus_processed={rec.get('added_nexus_processed')} added_refunded={rec.get('added_refunded_sigs')} (memos scanned nexus={rec.get('found_nexus_memos')} refunds={rec.get('found_refund_memos')})")
     except Exception as e:
         print(f"   Startup recovery error: {e}")
 

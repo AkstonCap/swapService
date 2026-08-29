@@ -77,8 +77,11 @@ Automatic refunds and quarantine moves remain disabled in the service loop. A se
 `nexus_transfer_operator.py` workflow now requires a named operator, rationale, an audited
 preparation event tied to the deterministic intent reference, exact intent reference confirmation,
 a one-time execution request and a final exact remote-txid confirmation before it archives the
-held source row. Each authorization, requested execution and disposition is append-only/auditable. Focused fault injection and target-node evidence are still required;
-the transfer primitive remains fail closed outside the durable-intent workflow.
+held source row. Each authorization, requested execution and disposition is append-only/auditable. At
+startup, any persisted `executing` intent is demoted to the explicit `outcome_unknown` hold
+before scans run, so a crash after the durable claim cannot consume its authorization again.
+Focused fault injection and target-node evidence are still required; the transfer primitive remains
+fail closed outside the durable-intent workflow.
 
 **Historical root cause (pre-intent ledger):** `refund_nexus_token()` called
 `transfer_nexus_between_accounts()` directly. The operation:
@@ -226,10 +229,9 @@ A green result was not evidence of balance correctness.
 
 #### 2026-08-28 independent-review correction
 
-- The producer is fail-closed, but the startup consumer at `src/main.py:234-245` checks only
-  `discrepancies`. An unhealthy result with zero checked recipients therefore prints
-  `✓ Balance check: All 0 ... match expected balances`. The periodic consumer correctly checks
-  `healthy`, so operator output is inconsistent.
+- ✅ The startup consumer now requires `healthy is True` before it prints the green balance
+  message. Zero checked recipients, malformed evidence and invalid result objects emit the same
+  `balance_reconciliation_incomplete` critical alert used by the periodic consumer.
 - The reconciliation totals are derived from local completed tables. `include_remote_balance`
   is display-only. A crash-created duplicate remote mint need not create a second local row;
   authoritative Nexus transaction-history identity/amount read-back is still required.
@@ -238,8 +240,8 @@ A green result was not evidence of balance correctness.
 
 - Execute the reconciliation fixture matrix and authoritative transaction-history read-back
   against the configured target Nexus node and Solana devnet/testnet.
-- Require every consumer, including startup, to alert/hold unless `healthy is True`, with a
-  caller-level regression for zero checked and malformed evidence.
+- ✅ Every local consumer, including startup, alerts unless `healthy is True`; caller-level
+  regressions cover zero checked and invalid results.
 - Establish a reviewed backfill/disposition procedure for existing legacy completed rows;
   they intentionally remain incomplete rather than being reconstructed from float data.
 
@@ -408,9 +410,9 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 
 **Producer exit met locally:** a known balanced completed swap returns zero delta after its queue
-row is gone; a seeded local duplicate is detected; and zero checked addresses return
-`healthy=False`. **Consumer/authority exit is not met:** startup can still print that unhealthy
-zero-check result as green, and target-chain transaction-history read-back is absent.
+row is gone; a seeded local duplicate is detected; zero checked addresses return `healthy=False`;
+and both local consumers alert rather than print green unless `healthy is True`. **Authority exit
+is not met:** target-chain transaction-history read-back is absent.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
@@ -424,8 +426,10 @@ zero-check result as green, and target-chain transaction-history read-back is ab
    automatic refunds and quarantine moves remain disabled until focused fault injection and the
    live matrix pass.
 
-**Remaining exit evidence:** crashes at every intent/action/finalization boundary, duplicate
-invocation and target-node timeout behavior must prove exactly one remote transfer.
+**Remaining exit evidence:** the local crash-after-claim/restart regression now proves an
+interrupted intent becomes a durable `outcome_unknown` hold and cannot execute twice. Target-node
+crashes at every intent/action/finalization boundary, duplicate invocation and timeout behavior
+must still prove exactly one remote transfer.
 
 ### Batch 4 — Live integration and external-semantics evidence
 
