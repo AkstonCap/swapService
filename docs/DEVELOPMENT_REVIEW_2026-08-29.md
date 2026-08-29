@@ -6,7 +6,7 @@
 **Additional staged tree reviewed:** `src/balance_reconciler.py`,
 `src/nexus_client.py`, `src/state_db.py`, `tests/test_critical_safety.py`
 **Late unstaged delta reviewed:** exact-integer and immutable-reference hardening
-in the first three files above; recorded separately below
+plus focused regressions in the four files above; recorded separately below
 **Deployment verdict:** **HARD BLOCKED for real funds**
 **Staged-change verdict:** **NOT COMMIT-READY**
 
@@ -102,14 +102,18 @@ already-staged files. The late unstaged delta:
   (`src/balance_reconciler.py:33-39,73-79,129-137,293-301`);
 - holds debit confirmation when persisted Solana units are not an exact integer
   (`src/nexus_client.py:527-532`);
+- rejects two different remote contracts that claim the same `(txid,
+  contract_id)` identity instead of silently accepting the first
+  (`src/nexus_client.py:967-986`);
 - makes each queued deposit's Nexus reference an exact integer and immutable
   once set (`src/state_db.py:1040-1074`).
 
 These are appropriate fail-closed changes and add no remote side effect. They do
 not repair the High exposure-pause finding or malformed production-mode gate.
-They are not part of the staged index and have no corresponding unstaged test
-diff, so they remain a separate work-in-progress layer rather than a reviewed
-commit candidate.
+Unstaged regressions cover reference overwrite, conflicting remote identity and
+fractional SQLite evidence. They are not part of the staged index, and the exact
+completed-Alice/active-first-time-Bob boundary is still absent, so the layer
+remains work in progress rather than a reviewed commit candidate.
 
 ## Prior blocker disposition
 

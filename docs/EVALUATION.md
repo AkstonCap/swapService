@@ -259,8 +259,10 @@ A green result was not evidence of balance correctness.
   closes the prior cross-page false-green path at the cost of availability; target short-page,
   ordering and boundary semantics remain unproven.
 - A later unstaged layer rejects non-INTEGER SQLite money/reference evidence and prevents a
-  queued deposit's Nexus reference from being replaced. This is appropriate fail-closed
-  hardening, but it is outside the staged index and does not fix the exposure-pause blocker.
+  queued deposit's Nexus reference from being replaced. Conflicting payloads for one remote
+  `(txid, contract_id)` identity also make the lookup incomplete. Focused unstaged regressions
+  cover these cases. This is appropriate fail-closed hardening, but it is outside the staged
+  index and does not fix the exposure-pause blocker.
 
 #### Remaining release evidence
 
