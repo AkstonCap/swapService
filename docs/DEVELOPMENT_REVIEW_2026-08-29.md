@@ -5,6 +5,8 @@
 **Reviewed committed head:** `5e7d3b853e49b4d3b229b6e7ba8770f158a7edc5`
 **Additional staged tree reviewed:** `src/balance_reconciler.py`,
 `src/nexus_client.py`, `src/state_db.py`, `tests/test_critical_safety.py`
+**Late unstaged delta reviewed:** exact-integer and immutable-reference hardening
+in the first three files above; recorded separately below
 **Deployment verdict:** **HARD BLOCKED for real funds**
 **Staged-change verdict:** **NOT COMMIT-READY**
 
@@ -90,6 +92,25 @@ may continue under a narrower policy.
 booleans during configuration validation and exit non-zero when a production
 start is refused.
 
+### Late concurrent working-tree delta — Positive hardening, not yet staged
+
+After the staged-index review, the working tree changed concurrently in three
+already-staged files. The late unstaged delta:
+
+- rejects SQLite REAL/TEXT/bool values instead of coercing them with `int()` for
+  completed, active and processed base-unit evidence
+  (`src/balance_reconciler.py:33-39,73-79,129-137,293-301`);
+- holds debit confirmation when persisted Solana units are not an exact integer
+  (`src/nexus_client.py:527-532`);
+- makes each queued deposit's Nexus reference an exact integer and immutable
+  once set (`src/state_db.py:1040-1074`).
+
+These are appropriate fail-closed changes and add no remote side effect. They do
+not repair the High exposure-pause finding or malformed production-mode gate.
+They are not part of the staged index and have no corresponding unstaged test
+diff, so they remain a separate work-in-progress layer rather than a reviewed
+commit candidate.
+
 ## Prior blocker disposition
 
 | Prior blocker | 2026-08-29 status |
@@ -112,6 +133,7 @@ No live RPC, Nexus CLI, credentials or fund-moving operation was invoked.
 |---|---|
 | Committed `5e7d3b8`: `python3 -m pytest -q -p no:cacheprovider` | **51 passed, 4 subtests passed in 5.65s** |
 | Active staged tree: same pytest command | **58 passed, 4 subtests passed** |
+| Late combined staged + unstaged working tree | **59 passed, 4 subtests passed** |
 | `python3 -m pip check` | **No broken requirements found** |
 | `python3 scripts/check_markdown_links.py` | **Local Markdown links: OK** |
 | Commit-range and staged `git diff --check` | **PASS** |

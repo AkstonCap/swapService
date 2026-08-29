@@ -36,7 +36,9 @@ proof exists. The current staged proposal now includes active recipients indepen
 fail-closes instead of attempting multi-page offset pagination. It is still not commit-ready
 because reconciliation failures do not pause exposure, the exact valid first-time-recipient case
 is untested, and target single-page ordering/boundary semantics remain unproven. The standing
-live-chain acceptance matrix has not been run.
+live-chain acceptance matrix has not been run. A later unstaged layer adds exact SQLite-integer
+checks and immutable per-deposit Nexus references; it is positive fail-closed hardening but does
+not change the release verdict.
 
 ### Current severity summary
 
@@ -55,7 +57,7 @@ live-chain acceptance matrix has not been run.
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
 | Durable completed-state data supports reconciliation | **PARTIAL** — durable rows and an explicit health result exist; startup checks that result, but failures do not pause exposure and the staged remote read-back is not authoritative |
-| One composable automated test command | **PASS** — committed head: 51 tests plus 4 subtests; active staged tree: 58 tests plus 4 subtests |
+| One composable automated test command | **PASS** — committed head: 51 tests plus 4 subtests; staged-index export: 58 tests plus 4 subtests; combined late working tree: 59 tests plus 4 subtests |
 | CI enforces tests and static checks | **ENFORCED and green for committed head** — run `33254976148` passed on exact head `5e7d3b8`; staged code has no CI identity |
 | Live devnet/testnet matrix | **NOT RUN** |
 
@@ -256,6 +258,9 @@ A green result was not evidence of balance correctness.
   `complete=False` when a full page cannot prove the requested boundary (lines 981-984). This
   closes the prior cross-page false-green path at the cost of availability; target short-page,
   ordering and boundary semantics remain unproven.
+- A later unstaged layer rejects non-INTEGER SQLite money/reference evidence and prevents a
+  queued deposit's Nexus reference from being replaced. This is appropriate fail-closed
+  hardening, but it is outside the staged index and does not fix the exposure-pause blocker.
 
 #### Remaining release evidence
 
@@ -518,7 +523,7 @@ and a rejected production startup should return a non-zero process status to its
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | Committed head: 51 passed, 4 subtests passed; active staged tree: 58 passed, 4 subtests passed |
+| Full `python -m pytest -q` | Committed head: 51 passed, 4 subtests passed; staged-index export: 58 passed, 4 subtests passed; combined late working tree: 59 passed, 4 subtests passed |
 | CI workflow | Passed on exact committed head `5e7d3b8` — [run 33254976148](https://github.com/distordialabs-brutus/swapService/actions/runs/33254976148); no CI identity for staged code |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
