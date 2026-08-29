@@ -1,11 +1,11 @@
 # Independent Financial State-Machine Review — 2026-08-29
 
-**Review window:** 2026-08-28 16:25:36 +0200 through 2026-08-29 16:08:08 +0200  
-**Baseline:** `787a401db4a74c6d9062c537534cf16ad3a94356`  
-**Reviewed committed head:** `5e7d3b853e49b4d3b229b6e7ba8770f158a7edc5`  
+**Review window:** 2026-08-28 16:25:36 +0200 through 2026-08-29 16:08:08 +0200
+**Baseline:** `787a401db4a74c6d9062c537534cf16ad3a94356`
+**Reviewed committed head:** `5e7d3b853e49b4d3b229b6e7ba8770f158a7edc5`
 **Additional staged tree reviewed:** `src/balance_reconciler.py`,
-`src/nexus_client.py`, `src/state_db.py`, `tests/test_critical_safety.py`  
-**Deployment verdict:** **HARD BLOCKED for real funds**  
+`src/nexus_client.py`, `src/state_db.py`, `tests/test_critical_safety.py`
+**Deployment verdict:** **HARD BLOCKED for real funds**
 **Staged-change verdict:** **NOT COMMIT-READY**
 
 ## Executive result
