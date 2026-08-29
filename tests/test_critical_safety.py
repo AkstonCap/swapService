@@ -948,6 +948,11 @@ class CriticalSafetyTests(unittest.TestCase):
             account_errors=[],
         )
 
+    def test_balance_reconciliation_becomes_due_by_elapsed_interval_not_wall_clock_modulo(self):
+        """A missed exact clock second must not leave exposure paused indefinitely."""
+        self.assertTrue(main.is_balance_reconciliation_due(601, 1))
+        self.assertFalse(main.is_balance_reconciliation_due(600, 1))
+
     @patch.object(main.alerts, "critical")
     def test_reconciliation_exception_latches_exposure(self, critical):
         """A Nexus reconciliation exception is not permission to keep accepting deposits."""

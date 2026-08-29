@@ -9,6 +9,7 @@ from .nexus_client import get_heartbeat_asset, update_heartbeat_asset
 _last_heartbeat = 0
 _last_reconcile = 0
 _stop_event = None  # set in run()
+RECONCILIATION_INTERVAL_SEC = 600
 
 
 def report_startup_balance_reconciliation(bal_result: object) -> bool:
@@ -74,6 +75,11 @@ def update_reconciliation_exposure_pause(
     # newly observed explicit healthy result clears it.
     del paused
     return not report_startup_balance_reconciliation(bal_result)
+
+
+def is_balance_reconciliation_due(now: int, last_attempt: int) -> bool:
+    """Schedule reconciliation by elapsed time, not an exact wall-clock second."""
+    return int(now) - int(last_attempt) >= RECONCILIATION_INTERVAL_SEC
 
 
 def validate_production_controls() -> bool:
@@ -340,6 +346,7 @@ def run():
         reconciliation_pause = update_reconciliation_exposure_pause(
             reconciliation_pause, error=e
         )
+    last_balance_reconciliation_attempt = int(time.time())
 
     # Setup graceful shutdown via Ctrl+C (SIGINT) or SIGTERM
     import signal, threading
@@ -405,8 +412,10 @@ def run():
                     except Exception as e:
                         print(f"[reconcile] error: {e}")
 
-                # Periodic balance reconciliation check (every 10 minutes) – detect double-mints
-                if now % 600 == 0:  # Every 10 minutes
+                # Periodic reconciliation must be scheduled by elapsed time: a loop that
+                # misses an exact wall-clock second must still be able to clear a pause.
+                if is_balance_reconciliation_due(now, last_balance_reconciliation_attempt):
+                    last_balance_reconciliation_attempt = now
                     try:
                         from . import balance_reconciler
                         bal_result = _safe_call(balance_reconciler.run_balance_reconciliation, dry_run=True, timeout_sec=15)
