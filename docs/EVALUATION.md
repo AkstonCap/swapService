@@ -1,7 +1,7 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
 **Date:** 2026-08-29
-**Evaluated code:** committed head `5e7d3b853e49b4d3b229b6e7ba8770f158a7edc5`; a separate staged reconciliation proposal is explicitly identified where discussed
+**Evaluated code:** `5d92ec0513b8f9be8d6033ecef84f6923cea612a`
 **Status:** Current issue register and repair priority for `swapService`
 
 This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-29.md`](DEVELOPMENT_REVIEW_2026-08-29.md); the 2026-08-28 review and earlier containment review remain historical evidence.
@@ -30,15 +30,12 @@ The repair work through the evaluated head materially improved the bridge:
 
 Those controls are valuable and verified locally and in CI. They do not make the service
 production-ready. Automatic Nexus refunds remain disabled while the durable intent protocol
-awaits crash-boundary and target-node evidence. Reconciliation exceptions or unhealthy results
-alert but do not latch a pause on new exposure, and no authoritative remote transaction-history
-proof exists. The current staged proposal now includes active recipients independently and
-fail-closes instead of attempting multi-page offset pagination. It is still not commit-ready
-because reconciliation failures do not pause exposure, the exact valid first-time-recipient case
-is untested, and target single-page ordering/boundary semantics remain unproven. The standing
-live-chain acceptance matrix has not been run. A later unstaged layer adds exact SQLite-integer
-checks and immutable per-deposit Nexus references; it is positive fail-closed hardening but does
-not change the release verdict.
+awaits crash-boundary and target-node evidence. Reconciliation now requires exact remote Nexus
+token-history identity and amount evidence, includes active recipients independently, and fails
+closed rather than traversing unsafe live-offset pages. Exceptions or unhealthy results still do
+not latch a pause on new exposure; the exact valid first-time-recipient case and target one-page
+ordering/boundary semantics remain unproven. The standing live-chain acceptance matrix has not
+been run.
 
 ### Current severity summary
 
@@ -56,9 +53,9 @@ not change the release verdict.
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — durable rows and an explicit health result exist; startup checks that result, but failures do not pause exposure and the staged remote read-back is not authoritative |
-| One composable automated test command | **PASS** — committed head: 51 tests plus 4 subtests; staged-index export: 58 tests plus 4 subtests; combined late working tree: 59 tests plus 4 subtests |
-| CI enforces tests and static checks | **ENFORCED and green for committed head** — run `33254976148` passed on exact head `5e7d3b8`; staged code has no CI identity |
+| Durable completed-state data supports reconciliation | **PARTIAL** — local and remote evidence fail closed, but unhealthy results do not pause exposure and target-node boundary semantics remain unproven |
+| One composable automated test command | **PASS** — 62 tests plus 4 subtests on `5d92ec0` |
+| CI enforces tests and static checks | **ENFORCED; pending for current head** — prior run `33254976148` passed on `5e7d3b8` |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -245,24 +242,20 @@ A green result was not evidence of balance correctness.
   is display-only. A crash-created duplicate remote mint need not create a second local row;
   authoritative Nexus transaction-history identity/amount read-back is still required.
 
-#### 2026-08-29 independent-review correction
+#### 2026-08-29 remote-authority correction
 
-- Committed head `5e7d3b8` retains the startup `healthy is True` guard, but both startup and
-  periodic reconciliation exceptions only print/alert. An unhealthy result does not latch a
-  safety pause, so exposure-producing pollers continue.
-- The current staged remote-read-back proposal now loads active mint destinations independently
-  (`src/balance_reconciler.py:255-302`) and keeps every valid active intent incomplete until
-  terminal reconciliation (lines 351-367). The exact completed-Alice/active-first-time-Bob case
-  still lacks a regression.
-- The staged Nexus scan now reads one page only (`src/nexus_client.py:892-904`) and returns
-  `complete=False` when a full page cannot prove the requested boundary (lines 981-984). This
-  closes the prior cross-page false-green path at the cost of availability; target short-page,
-  ordering and boundary semantics remain unproven.
-- A later unstaged layer rejects non-INTEGER SQLite money/reference evidence and prevents a
-  queued deposit's Nexus reference from being replaced. Conflicting payloads for one remote
-  `(txid, contract_id)` identity also make the lookup incomplete. Focused unstaged regressions
-  cover these cases. This is appropriate fail-closed hardening, but it is outside the staged
-  index and does not fix the exposure-pause blocker.
+- Commit `5d92ec0` requires one-to-one confirmed remote DEBIT evidence by txid, contract id,
+  reference, source, destination and exact integer amount before reconciliation can be green.
+- Every remote token-supply DEBIT is retained, including unknown recipients; unmatched emissions
+  are reported as surplus, while account-to-account movements are separated by source register.
+- Active mint intents are validated independently and keep the result unhealthy until terminal.
+- The Nexus scan reads one page only and returns `pagination_snapshot_unavailable` when a full
+  page cannot prove the requested boundary. Target short-page, ordering and boundary semantics
+  remain unproven.
+- SQLite REAL/TEXT money evidence is rejected, per-deposit references are immutable, duplicate
+  remote identities must have identical payloads, and missing/non-integer contract ids fail closed.
+- Startup and periodic reconciliation exceptions still do not latch a safety pause, so the
+  exposure-pause release blocker remains open.
 
 #### Remaining release evidence
 
@@ -447,11 +440,13 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
    unhealthy, never green.
 6. ✅ Alert separately on incomplete evidence and confirmed imbalance.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
+8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
+   DEBITs without relying on unsafe multi-page live-offset scans.
 
-**Producer exit met locally:** a known balanced completed swap returns zero delta after its queue
-row is gone; a seeded local duplicate is detected; zero checked addresses return `healthy=False`;
-and both local consumers refuse the green message unless `healthy is True`. **Authority exit is
-is not met:** failures do not pause exposure, the exact valid first-time-recipient regression is
+**Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
+row is gone; local and remote-only duplicates are detected; zero checked addresses return
+`healthy=False`; and both consumers refuse green unless `healthy is True`. **Batch remains
+partial:** failures do not pause exposure, the exact valid first-time-recipient regression is
 missing, and target single-page boundary/order semantics are unproven.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
@@ -520,13 +515,13 @@ and a rejected production startup should return a non-zero process status to its
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | Included in the complete committed-head run |
+| `python -m pytest -q tests/test_critical_safety.py` | 55 passed plus 4 subtests |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | Committed head: 51 passed, 4 subtests passed; staged-index export: 58 passed, 4 subtests passed; combined late working tree: 59 passed, 4 subtests passed |
-| CI workflow | Passed on exact committed head `5e7d3b8` — [run 33254976148](https://github.com/distordialabs-brutus/swapService/actions/runs/33254976148); no CI identity for staged code |
+| Full `python -m pytest -q` | 62 passed, 4 subtests passed in 10.18s on `5d92ec0` |
+| CI workflow | Pending for `5d92ec0`; prior run `33254976148` passed on `5e7d3b8` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
