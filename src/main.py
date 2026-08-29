@@ -11,6 +11,43 @@ _last_reconcile = 0
 _stop_event = None  # set in run()
 
 
+def report_startup_balance_reconciliation(bal_result: object) -> bool:
+    """Report startup reconciliation without treating incomplete evidence as green."""
+    if not isinstance(bal_result, dict):
+        alerts.critical(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation returned no result; no green result is valid",
+            checked_addresses=0,
+            incomplete_reasons=["balance reconciliation returned no result"],
+            account_errors=[],
+        )
+        return False
+
+    healthy = bal_result.get("healthy") is True
+    if not healthy:
+        alerts.critical(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation is not healthy; no green result is valid",
+            checked_addresses=bal_result.get("checked_addresses", 0),
+            incomplete_reasons=bal_result.get("incomplete_reasons", []),
+            account_errors=bal_result.get("account_errors", []),
+        )
+    if bal_result.get("discrepancies"):
+        alerts.critical(
+            "unbacked_nexus_surplus",
+            "addresses hold more of the Nexus-side token than their deposits justify "
+            "(possible double-mint)",
+            addresses=len(bal_result["discrepancies"]),
+            total_surplus_units=bal_result.get("total_surplus_nexus_units", 0),
+        )
+    elif healthy:
+        print(
+            f"   ✓ Balance check: All {bal_result.get('checked_addresses', 0)} "
+            "Nexus token addresses match expected balances"
+        )
+    return healthy
+
+
 def _safe_call(fn, *args, timeout_sec=5, **kwargs):
     """Execute function with timeout protection."""
     result = {}
@@ -235,13 +272,7 @@ def run():
     try:
         from . import balance_reconciler
         bal_result = balance_reconciler.run_balance_reconciliation(dry_run=True)
-        if bal_result.get('discrepancies'):
-            alerts.critical("unbacked_nexus_surplus",
-                            "addresses hold more of the Nexus-side token than their deposits justify (possible double-mint)",
-                            addresses=len(bal_result['discrepancies']),
-                            total_surplus_units=bal_result.get('total_surplus_nexus', 0))
-        else:
-            print(f"   ✓ Balance check: All {bal_result.get('checked_addresses', 0)} Nexus token addresses match expected balances")
+        report_startup_balance_reconciliation(bal_result)
     except Exception as e:
         print(f"   Balance reconciliation error: {e}")
 

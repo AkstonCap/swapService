@@ -58,7 +58,7 @@ os.environ.setdefault("NEXUS_USDD_TREASURY_ACCOUNT", "TREASURY")
 os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
-from src import balance_reconciler, fees, nexus_client, solana_client, state_db, swap_nexus  # noqa: E402
+from src import balance_reconciler, fees, main, nexus_client, solana_client, state_db, swap_nexus  # noqa: E402
 
 
 class CriticalSafetyTests(unittest.TestCase):
@@ -587,6 +587,40 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(result["checked_addresses"], 0)
         self.assertTrue(any("durable Nexus destination" in reason
                             for reason in result["incomplete_reasons"]))
+
+    @patch.object(main.alerts, "critical")
+    def test_startup_reconciliation_alerts_when_evidence_is_unhealthy(self, critical):
+        """Startup must not report zero checked recipients as a green reconciliation."""
+        result = {
+            "healthy": False,
+            "checked_addresses": 0,
+            "discrepancies": [],
+            "incomplete_reasons": ["no completed mint recipients were checked"],
+            "account_errors": [],
+        }
+
+        main.report_startup_balance_reconciliation(result)
+
+        critical.assert_called_once_with(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation is not healthy; no green result is valid",
+            checked_addresses=0,
+            incomplete_reasons=["no completed mint recipients were checked"],
+            account_errors=[],
+        )
+
+    @patch.object(main.alerts, "critical")
+    def test_startup_reconciliation_alerts_when_no_result_is_returned(self, critical):
+        """An invalid reconciliation result must be an explicit safety event."""
+        main.report_startup_balance_reconciliation(None)
+
+        critical.assert_called_once_with(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation returned no result; no green result is valid",
+            checked_addresses=0,
+            incomplete_reasons=["balance reconciliation returned no result"],
+            account_errors=[],
+        )
 
     def test_nexus_transfer_intent_is_durable_and_reuses_its_unique_reference(self):
         """A refund/quarantine transfer is uniquely identified before the CLI can run."""
