@@ -181,8 +181,10 @@ Also required in practice:
 
 Before a live production start, set `SWAP_PRODUCTION_MODE=true`, then set positive values for
 `MAX_SWAP_USDC`, `MAX_SWAP_USDD`, and `DAILY_PAYOUT_CAP_USDC`, and configure either
-`ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. The service refuses to start in production mode if any
-of these admission controls is absent; send and verify a test alert separately.
+`ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. The production switch accepts only
+`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other present value fails startup. The
+service refuses to start in production mode if any admission control is absent and returns a
+non-zero status to its supervisor; send and verify a test alert separately.
 
 Optional but recommended:
 - `HELIUS_RPC_URL` or `HELIUS_API_KEY` — optimized Solana deposit polling (1-2 calls vs N+1)

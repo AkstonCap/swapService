@@ -100,11 +100,13 @@ Legend:
 
 ## Production Admission, Exposure Caps & Alerting
 
-`SWAP_PRODUCTION_MODE` defaults to `false` for local development and test networks. When it is
-`true`, startup refuses to open the state database or start polling unless both single-swap caps,
-the daily Solana payout cap, and one alert route are configured with non-zero/non-empty values.
-This is a configuration admission check, not proof that the alert route is deliverable; test the
-configured channel as part of the live acceptance matrix.
+`SWAP_PRODUCTION_MODE` defaults to `false` for local development and test networks. Its accepted
+values are `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive; surrounding
+whitespace is accepted). Any other present value fails startup rather than silently disabling the
+production gate. When it is `true`, startup refuses to open the state database or start polling
+unless both single-swap caps, the daily Solana payout cap, and one alert route are configured with
+non-zero/non-empty values. This is a configuration admission check, not proof that the alert route
+is deliverable; test the configured channel as part of the live acceptance matrix.
 
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|

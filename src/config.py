@@ -315,7 +315,28 @@ USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
 # --- Production safety gate -----------------------------------------------------------
 # Development/test deployments intentionally permit disabled caps and stdout-only alerts.
 # A live deployment must opt in explicitly and then pass the stricter startup gate in main.
-PRODUCTION_MODE = os.getenv("SWAP_PRODUCTION_MODE", "false").lower() in ("1", "true", "yes", "on")
+def parse_strict_boolean(name: str, value: str | None = None, *, default: bool = False) -> bool:
+    """Parse an optional environment boolean without treating a typo as ``False``.
+
+    A missing variable retains the documented default.  A present value must use one of
+    the explicit spellings below; this is particularly important for the production-mode
+    admission control because silently falling back to development mode removes its
+    exposure caps and alerting requirements.
+    """
+    raw = os.getenv(name) if value is None else value
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be one of 1/true/yes/on or 0/false/no/off; got {raw!r}"
+    )
+
+
+PRODUCTION_MODE = parse_strict_boolean("SWAP_PRODUCTION_MODE", default=False)
 
 # --- Exposure caps (defence in depth against a bug or a compromised key) ---
 # Largest single swap accepted. Oversized items are refunded rather than paid out.

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Regression tests for the 2026-08-24 Critical fund-safety findings."""
 
+import importlib
 import json
 import os
+import runpy
 import sqlite3
 import sys
 import tempfile
@@ -65,6 +67,27 @@ from src import (  # noqa: E402
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    def test_invalid_production_mode_in_environment_fails_configuration_loading(self):
+        """A typo must never silently downgrade a production process to development mode."""
+        try:
+            with patch.dict(os.environ, {"SWAP_PRODUCTION_MODE": "treu"}):
+                with self.assertRaisesRegex(ValueError, "SWAP_PRODUCTION_MODE.*treu"):
+                    importlib.reload(config)
+        finally:
+            # Reload the normal test configuration after the intentional failed import.
+            importlib.reload(config)
+
+    def test_production_mode_parser_accepts_only_documented_spellings(self):
+        """The documented switch values stay explicit across Nexus/Solana deployments."""
+        for value in ("1", "true", "yes", "on", " TrUe "):
+            self.assertTrue(config.parse_strict_boolean("SWAP_PRODUCTION_MODE", value))
+        for value in ("0", "false", "no", "off", " FaLsE "):
+            self.assertFalse(config.parse_strict_boolean("SWAP_PRODUCTION_MODE", value))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(config.parse_strict_boolean("SWAP_PRODUCTION_MODE", default=False))
+        with self.assertRaisesRegex(ValueError, "SWAP_PRODUCTION_MODE.*''"):
+            config.parse_strict_boolean("SWAP_PRODUCTION_MODE", "")
+
     @patch.object(main.alerts, "critical")
     def test_production_controls_reject_disabled_caps_and_alerting(self, critical):
         """A production process must not start with disabled loss-limiting controls."""
@@ -91,11 +114,22 @@ class CriticalSafetyTests(unittest.TestCase):
 
     @patch.object(main, "acquire_singleton_lock", return_value=False)
     @patch.object(main.state_db, "init_db")
-    def test_run_checks_production_controls_before_opening_state(self, init_db, _lock):
+    def test_run_rejects_production_controls_before_opening_state(self, init_db, _lock):
         """A rejected production configuration must not acquire state or enter the loop."""
         with patch.object(main, "validate_production_controls", return_value=False, create=True):
-            main.run()
+            self.assertIs(main.run(), False)
 
+        init_db.assert_not_called()
+
+    @patch.object(main.state_db, "init_db")
+    def test_entrypoint_exits_nonzero_when_startup_is_rejected(self, init_db):
+        """A service supervisor must observe a failed production admission as an error."""
+        entrypoint = os.path.join(ROOT, "swapService.py")
+        with patch.object(main, "validate_production_controls", return_value=False):
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_path(entrypoint, run_name="__main__")
+
+        self.assertEqual(raised.exception.code, 1)
         init_db.assert_not_called()
 
     @patch.object(nexus_client.state_db, "update_unprocessed_sig_status")

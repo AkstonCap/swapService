@@ -243,7 +243,7 @@ def run():
     # An explicit production deployment must have finite blast-radius controls and an
     # alert route before it opens mutable state or starts polling either chain.
     if not validate_production_controls():
-        return
+        return False
 
     # Ensure the SQLite schema exists before any state access (idempotent).
     state_db.init_db()

@@ -331,9 +331,13 @@ State-changing Nexus calls pass `pin=` and, in multiuser mode, `session=` throug
 **Priority:** P2 operational hardening — **partially remediated locally**
 
 `SWAP_PRODUCTION_MODE` is opt-in (so local development and testnet workflows retain their
-non-production defaults). When it is enabled, startup refuses before opening SQLite or polling if
-one or both per-swap caps, the daily Solana payout cap, or both alert routes are unset/zero. The rejection
-emits a `production_controls_missing` critical event naming every missing control.
+non-production defaults). Its parser now accepts only explicit true (`1`/`true`/`yes`/`on`) or
+false (`0`/`false`/`no`/`off`) spellings; a present invalid value fails configuration loading
+rather than silently disabling production controls. When it is enabled, startup refuses before
+opening SQLite or polling if one or both per-swap caps, the daily Solana payout cap, or both alert
+routes are unset/zero. The rejection emits a `production_controls_missing` critical event naming
+every missing control and the process entrypoint exits non-zero so a supervisor cannot mistake the
+rejection for a clean stop.
 
 Remaining release evidence: configure values appropriate to the vault, deliver and independently
 verify at least one live alert channel, and exercise that configuration in the live acceptance matrix.
@@ -491,9 +495,12 @@ unless reconciliation explicitly returns `healthy=True`.
 4. Complete the operator hold-resolution workflow with evidence, authorization and audit.
 5. Document incident response, recovery and key rotation; rehearse them before launch.
 
-**Configuration gap:** if `SWAP_PRODUCTION_MODE` is present with an unrecognized value such as
-`treu`, the current parser silently produces `False`. A present invalid boolean must fail startup,
-and a rejected production startup should return a non-zero process status to its supervisor.
+**Configuration gap resolved locally:** `SWAP_PRODUCTION_MODE` now accepts only explicit
+true/false spellings. An unrecognized present value such as `treu` fails configuration loading,
+and a production-control rejection returns `False` to the entrypoint, which exits non-zero for the
+supervisor. Regression tests cover both paths. The remaining Batch 5 work is operational: configure
+quarantine destinations, independently verify alert delivery, and rehearse the documented
+hold-resolution, incident-response and key-rotation procedures.
 
 ### Batch 6 — Custody, dependency and maintainability hardening
 
