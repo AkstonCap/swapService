@@ -119,7 +119,7 @@ EXPECTED_SCHEMA = {
                        "owner_from_address", "confirmations_credit", "status", "sig"],
     "reservations": ["kind", "key", "timestamp"],
     "unprocessed_sigs": ["sig", "timestamp", "memo", "from_address", "amount_usdc_units",
-                         "status", "txid", "reference"],
+                         "amount_usdd_units", "status", "txid", "reference"],
     "unprocessed_txids": ["txid", "timestamp", "amount_usdd", "from_address", "to_address",
                           "owner_from_address", "confirmations_credit", "status",
                           "receival_account", "sig", "amount_usdd_units", "hold_reason"],

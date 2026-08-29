@@ -621,7 +621,9 @@ class CriticalSafetyTests(unittest.TestCase):
                     "mint-sig", 100, "nexus:recipient", "sender", 2_000_000,
                     "debited, awaiting confirmation", "mint-tx",
                 )
-                state_db.set_unprocessed_sig_reference("mint-sig", 77)
+                state_db.set_unprocessed_sig_debit_intent(
+                    "mint-sig", 77, nexus_client.get_nexus_send_amount_units(2_000_000)
+                )
                 # Simulate another worker advancing the global counter/reference history.
                 state_db.mark_processed_sig(
                     "later-mint", 101, 2_000_000, "later-tx", 0.0,
@@ -655,6 +657,30 @@ class CriticalSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "different Nexus reference"):
                     state_db.set_unprocessed_sig_reference("mint-sig", 78)
                 self.assertEqual(state_db.get_unprocessed_sig_reference("mint-sig"), 77)
+
+    def test_persisting_debit_intent_atomically_enters_restart_recovery_state(self):
+        """A crash after intent persistence must be resolved, never retried as ready."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "crash-window-sig", 100, "nexus:recipient", "sender", 2_000_000,
+                    "ready for processing", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent(
+                    "crash-window-sig", 77, 1_898_000
+                )
+
+                self.assertEqual(
+                    state_db.get_unprocessed_sig_status("crash-window-sig"),
+                    "debit in flight",
+                )
+                pending = state_db.get_sigs_pending_debit_verification(
+                    nexus_client.DEBIT_UNVERIFIED_STATUSES
+                )
+
+        self.assertEqual([row[0] for row in pending], ["crash-window-sig"])
 
     def test_reconciliation_uses_durable_completed_mint_evidence_after_queue_removal(self):
         """A completed mint remains checkable after its transient queue row is gone."""
@@ -803,6 +829,174 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertFalse(result["healthy"])
         self.assertTrue(any("active mint active-sig" in reason
                             for reason in result["incomplete_reasons"]))
+
+    def test_active_first_time_recipient_uses_its_persisted_debit_amount(self):
+        """A fee change after submission cannot turn an active mint into a false surplus.
+
+        The first completed recipient establishes the Nexus token-supply source.  A
+        second, first-time recipient is then still awaiting terminal confirmation. Its
+        exact output must be the amount persisted before the Nexus debit, rather than
+        a fee calculation recomputed under later operator configuration.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                completed_units = 1_111_000
+                submitted_units = 2_222_000
+                state_db.mark_processed_sig(
+                    "completed-sig", 100, 2_000_000, "completed-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=completed_units,
+                    nexus_destination="completed-recipient", memo="nexus:completed-recipient",
+                )
+                state_db.add_unprocessed_sig(
+                    "active-sig", 101, "nexus:first-time-recipient", "sender", 3_000_000,
+                    "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent(
+                    "active-sig", 88, submitted_units
+                )
+                remote = [
+                    nexus_client.NexusMintDebitEvidence(
+                        remote_txid="completed-tx", timestamp=100, confirmations=10,
+                        from_address="TOKEN", to_address="completed-recipient",
+                        amount_usdd_units=completed_units, reference="77", contract_id=0,
+                    ),
+                    nexus_client.NexusMintDebitEvidence(
+                        remote_txid="active-tx", timestamp=101, confirmations=10,
+                        from_address="TOKEN", to_address="first-time-recipient",
+                        amount_usdd_units=submitted_units, reference="88", contract_id=1,
+                    ),
+                ]
+                with (
+                    patch.object(nexus_client, "get_nexus_send_amount_units", return_value=completed_units),
+                    patch.object(
+                        nexus_client, "find_nexus_mint_debits_since",
+                        return_value=nexus_client.BatchLookup({
+                            evidence.remote_txid: [evidence] for evidence in remote
+                        }, True),
+                    ),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertEqual(result["total_surplus_nexus_units"], 0)
+        self.assertEqual(result["discrepancies"], [])
+        self.assertTrue(any("active mint active-sig remains debit in flight" in reason
+                            for reason in result["incomplete_reasons"]))
+
+    def test_first_active_mint_still_scans_remote_history(self):
+        """The first submitted mint is observed even before any completed recipient exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                issued_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                state_db.add_unprocessed_sig(
+                    "first-sig", 100, "nexus:first-recipient", "sender", 2_000_000,
+                    "debited, awaiting confirmation", "first-tx",
+                )
+                state_db.set_unprocessed_sig_debit_intent("first-sig", 77, issued_units)
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="first-tx", timestamp=100, confirmations=10,
+                    from_address="TOKEN", to_address="first-recipient",
+                    amount_usdd_units=issued_units, reference="77", contract_id=0,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"first-tx": [remote]}, True),
+                ) as history:
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        history.assert_called_once_with([], 0)
+        self.assertTrue(any("active mint first-sig remains" in reason
+                            for reason in result["incomplete_reasons"]))
+
+    def test_completed_mint_uses_its_immutable_output_after_fee_change(self):
+        """A historically confirmed mint remains reconcilable after fee policy changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                issued_units = 2_222_000
+                state_db.mark_processed_sig(
+                    "completed-sig", 100, 2_000_000, "completed-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=issued_units,
+                    nexus_destination="recipient", memo="nexus:recipient",
+                )
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="completed-tx", timestamp=100, confirmations=10,
+                    from_address="TOKEN", to_address="recipient",
+                    amount_usdd_units=issued_units, reference="77", contract_id=0,
+                )
+                # The mutable current fee calculation is deliberately different from
+                # the output that was durably fixed before the historical debit.
+                with (
+                    patch.object(nexus_client, "get_nexus_send_amount_units", return_value=1_111_000),
+                    patch.object(
+                        nexus_client, "find_nexus_mint_debits_since",
+                        return_value=nexus_client.BatchLookup({"completed-tx": [remote]}, True),
+                    ),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertTrue(result["healthy"])
+        self.assertEqual(result["total_surplus_nexus_units"], 0)
+
+    def test_reconciliation_snapshot_keeps_transitioning_active_mint_consumed(self):
+        """An active→completed transition cannot expose its remote debit as a surplus."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                completed_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                active_units = nexus_client.get_nexus_send_amount_units(3_000_000)
+                state_db.mark_processed_sig(
+                    "completed-sig", 100, 2_000_000, "completed-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=completed_units,
+                    nexus_destination="completed-recipient", memo="nexus:completed-recipient",
+                )
+                state_db.add_unprocessed_sig(
+                    "active-sig", 101, "nexus:first-time-recipient", "sender", 3_000_000,
+                    "debited, awaiting confirmation", "active-tx",
+                )
+                state_db.set_unprocessed_sig_debit_intent("active-sig", 88, active_units)
+                completed_rows, active_rows = balance_reconciler._mint_reconciliation_snapshot(0)
+
+                # Simulate the confirmation worker committing after reconciliation has
+                # captured its local evidence but before remote history is reconciled.
+                state_db.mark_processed_sig(
+                    "active-sig", 101, 3_000_000, "active-tx", 0.0,
+                    "debit_confirmed", 88, amount_usdd_units=active_units,
+                    nexus_destination="first-time-recipient", memo="nexus:first-time-recipient",
+                )
+                state_db.remove_unprocessed_sig("active-sig")
+                remote = [
+                    nexus_client.NexusMintDebitEvidence(
+                        remote_txid="completed-tx", timestamp=100, confirmations=10,
+                        from_address="TOKEN", to_address="completed-recipient",
+                        amount_usdd_units=completed_units, reference="77", contract_id=0,
+                    ),
+                    nexus_client.NexusMintDebitEvidence(
+                        remote_txid="active-tx", timestamp=101, confirmations=10,
+                        from_address="TOKEN", to_address="first-time-recipient",
+                        amount_usdd_units=active_units, reference="88", contract_id=1,
+                    ),
+                ]
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({
+                        evidence.remote_txid: [evidence] for evidence in remote
+                    }, True),
+                ):
+                    surplus, incomplete = balance_reconciler._reconcile_remote_mint_history(
+                        ["completed-recipient"], 0,
+                        completed_rows=completed_rows, active_rows=active_rows,
+                    )
+
+        self.assertEqual(surplus, {})
+        self.assertTrue(any("active mint active-sig remains" in reason for reason in incomplete))
 
     def test_one_remote_mint_cannot_satisfy_two_completed_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:

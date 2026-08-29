@@ -40,9 +40,12 @@ def _exact_db_integer(value: object, description: str) -> int:
     return value
 
 
-def _completed_mint_rows(waterline_ts: int) -> List[Tuple]:
+def _completed_mint_rows(
+    waterline_ts: int, conn: sqlite3.Connection | None = None
+) -> List[Tuple]:
     """Return durable completed-mint evidence in integer base units only."""
-    conn = _db()
+    owns_connection = conn is None
+    conn = conn or _db()
     try:
         return conn.execute(
             """
@@ -55,7 +58,8 @@ def _completed_mint_rows(waterline_ts: int) -> List[Tuple]:
             (int(waterline_ts),),
         ).fetchall()
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
 def _validate_mint_row(row: Tuple) -> Tuple[str | None, str | None]:
@@ -77,14 +81,11 @@ def _validate_mint_row(row: Tuple) -> Tuple[str | None, str | None]:
         nexus_units = _exact_db_integer(nexus_units, f"completed mint {sig} Nexus units")
     except ValueError:
         return None, f"completed mint {sig} has non-integer base-unit evidence"
-    if solana_units < 0 or nexus_units < 0:
-        return None, f"completed mint {sig} has negative base-unit evidence"
-    expected = nexus_client.get_nexus_send_amount_units(solana_units)
-    if nexus_units != expected:
-        return None, (
-            f"completed mint {sig} output {nexus_units} does not match production "
-            f"fee calculation {expected}"
-        )
+    if solana_units < 0 or nexus_units <= 0:
+        return None, f"completed mint {sig} has non-positive base-unit evidence"
+    # This amount was committed with the debit reference before the Nexus CLI call.
+    # Fee policy is mutable, so re-running today's calculation against a historical
+    # debit would reject otherwise exact on-chain evidence after a legitimate change.
     return str(destination), None
 
 
@@ -160,11 +161,9 @@ def reconcile_account_trades(
     for sig, ts, solana_units, txid, nexus_units, status, reference, destination, memo in mint_rows:
         input_units = int(solana_units)
         output_units = int(nexus_units)
-        expected_units = nexus_client.get_nexus_send_amount_units(input_units)
-        # _validate_mint_row already checked this; retain the invariant locally so this
-        # function stays safe if its data source changes.
-        if output_units != expected_units:
-            raise ValueError(f"completed mint {sig} fails production-fee reconciliation")
+        # The confirmed output is the immutable amount fixed with this debit intent.
+        # Do not reprice an historical bridge mint under the current fee configuration.
+        expected_units = output_units
         minted += output_units
         expected_from_deposits += expected_units
         details.append({
@@ -248,11 +247,14 @@ def run_single(account: str, waterline_ts: int, include_remote_balance: bool = F
     return result
 
 
-def _distinct_mint_recipient_accounts(waterline_ts: int) -> Tuple[List[str], List[str]]:
+def _distinct_mint_recipient_accounts(
+    waterline_ts: int, completed_rows: List[Tuple] | None = None
+) -> Tuple[List[str], List[str]]:
     """Discover recipients solely from valid durable completed-mint records."""
     accounts: set[str] = set()
     incomplete: List[str] = []
-    for row in _completed_mint_rows(waterline_ts):
+    rows = completed_rows if completed_rows is not None else _completed_mint_rows(waterline_ts)
+    for row in rows:
         destination, error = _validate_mint_row(row)
         if error:
             incomplete.append(error)
@@ -261,13 +263,16 @@ def _distinct_mint_recipient_accounts(waterline_ts: int) -> Tuple[List[str], Lis
     return sorted(accounts), incomplete
 
 
-def _active_mint_expectations(waterline_ts: int) -> Tuple[List[Dict], List[str]]:
-    """Return exact queued debit intents so in-flight work is not called a duplicate."""
-    conn = _db()
+def _active_mint_rows(
+    waterline_ts: int, conn: sqlite3.Connection | None = None
+) -> List[Tuple]:
+    """Read active Solana-to-Nexus debit intents from one optional DB snapshot."""
+    owns_connection = conn is None
+    conn = conn or _db()
     try:
-        rows = conn.execute(
+        return conn.execute(
             """
-            SELECT sig, timestamp, memo, amount_usdc_units, status, txid, reference
+            SELECT sig, timestamp, memo, amount_usdc_units, amount_usdd_units, status, txid, reference
             FROM unprocessed_sigs
             WHERE timestamp >= ? AND status IN (?, ?, ?)
             ORDER BY timestamp ASC
@@ -280,11 +285,39 @@ def _active_mint_expectations(waterline_ts: int) -> Tuple[List[Dict], List[str]]
             ),
         ).fetchall()
     finally:
+        if owns_connection:
+            conn.close()
+
+
+def _mint_reconciliation_snapshot(waterline_ts: int) -> Tuple[List[Tuple], List[Tuple]]:
+    """Capture completed mints and active debit intents from one SQLite snapshot.
+
+    A confirmation worker moves a row between these tables. Mixing pre- and post-move
+    reads would leave its remote debit unmatched and manufacture a false surplus.
+    """
+    conn = _db()
+    try:
+        conn.execute("BEGIN")
+        completed_rows = _completed_mint_rows(waterline_ts, conn)
+        active_rows = _active_mint_rows(waterline_ts, conn)
+        conn.rollback()
+        return completed_rows, active_rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
+
+
+def _active_mint_expectations(
+    waterline_ts: int, active_rows: List[Tuple] | None = None
+) -> Tuple[List[Dict], List[str]]:
+    """Return exact queued debit intents so in-flight work is not called a duplicate."""
+    rows = active_rows if active_rows is not None else _active_mint_rows(waterline_ts)
 
     expectations: List[Dict] = []
     incomplete: List[str] = []
-    for sig, _ts, memo, solana_units, status, txid, reference in rows:
+    for sig, _ts, memo, solana_units, nexus_units, status, txid, reference in rows:
         destination = _extract_nexus_address_from_memo(memo)
         if not destination:
             incomplete.append(f"active mint {sig} has missing or malformed Nexus destination memo")
@@ -293,12 +326,12 @@ def _active_mint_expectations(waterline_ts: int) -> Tuple[List[Dict], List[str]]
             incomplete.append(f"active mint {sig} has no durable Nexus reference")
             continue
         try:
-            exact_solana_units = _exact_db_integer(
-                solana_units, f"active mint {sig} Solana units"
+            _exact_db_integer(solana_units, f"active mint {sig} Solana units")
+            output_units = _exact_db_integer(
+                nexus_units, f"active mint {sig} Nexus output units"
             )
-            output_units = nexus_client.get_nexus_send_amount_units(exact_solana_units)
         except ValueError:
-            incomplete.append(f"active mint {sig} has invalid Solana base-unit evidence")
+            incomplete.append(f"active mint {sig} has invalid exact base-unit evidence")
             continue
         if output_units <= 0:
             incomplete.append(f"active mint {sig} has invalid Nexus output units")
@@ -315,7 +348,9 @@ def _active_mint_expectations(waterline_ts: int) -> Tuple[List[Dict], List[str]]
 
 
 def _reconcile_remote_mint_history(
-    accounts: List[str], waterline_ts: int
+    accounts: List[str], waterline_ts: int,
+    completed_rows: List[Tuple] | None = None,
+    active_rows: List[Tuple] | None = None,
 ) -> Tuple[Dict[str, int], List[str]]:
     """Compare local completed/active intents with authoritative Nexus token history."""
     lookup = nexus_client.find_nexus_mint_debits_since(accounts, waterline_ts)
@@ -337,8 +372,8 @@ def _reconcile_remote_mint_history(
     consumed: set[tuple[str, int]] = set()
     verified_mint_sources: set[str] = set()
     incomplete: List[str] = []
-    completed_rows = _completed_mint_rows(waterline_ts)
-    for row in completed_rows:
+    completed = completed_rows if completed_rows is not None else _completed_mint_rows(waterline_ts)
+    for row in completed:
         sig, _ts, _solana_units, txid, nexus_units, _status, reference, destination, _memo = row
         _valid_destination, error = _validate_mint_row(row)
         if error:
@@ -360,7 +395,7 @@ def _reconcile_remote_mint_history(
         consumed.add((exact[0].remote_txid, exact[0].contract_id))
         verified_mint_sources.add(exact[0].from_address)
 
-    active, active_errors = _active_mint_expectations(waterline_ts)
+    active, active_errors = _active_mint_expectations(waterline_ts, active_rows)
     incomplete.extend(active_errors)
     for intent in active:
         exact = [
@@ -406,16 +441,17 @@ def run_balance_reconciliation(
     unhealthy result as an operational safety event, separately from a confirmed surplus.
     """
     waterline = int(waterline_ts or 0)
-    accounts, incomplete = _distinct_mint_recipient_accounts(waterline)
+    completed_rows, active_rows = _mint_reconciliation_snapshot(waterline)
+    accounts, incomplete = _distinct_mint_recipient_accounts(waterline, completed_rows)
     discrepancy_units: Dict[str, int] = {}
     discrepancies: List[Dict] = []
     account_errors: List[Dict] = []
     checked = 0
 
-    if accounts:
+    if accounts or active_rows:
         try:
             remote_surplus, remote_incomplete = _reconcile_remote_mint_history(
-                accounts, waterline
+                accounts, waterline, completed_rows, active_rows
             )
             incomplete.extend(remote_incomplete)
             for account, units in remote_surplus.items():

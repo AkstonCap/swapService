@@ -108,6 +108,7 @@ def init_db():
             memo TEXT,
             from_address TEXT,
             amount_usdc_units INTEGER,
+            amount_usdd_units INTEGER,
             status TEXT,
             txid TEXT
         )
@@ -376,14 +377,16 @@ def init_db():
     if "hold_reason" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN hold_reason TEXT")
 
-    # unprocessed_sigs.reference records the Nexus debit reference BEFORE the debit is
-    # attempted, so a crash or an unparsed CLI response can be resolved against the
-    # chain instead of being guessed at (which previously double-minted, or minted
-    # AND refunded).
+    # A debit intent fixes both the exact Nexus output and its unique reference before
+    # the debit is attempted. The output cannot be recomputed later under changed fee
+    # configuration: that would turn an active first-time recipient into a false
+    # remote surplus during reconciliation.
     cursor.execute("PRAGMA table_info(unprocessed_sigs)")
     _usig_cols = {row[1] for row in cursor.fetchall()}
     if "reference" not in _usig_cols:
         cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN reference INTEGER")
+    if "amount_usdd_units" not in _usig_cols:
+        cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN amount_usdd_units INTEGER")
 
     # Completed Solana->Nexus mints must retain all evidence required for later
     # reconciliation.  The queue row is deliberately removed after confirmation, so
@@ -1060,6 +1063,42 @@ def set_unprocessed_sig_reference(sig: str, reference: int) -> None:
         conn.close()
 
 
+def set_unprocessed_sig_debit_intent(sig: str, reference: int, amount_usdd_units: int) -> None:
+    """Atomically persist an intent and make it recoverable before a debit.
+
+    The same transaction moves the deposit out of ``ready for processing``.  A crash
+    after this commit must enter chain-evidence resolution rather than permit a fresh
+    processing pass to allocate another reference or submit a second Nexus debit.
+    """
+    if isinstance(reference, bool) or not isinstance(reference, int):
+        raise ValueError("Nexus debit reference must be an integer")
+    if (isinstance(amount_usdd_units, bool) or not isinstance(amount_usdd_units, int)
+            or amount_usdd_units <= 0):
+        raise ValueError("Nexus debit amount must be positive integer base units")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            """UPDATE unprocessed_sigs
+           SET reference = ?, amount_usdd_units = ?,
+               status = CASE WHEN status = 'ready for processing'
+                             THEN 'debit in flight' ELSE status END
+           WHERE sig = ?
+             AND status IN ('ready for processing', 'debit in flight',
+                            'debited, awaiting confirmation')
+             AND (reference IS NULL OR reference = ?)
+             AND (amount_usdd_units IS NULL OR amount_usdd_units = ?)""",
+            (reference, amount_usdd_units, sig, reference, amount_usdd_units),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError(
+                f"queued deposit {sig} is missing or already has a different Nexus debit intent"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_unprocessed_sig_reference(sig: str) -> int | None:
     """Return the exact persisted debit reference for one queued deposit."""
     conn = sqlite3.connect(DB_PATH)
@@ -1071,6 +1110,22 @@ def get_unprocessed_sig_reference(sig: str) -> int | None:
             return None
         if isinstance(row[0], bool) or not isinstance(row[0], int):
             raise ValueError(f"queued deposit {sig} has a non-integer Nexus reference")
+        return row[0]
+    finally:
+        conn.close()
+
+
+def get_unprocessed_sig_nexus_amount(sig: str) -> int | None:
+    """Return the exact output persisted before a Nexus debit was attempted."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT amount_usdd_units FROM unprocessed_sigs WHERE sig = ?", (sig,)
+        ).fetchone()
+        if not row or row[0] is None:
+            return None
+        if isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] <= 0:
+            raise ValueError(f"queued deposit {sig} has invalid Nexus debit amount")
         return row[0]
     finally:
         conn.close()

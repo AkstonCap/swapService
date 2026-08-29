@@ -638,9 +638,8 @@ def process_unprocessed_solana_deposits(limit: int = 1000, timeout: float = 8.0)
             # answer is unreadable, the reference is on disk and the outcome can be
             # resolved against the chain (resolve_unverified_debits) instead of guessed.
             # Guessing is what previously produced a double mint, or a mint AND a refund.
-            state_db.set_unprocessed_sig_reference(sig, reference)
+            state_db.set_unprocessed_sig_debit_intent(sig, reference, net_amount)
             state_db.record_attempt(state_db.debit_attempt_key(sig))
-            state_db.update_unprocessed_sig_status(sig, "debit in flight")
 
             try:
                 result = nexus_client.debit_nexus_token_with_txid(nexus_address, net_amount, reference)

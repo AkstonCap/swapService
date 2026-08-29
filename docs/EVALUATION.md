@@ -222,9 +222,15 @@ A green result was not evidence of balance correctness.
   likewise retain `processed_txids.amount_usdd_units`.
 - Confirmation persists the original memo, destination, integer Solana input and integer
   Nexus output before deleting `unprocessed_sigs`.
-- Reconciliation uses only those immutable rows and the production
-  `get_nexus_send_amount_units()` function. It never joins a completed row back to the
-  transient queue and never converts a token float with `int()`.
+- Reconciliation uses only immutable completed/active evidence and exact integer base units.
+  It never joins a completed row back to the transient queue, converts a token float with
+  `int()`, or recomputes a historical issued output under mutable current fee settings.
+- Active debit intents retain the exact Nexus output atomically with their unique reference
+  before the CLI invocation. Reconciliation reads completed and active debit evidence in one
+  SQLite snapshot, then consumes an exact active remote debit for a first-time recipient using
+  that immutable amount. A concurrent confirmation transition or later fee configuration change
+  therefore cannot report the in-flight mint as an unrecorded remote surplus. Legacy active rows
+  without this evidence remain explicitly incomplete and hold exposure.
 - Results include `healthy`, explicit incomplete reasons and account errors. Zero checked
   recipients, missing/malformed evidence, legacy REAL-only relevant history and per-account
   calculation failures are unhealthy. The service emits a distinct critical alert for that
@@ -262,7 +268,12 @@ A green result was not evidence of balance correctness.
 
 - ✅ Every reconciliation error/unhealthy result latches a fail-closed exposure pause until a
   later explicitly healthy run; existing refunds and quarantines remain processable in paused mode.
-- Add the exact completed-recipient plus valid active first-time-recipient regression.
+- ✅ Completed historical mints remain exact-match reconcilable after a fee-policy change, and
+  active first-time recipients are scanned even before any completed recipient anchors the
+  token-supply source. The active-mint regressions also prove an active remote debit is held
+  (not treated as a green result) without a false surplus when a later fee configuration differs
+  or the confirmation worker transitions the row between its active and completed tables after
+  reconciliation captures its SQLite snapshot.
 - Prove the one-page boundary, short-page and ordering semantics on the target node; retain
   fail-closed behavior whenever the boundary cannot be proven.
 - Execute the final reconciliation fixture matrix and authoritative transaction-history read-back
@@ -450,10 +461,12 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
-`healthy=False`; both consumers refuse green unless `healthy is True`; and every unhealthy or
-exceptional reconciliation result pauses new Solana↔Nexus exposure while already-owed refunds and
-quarantines continue in paused mode. **Batch remains partial:** the exact valid first-time-recipient
-regression is missing, and target single-page boundary/order semantics are unproven.
+`healthy=False`; historical completed mints retain their issued integer output across fee changes;
+active first-time recipients are scanned and keep the result unhealthy without a false surplus across
+a later fee-configuration change or a concurrent completion transition; both consumers refuse green
+unless `healthy is True`; and every unhealthy or exceptional reconciliation result pauses new
+Solana↔Nexus exposure while already-owed refunds and quarantines continue in paused mode. **Batch
+remains partial:** target single-page boundary/order semantics are unproven.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
@@ -524,12 +537,12 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 62 passed plus 4 subtests on the latest local verification |
+| `python -m pytest -q tests/test_critical_safety.py` | 67 passed plus 4 subtests passed on the latest local verification |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 69 passed, 4 subtests passed on the latest local verification |
+| Full `python -m pytest -q` | 74 passed, 4 subtests passed on the latest local verification |
 | CI workflow | Latest runtime evidence passed on code head `3533023` — [run 33267576670](https://github.com/distordialabs-brutus/swapService/actions/runs/33267576670); the earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |

@@ -531,10 +531,13 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has non-integer Solana units")
             continue
 
-        # Archive the full immutable mint evidence before deleting the queue row;
-        # balance reconciliation must never depend on an unprocessed row surviving
-        # this transition.
-        nexus_out_base = get_nexus_send_amount_units(int(amount_usdc_units or 0))
+        # Archive the immutable output fixed before the debit. Recomputing fees here
+        # after an operator configuration change would make the local record disagree
+        # with the already-submitted Nexus debit.
+        nexus_out_base = state_db.get_unprocessed_sig_nexus_amount(sig)
+        if nexus_out_base is None:
+            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has no persisted Nexus output")
+            continue
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
         nexus_destination = None
         prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
