@@ -55,7 +55,7 @@ been run.
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
 | Durable completed-state data supports reconciliation | **PARTIAL** — local and remote evidence fail closed, but unhealthy results do not pause exposure and target-node boundary semantics remain unproven |
 | One composable automated test command | **PASS** — 62 tests plus 4 subtests on `5d92ec0` |
-| CI enforces tests and static checks | **ENFORCED; pending for current head** — prior run `33254976148` passed on `5e7d3b8` |
+| CI enforces tests and static checks | **ENFORCED and green** — run [`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) passed on the current documentation head `de4ae8c` (with reconciliation implementation `5d92ec0` as its parent) |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -286,10 +286,10 @@ consistency, byte-compilation, local Markdown-link verification, the complete py
 and whitespace checking. The checked-in link verifier also caught and corrected the stale
 Copilot-instructions security-document path.
 
-The exact evaluated committed head passed GitHub Actions run
-[`33254976148`](https://github.com/distordialabs-brutus/swapService/actions/runs/33254976148).
-Every later production candidate still needs its own green run plus the separate live-chain
-matrix in E-006.
+The reconciliation implementation and its current documentation head passed GitHub Actions run
+[`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981).
+Every later production candidate still needs its own green run plus the separate live-chain matrix
+in E-006.
 
 ### E-006 — No live-chain acceptance matrix
 
@@ -424,7 +424,7 @@ filter can authorize a checkpoint. This is containment, not permission to deploy
 4. Implement exact integer fees, thresholds, outputs and public terms for 6/6, 8/6, 6/8,
    9/6 and 0/0 decimal configurations.
 
-**Exit met:** the current committed-head local suite and GitHub Actions run `33254976148` are green.
+**Exit met:** the current committed-head local suite and GitHub Actions run `33258188981` are green.
 The mixed-decimal contract still requires target-chain evidence in Batch 4.
 
 ### Batch 2 — Durable completed-state model and fail-closed reconciliation **PARTIAL**
@@ -521,7 +521,7 @@ and a rejected production startup should return a non-zero process status to its
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
 | Full `python -m pytest -q` | 62 passed, 4 subtests passed in 10.18s on `5d92ec0` |
-| CI workflow | Pending for `5d92ec0`; prior run `33254976148` passed on `5e7d3b8` |
+| CI workflow | Passed on current documentation head `de4ae8c` — [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981); reconciliation implementation is parent `5d92ec0` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
