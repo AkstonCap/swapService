@@ -33,6 +33,13 @@ def _is_completed_mint_status(status: object) -> bool:
     return isinstance(status, str) and status.lower().startswith(ELIGIBLE_SIG_STATUS_PREFIX)
 
 
+def _exact_db_integer(value: object, description: str) -> int:
+    """Accept only SQLite INTEGER evidence; never truncate REAL/TEXT values."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{description} is not stored as an exact integer")
+    return value
+
+
 def _completed_mint_rows(waterline_ts: int) -> List[Tuple]:
     """Return durable completed-mint evidence in integer base units only."""
     conn = _db()
@@ -53,20 +60,22 @@ def _completed_mint_rows(waterline_ts: int) -> List[Tuple]:
 
 def _validate_mint_row(row: Tuple) -> Tuple[str | None, str | None]:
     """Return (destination, error).  No REAL values are accepted as evidence."""
-    sig, _ts, solana_units, txid, nexus_units, _status, _reference, destination, memo = row
+    sig, _ts, solana_units, txid, nexus_units, _status, reference, destination, memo = row
     if not sig:
         return None, "completed mint has no Solana signature"
     if not txid:
         return None, f"completed mint {sig} has no Nexus txid"
+    if reference is None or not str(reference).strip():
+        return None, f"completed mint {sig} has no durable Nexus reference"
     if not destination:
         return None, f"completed mint {sig} has no durable Nexus destination"
     memo_destination = _extract_nexus_address_from_memo(memo)
     if memo_destination != destination:
         return None, f"completed mint {sig} has missing or mismatched durable memo"
     try:
-        solana_units = int(solana_units)
-        nexus_units = int(nexus_units)
-    except (TypeError, ValueError):
+        solana_units = _exact_db_integer(solana_units, f"completed mint {sig} Solana units")
+        nexus_units = _exact_db_integer(nexus_units, f"completed mint {sig} Nexus units")
+    except ValueError:
         return None, f"completed mint {sig} has non-integer base-unit evidence"
     if solana_units < 0 or nexus_units < 0:
         return None, f"completed mint {sig} has negative base-unit evidence"
@@ -120,8 +129,10 @@ def _fetch_processed_txids_for_account(
         if not relevant:
             continue
         try:
-            amount = int(amount_units)
-        except (TypeError, ValueError):
+            amount = _exact_db_integer(
+                amount_units, f"processed Nexus credit {txid} amount"
+            )
+        except ValueError:
             raise ValueError(f"processed Nexus credit {txid} lacks exact base-unit amount")
         if amount < 0:
             raise ValueError(f"processed Nexus credit {txid} has negative base-unit amount")
@@ -250,6 +261,139 @@ def _distinct_mint_recipient_accounts(waterline_ts: int) -> Tuple[List[str], Lis
     return sorted(accounts), incomplete
 
 
+def _active_mint_expectations(waterline_ts: int) -> Tuple[List[Dict], List[str]]:
+    """Return exact queued debit intents so in-flight work is not called a duplicate."""
+    conn = _db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT sig, timestamp, memo, amount_usdc_units, status, txid, reference
+            FROM unprocessed_sigs
+            WHERE timestamp >= ? AND status IN (?, ?, ?)
+            ORDER BY timestamp ASC
+            """,
+            (
+                int(waterline_ts),
+                "debit in flight",
+                "debit unverified",
+                "debited, awaiting confirmation",
+            ),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    expectations: List[Dict] = []
+    incomplete: List[str] = []
+    for sig, _ts, memo, solana_units, status, txid, reference in rows:
+        destination = _extract_nexus_address_from_memo(memo)
+        if not destination:
+            incomplete.append(f"active mint {sig} has missing or malformed Nexus destination memo")
+            continue
+        if reference is None or not str(reference).strip():
+            incomplete.append(f"active mint {sig} has no durable Nexus reference")
+            continue
+        try:
+            exact_solana_units = _exact_db_integer(
+                solana_units, f"active mint {sig} Solana units"
+            )
+            output_units = nexus_client.get_nexus_send_amount_units(exact_solana_units)
+        except ValueError:
+            incomplete.append(f"active mint {sig} has invalid Solana base-unit evidence")
+            continue
+        if output_units <= 0:
+            incomplete.append(f"active mint {sig} has invalid Nexus output units")
+            continue
+        expectations.append({
+            "sig": str(sig),
+            "status": str(status),
+            "txid": str(txid) if txid else None,
+            "reference": str(reference).strip(),
+            "destination": destination,
+            "amount_usdd_units": output_units,
+        })
+    return expectations, incomplete
+
+
+def _reconcile_remote_mint_history(
+    accounts: List[str], waterline_ts: int
+) -> Tuple[Dict[str, int], List[str]]:
+    """Compare local completed/active intents with authoritative Nexus token history."""
+    lookup = nexus_client.find_nexus_mint_debits_since(accounts, waterline_ts)
+    if not lookup.complete:
+        return {}, [
+            "remote Nexus mint history incomplete: " + (lookup.reason or "unknown")
+        ]
+    if not isinstance(lookup.values, dict):
+        return {}, ["remote Nexus mint history returned invalid evidence"]
+
+    remote: List[nexus_client.NexusMintDebitEvidence] = []
+    for candidates in lookup.values.values():
+        if not isinstance(candidates, list) or not all(
+            isinstance(item, nexus_client.NexusMintDebitEvidence) for item in candidates
+        ):
+            return {}, ["remote Nexus mint history returned invalid evidence"]
+        remote.extend(candidates)
+
+    consumed: set[tuple[str, int]] = set()
+    verified_mint_sources: set[str] = set()
+    incomplete: List[str] = []
+    completed_rows = _completed_mint_rows(waterline_ts)
+    for row in completed_rows:
+        sig, _ts, _solana_units, txid, nexus_units, _status, reference, destination, _memo = row
+        _valid_destination, error = _validate_mint_row(row)
+        if error:
+            continue  # already reported by _distinct_mint_recipient_accounts
+        candidates = lookup.values.get(str(txid), [])
+        exact = [
+            evidence for evidence in candidates
+            if (evidence.remote_txid, evidence.contract_id) not in consumed
+            and evidence.to_address == str(destination)
+            and evidence.amount_usdd_units == int(nexus_units)
+            and evidence.reference == str(reference).strip()
+            and evidence.confirmations >= 10
+        ]
+        if len(exact) != 1:
+            incomplete.append(
+                f"completed mint {sig} has no unique exact confirmed Nexus txid/reference/amount match"
+            )
+            continue
+        consumed.add((exact[0].remote_txid, exact[0].contract_id))
+        verified_mint_sources.add(exact[0].from_address)
+
+    active, active_errors = _active_mint_expectations(waterline_ts)
+    incomplete.extend(active_errors)
+    for intent in active:
+        exact = [
+            evidence for evidence in remote
+            if (evidence.remote_txid, evidence.contract_id) not in consumed
+            and evidence.from_address in verified_mint_sources
+            and evidence.to_address == intent["destination"]
+            and evidence.amount_usdd_units == intent["amount_usdd_units"]
+            and evidence.reference == intent["reference"]
+            and (intent["txid"] is None or evidence.remote_txid == intent["txid"])
+        ]
+        if exact:
+            consumed.add((exact[0].remote_txid, exact[0].contract_id))
+        incomplete.append(
+            f"active mint {intent['sig']} remains {intent['status']}; remote outcome is not terminal"
+        )
+
+    surplus_by_account: Dict[str, int] = {}
+    for evidence in remote:
+        identity = (evidence.remote_txid, evidence.contract_id)
+        if identity in consumed:
+            continue
+        # finance/transactions/token also contains account-to-account movements.
+        # Classify an unmatched DEBIT as a duplicate mint only when its source is the
+        # same token-supply register proven by an exact completed local mint.
+        if evidence.from_address not in verified_mint_sources:
+            continue
+        surplus_by_account[evidence.to_address] = (
+            surplus_by_account.get(evidence.to_address, 0) + evidence.amount_usdd_units
+        )
+    return surplus_by_account, incomplete
+
+
 def run_balance_reconciliation(
     dry_run: bool = True,
     waterline_ts: int | None = None,
@@ -263,10 +407,21 @@ def run_balance_reconciliation(
     """
     waterline = int(waterline_ts or 0)
     accounts, incomplete = _distinct_mint_recipient_accounts(waterline)
+    discrepancy_units: Dict[str, int] = {}
     discrepancies: List[Dict] = []
     account_errors: List[Dict] = []
-    total_surplus = 0
     checked = 0
+
+    if accounts:
+        try:
+            remote_surplus, remote_incomplete = _reconcile_remote_mint_history(
+                accounts, waterline
+            )
+            incomplete.extend(remote_incomplete)
+            for account, units in remote_surplus.items():
+                discrepancy_units[account] = discrepancy_units.get(account, 0) + int(units)
+        except Exception as exc:
+            incomplete.append(f"remote Nexus mint history reconciliation failed: {exc}")
 
     for account in accounts:
         try:
@@ -276,10 +431,15 @@ def run_balance_reconciliation(
             checked += 1
             delta = int(result["trade_delta_nexus_units"])
             if delta > 0:
-                discrepancies.append({"account": account, "surplus_nexus_units": delta})
-                total_surplus += delta
+                discrepancy_units[account] = discrepancy_units.get(account, 0) + delta
         except Exception as exc:
             account_errors.append({"account": account, "error": str(exc)})
+
+    for account in sorted(discrepancy_units):
+        units = int(discrepancy_units[account])
+        if units > 0:
+            discrepancies.append({"account": account, "surplus_nexus_units": units})
+    total_surplus = sum(item["surplus_nexus_units"] for item in discrepancies)
 
     if checked == 0:
         incomplete.append("no completed mint recipients were checked")

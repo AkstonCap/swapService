@@ -573,6 +573,55 @@ class CriticalSafetyTests(unittest.TestCase):
 
         propose_waterline.assert_not_called()
 
+    def test_confirmed_mint_archives_its_own_persisted_reference(self):
+        """A concurrent later debit must not replace this mint's on-chain identity."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client,
+                "get_transactions_confirmations",
+                return_value=nexus_client.BatchLookup({"mint-tx": 10}, True),
+            ):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "mint-sig", 100, "nexus:recipient", "sender", 2_000_000,
+                    "debited, awaiting confirmation", "mint-tx",
+                )
+                state_db.set_unprocessed_sig_reference("mint-sig", 77)
+                # Simulate another worker advancing the global counter/reference history.
+                state_db.mark_processed_sig(
+                    "later-mint", 101, 2_000_000, "later-tx", 0.0,
+                    "debit_confirmed", 99,
+                    amount_usdd_units=nexus_client.get_nexus_send_amount_units(2_000_000),
+                    nexus_destination="other",
+                    memo="nexus:other",
+                )
+
+                self.assertEqual(nexus_client.check_unconfirmed_debits(10, 8), 1)
+                conn = sqlite3.connect(db_path)
+                try:
+                    archived_reference = conn.execute(
+                        "SELECT reference FROM processed_sigs WHERE sig = 'mint-sig'"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+
+        self.assertEqual(archived_reference, 77)
+
+    def test_persisted_mint_reference_cannot_be_silently_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "mint-sig", 100, "nexus:recipient", "sender", 2_000_000,
+                    "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_reference("mint-sig", 77)
+                with self.assertRaisesRegex(ValueError, "different Nexus reference"):
+                    state_db.set_unprocessed_sig_reference("mint-sig", 78)
+                self.assertEqual(state_db.get_unprocessed_sig_reference("mint-sig"), 77)
+
     def test_reconciliation_uses_durable_completed_mint_evidence_after_queue_removal(self):
         """A completed mint remains checkable after its transient queue row is gone."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -589,8 +638,17 @@ class CriticalSafetyTests(unittest.TestCase):
                     memo="nexus:recipient",
                 )
                 self.assertFalse(state_db.is_unprocessed_sig("mint-sig"))
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="mint-tx", timestamp=100, confirmations=10,
+                    from_address="TOKEN", to_address="recipient", amount_usdd_units=nexus_units,
+                    reference="77", contract_id=0,
+                )
 
-                healthy = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [remote]}, True),
+                ):
+                    healthy = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
                 self.assertTrue(healthy["healthy"])
                 self.assertEqual(healthy["checked_addresses"], 1)
                 self.assertEqual(healthy["total_surplus_nexus_units"], 0)
@@ -601,12 +659,224 @@ class CriticalSafetyTests(unittest.TestCase):
                     "duplicate-mint", 101, 0.0, "TREASURY", "recipient", "", "",
                     "processed", amount_usdd_units=nexus_units,
                 )
-                duplicate = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [remote]}, True),
+                ):
+                    duplicate = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
                 self.assertFalse(duplicate["healthy"])
                 self.assertEqual(duplicate["total_surplus_nexus_units"], nexus_units)
                 self.assertEqual(duplicate["discrepancies"], [{
                     "account": "recipient", "surplus_nexus_units": nexus_units,
                 }])
+
+    def test_reconciliation_detects_unrecorded_duplicate_in_remote_nexus_history(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                solana_units = 2_000_000
+                nexus_units = nexus_client.get_nexus_send_amount_units(solana_units)
+                state_db.mark_processed_sig(
+                    "mint-sig", 100, solana_units, "mint-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=nexus_units,
+                    nexus_destination="recipient", memo="nexus:recipient",
+                )
+                remote = [
+                    nexus_client.NexusMintDebitEvidence(
+                        remote_txid=txid, timestamp=timestamp, confirmations=10,
+                        from_address="TOKEN", to_address="recipient",
+                        amount_usdd_units=nexus_units,
+                        reference="77", contract_id=0,
+                    )
+                    for txid, timestamp in (("mint-tx", 100),)
+                ]
+                remote.append(nexus_client.NexusMintDebitEvidence(
+                    remote_txid="duplicate-tx", timestamp=101, confirmations=10,
+                    from_address="TOKEN", to_address="attacker",
+                    amount_usdd_units=nexus_units, reference="88", contract_id=0,
+                ))
+                # Token history also carries account-to-account movements. A treasury
+                # transfer to the same recipient is not a second token-supply mint.
+                remote.append(nexus_client.NexusMintDebitEvidence(
+                    remote_txid="account-transfer", timestamp=102, confirmations=10,
+                    from_address="TREASURY", to_address="recipient",
+                    amount_usdd_units=123_000, reference="900", contract_id=0,
+                ))
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({
+                        evidence.remote_txid: [evidence] for evidence in remote
+                    }, True),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertEqual(result["total_surplus_nexus_units"], nexus_units)
+        self.assertEqual(result["discrepancies"], [{
+            "account": "attacker", "surplus_nexus_units": nexus_units,
+        }])
+
+    def test_incomplete_remote_nexus_history_cannot_reconcile_green(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                nexus_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                state_db.mark_processed_sig(
+                    "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=nexus_units,
+                    nexus_destination="recipient", memo="nexus:recipient",
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({}, False, "pagination_truncated"),
+                    create=True,
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertTrue(any("pagination_truncated" in reason
+                            for reason in result["incomplete_reasons"]))
+
+    def test_active_mint_with_malformed_destination_cannot_be_skipped_green(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                nexus_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                state_db.mark_processed_sig(
+                    "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=nexus_units,
+                    nexus_destination="recipient", memo="nexus:recipient",
+                )
+                state_db.add_unprocessed_sig(
+                    "active-sig", 101, "malformed", "sender", 2_000_000,
+                    "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_reference("active-sig", 88)
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="mint-tx", timestamp=100, confirmations=10,
+                    from_address="TOKEN", to_address="recipient",
+                    amount_usdd_units=nexus_units, reference="77", contract_id=0,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [remote]}, True),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertTrue(any("active mint active-sig" in reason
+                            for reason in result["incomplete_reasons"]))
+
+    def test_one_remote_mint_cannot_satisfy_two_completed_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                nexus_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                for sig in ("mint-a", "mint-b"):
+                    state_db.mark_processed_sig(
+                        sig, 100, 2_000_000, "shared-tx", 0.0,
+                        "debit_confirmed", 77, amount_usdd_units=nexus_units,
+                        nexus_destination="recipient", memo="nexus:recipient",
+                    )
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="shared-tx", timestamp=100, confirmations=10,
+                    from_address="TOKEN", to_address="recipient",
+                    amount_usdd_units=nexus_units, reference="77", contract_id=0,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"shared-tx": [remote]}, True),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertTrue(any("no unique exact" in reason
+                            for reason in result["incomplete_reasons"]))
+
+    @patch.object(nexus_client, "_run")
+    def test_remote_nexus_mint_history_preserves_exact_contract_evidence(self, run):
+        run.return_value = (0, json.dumps([{
+            "txid": "mint-tx",
+            "timestamp": 100,
+            "confirmations": 12,
+            "contracts": [{
+                "id": 3,
+                "OP": "DEBIT",
+                "from": "TOKEN",
+                "to": "recipient",
+                "amount": "1.898",
+                "reference": 77,
+            }],
+        }]), "")
+
+        lookup = nexus_client.find_nexus_mint_debits_since({"recipient"}, 0)
+
+        self.assertTrue(lookup.complete)
+        self.assertEqual(lookup.values, {"mint-tx": [
+            nexus_client.NexusMintDebitEvidence(
+                remote_txid="mint-tx", timestamp=100, confirmations=12,
+                from_address="TOKEN", to_address="recipient",
+                amount_usdd_units=1_898_000,
+                reference="77", contract_id=3,
+            )
+        ]})
+        command = run.call_args.args[0]
+        self.assertIn("contracts.reference", command[1])
+        self.assertIn("contracts.amount", command[1])
+        self.assertFalse(any(str(argument).startswith("where=") for argument in command))
+
+    @patch.object(nexus_client, "_run")
+    def test_conflicting_remote_contract_identity_is_incomplete(self, run):
+        transactions = []
+        for destination in ("recipient", "attacker"):
+            transactions.append({
+                "txid": "same-tx",
+                "timestamp": 100,
+                "confirmations": 10,
+                "contracts": [{
+                    "id": 0, "OP": "DEBIT", "from": "TOKEN",
+                    "to": destination, "amount": "1.0", "reference": 77,
+                }],
+            })
+        run.return_value = (0, json.dumps(transactions), "")
+
+        lookup = nexus_client.find_nexus_mint_debits_since({"recipient"}, 0)
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "conflicting_contract_identity")
+
+    @patch.object(nexus_client, "_run")
+    def test_missing_remote_contract_id_is_incomplete(self, run):
+        run.return_value = (0, json.dumps([{
+            "txid": "mint-tx", "timestamp": 100, "confirmations": 10,
+            "contracts": [{
+                "OP": "DEBIT", "from": "TOKEN", "to": "recipient",
+                "amount": "1.0", "reference": 77,
+            }],
+        }]), "")
+
+        lookup = nexus_client.find_nexus_mint_debits_since({"recipient"}, 0)
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "invalid_contract_id")
+
+    @patch.object(nexus_client, "_run")
+    def test_truncated_remote_mint_history_is_explicitly_incomplete(self, run):
+        run.return_value = (0, json.dumps([{
+            "txid": f"tx-{index}",
+            "timestamp": 1_000 - index,
+            "confirmations": 10,
+            "contracts": [],
+        } for index in range(100)]), "")
+
+        lookup = nexus_client.find_nexus_mint_debits_since({"recipient"}, 0)
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "pagination_snapshot_unavailable")
 
     def test_reconciliation_fails_closed_when_completed_mint_lacks_durable_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -622,6 +892,31 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertFalse(result["healthy"])
         self.assertEqual(result["checked_addresses"], 0)
         self.assertTrue(any("durable Nexus destination" in reason
+                            for reason in result["incomplete_reasons"]))
+
+    def test_reconciliation_rejects_fractional_sqlite_base_unit_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.mark_processed_sig(
+                    "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=1_898_000,
+                    nexus_destination="recipient", memo="nexus:recipient",
+                )
+                conn = sqlite3.connect(db_path)
+                try:
+                    conn.execute(
+                        "UPDATE processed_sigs SET amount_usdd_units = ? WHERE sig = ?",
+                        (1_898_000.5, "mint-sig"),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertTrue(any("non-integer base-unit evidence" in reason
                             for reason in result["incomplete_reasons"]))
 
     @patch.object(main.alerts, "critical")

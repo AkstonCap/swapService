@@ -1039,13 +1039,41 @@ def update_unprocessed_sig_txid(sig: str, txid: str | None):
     conn.commit()
     conn.close()
 
-def set_unprocessed_sig_reference(sig: str, reference: int | None):
-    """Persist the Nexus debit reference for a deposit (written BEFORE the debit)."""
+def set_unprocessed_sig_reference(sig: str, reference: int) -> None:
+    """Persist one immutable Nexus debit reference before any remote action."""
+    if isinstance(reference, bool) or not isinstance(reference, int):
+        raise ValueError("Nexus debit reference must be an integer")
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE unprocessed_sigs SET reference = ? WHERE sig = ?", (reference, sig))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.execute(
+            """UPDATE unprocessed_sigs SET reference = ?
+               WHERE sig = ? AND (reference IS NULL OR reference = ?)""",
+            (reference, sig, reference),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError(
+                f"queued deposit {sig} is missing or already has a different Nexus reference"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unprocessed_sig_reference(sig: str) -> int | None:
+    """Return the exact persisted debit reference for one queued deposit."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT reference FROM unprocessed_sigs WHERE sig = ?", (sig,)
+        ).fetchone()
+        if not row or row[0] is None:
+            return None
+        if isinstance(row[0], bool) or not isinstance(row[0], int):
+            raise ValueError(f"queued deposit {sig} has a non-integer Nexus reference")
+        return row[0]
+    finally:
+        conn.close()
 
 
 def get_sigs_pending_debit_verification(statuses: tuple, limit: int = 500) -> List[Tuple]:

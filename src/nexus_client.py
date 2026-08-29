@@ -274,6 +274,20 @@ class TransferDebitEvidence:
     amount_usdd_units: int
 
 
+@dataclass(frozen=True)
+class NexusMintDebitEvidence:
+    """Authoritative token-history evidence for one Nexus-side bridge mint contract."""
+
+    remote_txid: str
+    timestamp: int
+    confirmations: int
+    from_address: str
+    to_address: str
+    amount_usdd_units: int
+    reference: str
+    contract_id: int
+
+
 def _parse_exact_nexus_units(value: object) -> int | None:
     """Parse a chain amount only when it exactly fits the configured Nexus scale."""
     try:
@@ -506,9 +520,20 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             # Wait for more confirmations - do not timeout a partially confirmed transaction.
             continue
         
-        # Case 3: Transaction fully confirmed.  Archive the full immutable mint
-        # evidence before deleting the queue row; balance reconciliation must never
-        # depend on an unprocessed row surviving this transition.
+        # Case 3: Transaction is confirmed. Its persisted per-deposit reference is part
+        # of the immutable on-chain identity. Never substitute the latest global
+        # reference: another worker may have advanced it while this transaction waited.
+        reference = state_db.get_unprocessed_sig_reference(sig)
+        if reference is None:
+            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has no persisted reference")
+            continue
+        if isinstance(amount_usdc_units, bool) or not isinstance(amount_usdc_units, int):
+            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has non-integer Solana units")
+            continue
+
+        # Archive the full immutable mint evidence before deleting the queue row;
+        # balance reconciliation must never depend on an unprocessed row surviving
+        # this transition.
         nexus_out_base = get_nexus_send_amount_units(int(amount_usdc_units or 0))
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
         nexus_destination = None
@@ -535,9 +560,6 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
                 )
         except Exception as e:
             print(f"[FEE_TRACKING] Error recording fee for sig={sig}: {e}")
-        
-        # Get reference from latest if needed (or pass None since it's optional)
-        reference = state_db.get_latest_reference()
         
         state_db.mark_processed_sig(
             sig, timestamp, int(amount_usdc_units or 0), txid, amount_nexus_debited,
@@ -848,6 +870,124 @@ def find_asset_receival_account_by_txid_and_owner(
         )
     except Exception:
         return AssetLookup(None, False, "exception")
+
+
+def find_nexus_mint_debits_since(
+    recipients, since_timestamp: int, limit: int = 100
+) -> BatchLookup:
+    """Enumerate exact remote mint contracts for completed-mint reconciliation.
+
+    The token history is the remote source of truth. A result is complete only after the
+    ordered scan reaches the requested time boundary (or the endpoint returns a short
+    final page). Any malformed DEBIT, API error, unstable ordering, or exhausted page
+    budget remains explicitly incomplete and therefore cannot authorize a green result.
+    """
+    # The caller provides known recipients for interface clarity, but the scan must
+    # retain every DEBIT. Restricting by known recipients would hide an unauthorized
+    # token-supply emission to a new address and permit a false green result.
+    _ = recipients
+    page_size = max(1, int(limit))
+    boundary = max(0, int(since_timestamp or 0))
+    found: dict[str, list[NexusMintDebitEvidence]] = {}
+    seen_contracts: dict[tuple[str, int], NexusMintDebitEvidence] = {}
+    previous_timestamp: int | None = None
+
+    # The endpoint is live-offset paginated, not snapshot/cursor based. A head
+    # insertion between pages can shift an unseen transaction past the next offset.
+    # Read one page and fail closed if it does not establish the requested boundary.
+    for page in range(1):
+        cmd = [
+            config.NEXUS_CLI,
+            "finance/transactions/token/txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
+            f"name={config.NEXUS_TOKEN_NAME}",
+            "sort=timestamp",
+            "order=desc",
+            f"limit={page_size}",
+            f"offset={page * page_size}",
+        ]
+        try:
+            code, cli_out, err = _run(
+                cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
+            )
+        except Exception as exc:
+            print("Nexus: mint-history lookup exception:", redact(str(exc)))
+            return BatchLookup(found, False, "exception")
+        if code != 0:
+            print("Nexus: mint-history lookup error:", redact(err or cli_out))
+            return BatchLookup(found, False, "cli_error")
+
+        data = _parse_json_lenient(cli_out)
+        if isinstance(data, dict) and data.get("error"):
+            return BatchLookup(found, False, "api_error")
+        if data is None or not isinstance(data, list):
+            return BatchLookup(found, False, "invalid_response")
+
+        oldest_on_page: int | None = None
+        for tx in data:
+            if not isinstance(tx, dict) or not tx.get("txid"):
+                return BatchLookup(found, False, "invalid_transaction")
+            try:
+                timestamp = int(tx["timestamp"])
+                confirmations = int(tx["confirmations"])
+            except (KeyError, TypeError, ValueError):
+                return BatchLookup(found, False, "invalid_transaction_metadata")
+            if timestamp < 0 or confirmations < 0:
+                return BatchLookup(found, False, "invalid_transaction_metadata")
+            if previous_timestamp is not None and timestamp > previous_timestamp:
+                return BatchLookup(found, False, "unstable_history_order")
+            previous_timestamp = timestamp
+            oldest_on_page = timestamp if oldest_on_page is None else min(oldest_on_page, timestamp)
+            if timestamp < boundary:
+                continue
+
+            contracts = tx.get("contracts")
+            if not isinstance(contracts, list):
+                return BatchLookup(found, False, "invalid_contracts")
+            for contract in contracts:
+                if not isinstance(contract, dict):
+                    return BatchLookup(found, False, "invalid_contract")
+                if str(contract.get("OP") or "").upper() != "DEBIT":
+                    continue
+                source = contract.get("from")
+                destination = contract.get("to")
+                # A DEBIT without complete endpoints cannot be classified as a token
+                # mint versus an account transfer, so fail closed rather than skip it.
+                if (source is None or not str(source).strip() or
+                        destination is None or not str(destination).strip()):
+                    return BatchLookup(found, False, "invalid_debit_endpoints")
+                source = str(source).strip()
+                destination = str(destination).strip()
+                reference = contract.get("reference")
+                amount_units = _parse_exact_nexus_units(contract.get("amount"))
+                if reference is None or not str(reference).strip() or amount_units is None:
+                    return BatchLookup(found, False, "invalid_debit_evidence")
+                contract_id = contract.get("id")
+                if isinstance(contract_id, bool) or not isinstance(contract_id, int):
+                    return BatchLookup(found, False, "invalid_contract_id")
+                txid = str(tx["txid"])
+                identity = (txid, contract_id)
+                evidence = NexusMintDebitEvidence(
+                    remote_txid=txid,
+                    timestamp=timestamp,
+                    confirmations=confirmations,
+                    from_address=source,
+                    to_address=destination,
+                    amount_usdd_units=amount_units,
+                    reference=str(reference).strip(),
+                    contract_id=contract_id,
+                )
+                previous = seen_contracts.get(identity)
+                if previous is not None:
+                    if previous != evidence:
+                        return BatchLookup(found, False, "conflicting_contract_identity")
+                    continue
+                seen_contracts[identity] = evidence
+                found.setdefault(txid, []).append(evidence)
+
+        if len(data) < page_size or (oldest_on_page is not None and oldest_on_page < boundary):
+            return BatchLookup(found, True)
+
+    return BatchLookup(found, False, "pagination_snapshot_unavailable")
 
 
 def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> BatchLookup:
