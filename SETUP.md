@@ -179,6 +179,11 @@ Key required:
 Also required in practice:
 - `NEXUS_HEARTBEAT_ASSET_NAME` — without the heartbeat asset the Solana poller cannot start
 
+Before a live production start, set `SWAP_PRODUCTION_MODE=true`, then set positive values for
+`MAX_SWAP_USDC`, `MAX_SWAP_USDD`, and `DAILY_PAYOUT_CAP_USDC`, and configure either
+`ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. The service refuses to start in production mode if any
+of these admission controls is absent; send and verify a test alert separately.
+
 Optional but recommended:
 - `HELIUS_RPC_URL` or `HELIUS_API_KEY` — optimized Solana deposit polling (1-2 calls vs N+1)
 - `ALERT_WEBHOOK_URL` or `ALERT_COMMAND` — **without one, safety alerts only reach stdout**

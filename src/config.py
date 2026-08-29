@@ -312,6 +312,11 @@ FEES_USDD_MAX = int(os.getenv("FEES_USDD_MAX", "0"))
 # Quarantine account for failed refunds (token account we own)
 USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
 
+# --- Production safety gate -----------------------------------------------------------
+# Development/test deployments intentionally permit disabled caps and stdout-only alerts.
+# A live deployment must opt in explicitly and then pass the stricter startup gate in main.
+PRODUCTION_MODE = os.getenv("SWAP_PRODUCTION_MODE", "false").lower() in ("1", "true", "yes", "on")
+
 # --- Exposure caps (defence in depth against a bug or a compromised key) ---
 # Largest single swap accepted. Oversized items are refunded rather than paid out.
 # 0 disables the cap.

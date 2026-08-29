@@ -48,6 +48,31 @@ def report_startup_balance_reconciliation(bal_result: object) -> bool:
     return healthy
 
 
+def validate_production_controls() -> bool:
+    """Refuse an explicitly production-mode process without basic loss controls."""
+    if not getattr(config, "PRODUCTION_MODE", False):
+        return True
+
+    missing = []
+    if int(getattr(config, "MAX_SWAP_SOLANA_UNITS", 0) or 0) <= 0:
+        missing.append("MAX_SWAP_USDC")
+    if int(getattr(config, "MAX_SWAP_NEXUS_UNITS", 0) or 0) <= 0:
+        missing.append("MAX_SWAP_USDD")
+    if int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0) <= 0:
+        missing.append("DAILY_PAYOUT_CAP_USDC")
+    if not (str(getattr(config, "ALERT_WEBHOOK_URL", "") or "").strip()
+            or str(getattr(config, "ALERT_COMMAND", "") or "").strip()):
+        missing.append("ALERT_WEBHOOK_URL or ALERT_COMMAND")
+
+    if not missing:
+        return True
+
+    message = "refusing production startup because mandatory exposure controls are disabled"
+    print(f"[startup] {message}: {', '.join(missing)}")
+    alerts.critical("production_controls_missing", message, missing_controls=missing)
+    return False
+
+
 def _safe_call(fn, *args, timeout_sec=5, **kwargs):
     """Execute function with timeout protection."""
     result = {}
@@ -181,6 +206,11 @@ def _process_stale_deposits():
 #print("↻ Updating Nexus heartbeat asset:", cmd[:-1] + ["pin=***"] if cfg.NEXUS_PIN else cmd)
 
 def run():
+    # An explicit production deployment must have finite blast-radius controls and an
+    # alert route before it opens mutable state or starts polling either chain.
+    if not validate_production_controls():
+        return
+
     # Ensure the SQLite schema exists before any state access (idempotent).
     state_db.init_db()
 

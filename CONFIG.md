@@ -98,14 +98,22 @@ Legend:
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
 | NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | **Currently inert.** Intended to cover the on-chain cost of a Nexus refund, but no code path deducts it: all four refund sites return the full credited amount, so the operator absorbs the Nexus transaction cost. Set it if you like — nothing reads it beyond the unused `_apply_congestion_fee()` helper. |
 
-## Exposure Caps & Alerting
+## Production Admission, Exposure Caps & Alerting
+
+`SWAP_PRODUCTION_MODE` defaults to `false` for local development and test networks. When it is
+`true`, startup refuses to open the state database or start polling unless both single-swap caps,
+the daily Solana payout cap, and one alert route are configured with non-zero/non-empty values.
+This is a configuration admission check, not proof that the alert route is deliverable; test the
+configured channel as part of the live acceptance matrix.
+
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| MAX_SWAP_USDC | decimal | 0 | Largest single USDC→USDD deposit accepted; larger is refunded. 0 disables. |
-| MAX_SWAP_USDD | decimal | 0 | Largest single USDD→USDC credit accepted; larger is refunded. 0 disables. |
-| DAILY_PAYOUT_CAP_USDC | decimal | 0 | Rolling 24h ceiling on total outbound USDC, enforced at the single send choke point. 0 disables. |
-| ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Without a channel, safety signals only reach stdout. |
-| ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. |
+| SWAP_PRODUCTION_MODE | bool | false | Enables mandatory production startup controls. |
+| MAX_SWAP_USDC | decimal | 0 | Largest single USDC→USDD deposit accepted; larger is refunded. 0 disables. Required > 0 in production mode. |
+| MAX_SWAP_USDD | decimal | 0 | Largest single USDD→USDC credit accepted; larger is refunded. 0 disables. Required > 0 in production mode. |
+| DAILY_PAYOUT_CAP_USDC | decimal | 0 | Rolling 24h ceiling on total outbound USDC, enforced at the single send choke point. 0 disables. Required > 0 in production mode. |
+| ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Required in production mode unless `ALERT_COMMAND` is set. |
+| ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. Required in production mode unless `ALERT_WEBHOOK_URL` is set. |
 | ALERT_MIN_INTERVAL_SEC | int | 300 | Per-event dedupe window. |
 
 ## Operator Dashboard (read-only UI)

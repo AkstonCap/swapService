@@ -301,9 +301,15 @@ State-changing Nexus calls pass `pin=` and, in multiuser mode, `session=` throug
 
 ### E-009 — Exposure controls and alerting are optional by default
 
-**Priority:** P2 operational hardening
+**Priority:** P2 operational hardening — **partially remediated locally**
 
-Per-swap and daily payout caps default to disabled (`0`), and alert delivery is optional. Before production, require non-zero values appropriate to vault size and require at least one tested alert channel. Startup should refuse production mode when these controls are absent.
+`SWAP_PRODUCTION_MODE` is opt-in (so local development and testnet workflows retain their
+non-production defaults). When it is enabled, startup refuses before opening SQLite or polling if
+one or both per-swap caps, the daily Solana payout cap, or both alert routes are unset/zero. The rejection
+emits a `production_controls_missing` critical event naming every missing control.
+
+Remaining release evidence: configure values appropriate to the vault, deliver and independently
+verify at least one live alert channel, and exercise that configuration in the live acceptance matrix.
 
 ### E-013 — Pinned dependencies carry known advisories
 
@@ -448,9 +454,9 @@ unless reconciliation explicitly returns `healthy=True`.
 
 ### Batch 5 — Production operational gates
 
-1. Require non-zero per-swap and daily caps appropriate to vault size.
+1. ✅ In explicit `SWAP_PRODUCTION_MODE`, require positive per-swap and daily payout caps and at least one configured alert route before startup.
 2. Require configured quarantine destinations and at least one tested alert channel.
-3. Refuse production mode when mandatory controls are absent.
+3. ✅ Refuse production mode when mandatory controls are absent.
 4. Complete the operator hold-resolution workflow with evidence, authorization and audit.
 5. Document incident response, recovery and key rotation; rehearse them before launch.
 

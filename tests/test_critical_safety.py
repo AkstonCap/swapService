@@ -59,12 +59,45 @@ os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
 from src import (  # noqa: E402
-    balance_reconciler, fees, main, nexus_client, solana_client, startup_recovery,
+    balance_reconciler, config, fees, main, nexus_client, solana_client, startup_recovery,
     state_db, swap_nexus,
 )
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    @patch.object(main.alerts, "critical")
+    def test_production_controls_reject_disabled_caps_and_alerting(self, critical):
+        """A production process must not start with disabled loss-limiting controls."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 0),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 0),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "ALERT_COMMAND", ""),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=[
+                "MAX_SWAP_USDC",
+                "MAX_SWAP_USDD",
+                "DAILY_PAYOUT_CAP_USDC",
+                "ALERT_WEBHOOK_URL or ALERT_COMMAND",
+            ],
+        )
+
+    @patch.object(main, "acquire_singleton_lock", return_value=False)
+    @patch.object(main.state_db, "init_db")
+    def test_run_checks_production_controls_before_opening_state(self, init_db, _lock):
+        """A rejected production configuration must not acquire state or enter the loop."""
+        with patch.object(main, "validate_production_controls", return_value=False, create=True):
+            main.run()
+
+        init_db.assert_not_called()
+
     @patch.object(nexus_client.state_db, "update_unprocessed_sig_status")
     @patch.object(nexus_client.state_db, "filter_unprocessed_sigs")
     @patch.object(nexus_client, "_run")
