@@ -254,13 +254,14 @@ A green result was not evidence of balance correctness.
   remain unproven.
 - SQLite REAL/TEXT money evidence is rejected, per-deposit references are immutable, duplicate
   remote identities must have identical payloads, and missing/non-integer contract ids fail closed.
-- Startup and periodic reconciliation exceptions still do not latch a safety pause, so the
-  exposure-pause release blocker remains open.
+- Startup and periodic reconciliation exceptions or unhealthy results now latch a fail-closed
+  exposure pause. Existing refunds/quarantines continue, but new Solana deposits and Nexus→Solana
+  payouts remain blocked until a later reconciliation explicitly returns `healthy=True`.
 
 #### Remaining release evidence
 
-- Make every reconciliation error/unhealthy result latch a fail-closed exposure pause until a
-  later explicitly healthy run.
+- ✅ Every reconciliation error/unhealthy result latches a fail-closed exposure pause until a
+  later explicitly healthy run; existing refunds and quarantines remain processable in paused mode.
 - Add the exact completed-recipient plus valid active first-time-recipient regression.
 - Prove the one-page boundary, short-page and ordering semantics on the target node; retain
   fail-closed behavior whenever the boundary cannot be proven.
@@ -445,9 +446,10 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
-`healthy=False`; and both consumers refuse green unless `healthy is True`. **Batch remains
-partial:** failures do not pause exposure, the exact valid first-time-recipient regression is
-missing, and target single-page boundary/order semantics are unproven.
+`healthy=False`; both consumers refuse green unless `healthy is True`; and every unhealthy or
+exceptional reconciliation result pauses new Solana↔Nexus exposure while already-owed refunds and
+quarantines continue in paused mode. **Batch remains partial:** the exact valid first-time-recipient
+regression is missing, and target single-page boundary/order semantics are unproven.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
@@ -520,7 +522,7 @@ and a rejected production startup should return a non-zero process status to its
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 62 passed, 4 subtests passed in 10.18s on `5d92ec0` |
+| Full `python -m pytest -q` | 65 passed, 4 subtests passed locally after the reconciliation exposure-pause repair |
 | CI workflow | Passed on reconciliation evidence head `de4ae8c` — [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981); implementation is parent `5d92ec0` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |

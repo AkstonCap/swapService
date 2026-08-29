@@ -48,6 +48,34 @@ def report_startup_balance_reconciliation(bal_result: object) -> bool:
     return healthy
 
 
+def update_reconciliation_exposure_pause(
+    paused: bool, bal_result: object = None, *, error: Exception | None = None
+) -> bool:
+    """Latch new cross-chain exposure on reconciliation uncertainty.
+
+    The Nexus mint reconciler is a safety detector, not merely an alert source.  A failed,
+    malformed, incomplete, discrepant, or exception-producing read-back permits no new
+    Solana↔Nexus exposure.  The only transition out of this pause is a later result whose
+    ``healthy`` field is explicitly ``True``.
+    """
+    if error is not None:
+        alerts.critical(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation failed; new exposure remains paused until an explicitly healthy result",
+            checked_addresses=0,
+            incomplete_reasons=[f"balance reconciliation failed: {error}"],
+            account_errors=[],
+        )
+        return True
+
+    # Calling the reporter retains the existing alert/discrepancy evidence.  It returns
+    # False for invalid results as well as every incomplete or surplus-bearing result.
+    # ``paused`` intentionally remains latched between reconciliation attempts; only a
+    # newly observed explicit healthy result clears it.
+    del paused
+    return not report_startup_balance_reconciliation(bal_result)
+
+
 def validate_production_controls() -> bool:
     """Refuse an explicitly production-mode process without basic loss controls."""
     if not getattr(config, "PRODUCTION_MODE", False):
@@ -298,13 +326,20 @@ def run():
     except Exception as e:
         print(f"   Startup recovery error: {e}")
 
-    # Balance reconciliation check (Solana→Nexus direction) – detect potential double-mints
+    # Balance reconciliation check (Solana→Nexus direction) – detect potential double-mints.
+    # Start latched: an unavailable startup read-back is never permission to create exposure.
+    reconciliation_pause = True
     try:
         from . import balance_reconciler
         bal_result = balance_reconciler.run_balance_reconciliation(dry_run=True)
-        report_startup_balance_reconciliation(bal_result)
+        reconciliation_pause = update_reconciliation_exposure_pause(
+            reconciliation_pause, bal_result
+        )
     except Exception as e:
         print(f"   Balance reconciliation error: {e}")
+        reconciliation_pause = update_reconciliation_exposure_pause(
+            reconciliation_pause, error=e
+        )
 
     # Setup graceful shutdown via Ctrl+C (SIGINT) or SIGTERM
     import signal, threading
@@ -375,21 +410,19 @@ def run():
                     try:
                         from . import balance_reconciler
                         bal_result = _safe_call(balance_reconciler.run_balance_reconciliation, dry_run=True, timeout_sec=15)
-                        if not isinstance(bal_result, dict):
-                            raise RuntimeError("balance reconciliation returned no result")
-                        if not bal_result.get('healthy', False):
-                            alerts.critical("balance_reconciliation_incomplete",
-                                            "double-mint reconciliation is not healthy; no green result is valid",
-                                            checked_addresses=bal_result.get('checked_addresses', 0),
-                                            incomplete_reasons=bal_result.get('incomplete_reasons', []),
-                                            account_errors=bal_result.get('account_errors', []))
-                        if bal_result.get('discrepancies'):
-                            alerts.critical("unbacked_nexus_surplus",
-                                            "addresses hold more of the Nexus-side token than their deposits justify (possible double-mint)",
-                                            addresses=len(bal_result['discrepancies']),
-                                            total_surplus_units=bal_result.get('total_surplus_nexus_units', 0))
+                        reconciliation_pause = update_reconciliation_exposure_pause(
+                            reconciliation_pause, bal_result
+                        )
                     except Exception as e:
                         print(f"[balance_check] error: {e}")
+                        reconciliation_pause = update_reconciliation_exposure_pause(
+                            reconciliation_pause, error=e
+                        )
+
+                # Reconciliation is an exposure gate, not only a monitoring signal.  Keep
+                # processing existing refunds/quarantines in paused poller mode, but do not
+                # accept or pay out new Solana↔Nexus swaps until a later explicit green run.
+                should_pause = bool(should_pause or reconciliation_pause)
                 
                 # Optional: DEX conversions (SOL top-ups) with timeout protection
                 if config.FEE_CONVERSION_ENABLED:
@@ -445,9 +478,16 @@ def run():
                     # and quarantine of already-stuck user funds along with new swaps.
                     # Instead run the pollers in paused mode: no new exposure, but money
                     # already owed to users keeps moving.
-                    alerts.critical("backing_deficit_pause",
-                                    "the vault below the configured floor vs circulating supply; "
-                                    "new swaps paused, refunds and quarantine still running")
+                    if reconciliation_pause:
+                        alerts.critical(
+                            "balance_reconciliation_exposure_pause",
+                            "Nexus mint reconciliation is incomplete, discrepant, or unavailable; "
+                            "new swaps paused until an explicitly healthy read-back",
+                        )
+                    else:
+                        alerts.critical("backing_deficit_pause",
+                                        "the vault below the configured floor vs circulating supply; "
+                                        "new swaps paused, refunds and quarantine still running")
             except Exception as e:
                 print(f"Maintenance error: {e}")
 

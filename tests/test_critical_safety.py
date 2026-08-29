@@ -920,6 +920,88 @@ class CriticalSafetyTests(unittest.TestCase):
                             for reason in result["incomplete_reasons"]))
 
     @patch.object(main.alerts, "critical")
+    def test_reconciliation_failure_latches_exposure_until_an_explicitly_healthy_result(self, critical):
+        """An incomplete Nexus mint history must block new Solana/Nexus exposure until green."""
+        paused = main.update_reconciliation_exposure_pause(False, {
+            "healthy": False,
+            "checked_addresses": 0,
+            "discrepancies": [],
+            "incomplete_reasons": ["Nexus history incomplete"],
+            "account_errors": [],
+        })
+        self.assertTrue(paused)
+
+        resumed = main.update_reconciliation_exposure_pause(paused, {
+            "healthy": True,
+            "checked_addresses": 1,
+            "discrepancies": [],
+            "incomplete_reasons": [],
+            "account_errors": [],
+        })
+        self.assertFalse(resumed)
+
+        critical.assert_called_once_with(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation is not healthy; no green result is valid",
+            checked_addresses=0,
+            incomplete_reasons=["Nexus history incomplete"],
+            account_errors=[],
+        )
+
+    @patch.object(main.alerts, "critical")
+    def test_reconciliation_exception_latches_exposure(self, critical):
+        """A Nexus reconciliation exception is not permission to keep accepting deposits."""
+        paused = main.update_reconciliation_exposure_pause(
+            False, error=RuntimeError("Nexus node timeout")
+        )
+
+        self.assertTrue(paused)
+        critical.assert_called_once_with(
+            "balance_reconciliation_incomplete",
+            "double-mint reconciliation failed; new exposure remains paused until an explicitly healthy result",
+            checked_addresses=0,
+            incomplete_reasons=["balance reconciliation failed: Nexus node timeout"],
+            account_errors=[],
+        )
+
+    def test_unhealthy_startup_reconciliation_runs_solana_poller_in_exposure_pause_mode(self):
+        """An unhealthy Nexus read-back must block new Solana deposits, not merely alert."""
+        unhealthy = {
+            "healthy": False, "checked_addresses": 0, "discrepancies": [],
+            "incomplete_reasons": ["Nexus history incomplete"], "account_errors": [],
+        }
+
+        def run_one_poller(func, label, _budget):
+            func()
+            if label == "solana":
+                main._stop_event.set()
+
+        recovery = {
+            "reference_seeded": False, "interrupted_nexus_transfers_held": 0,
+            "added_nexus_processed": 0, "added_refunded_sigs": 0,
+            "found_nexus_memos": 0, "found_refund_memos": 0,
+        }
+        with (
+            patch.object(main, "validate_production_controls", return_value=True),
+            patch.object(main.state_db, "init_db"),
+            patch.object(main, "acquire_singleton_lock", return_value=True),
+            patch.object(nexus_client, "validate_session_config", return_value=(True, "ok")),
+            patch.object(nexus_client, "validate_heartbeat_asset", return_value=(True, "ok")),
+            patch.object(solana_client, "get_token_account_balance", return_value=10_000_000),
+            patch.object(nexus_client, "get_circulating_nexus_supply", return_value=10),
+            patch.object(startup_recovery, "perform_startup_recovery", return_value=recovery),
+            patch.object(balance_reconciler, "run_balance_reconciliation", return_value=unhealthy),
+            patch.object(fees, "maintain_backing_and_bounds", return_value=False),
+            patch.object(main.time, "time", return_value=601),
+            patch.object(main, "_run_with_watchdog", side_effect=run_one_poller),
+            patch.object(main, "poll_solana_deposits") as poll_solana,
+            patch.object(main.alerts, "critical"),
+        ):
+            main.run()
+
+        poll_solana.assert_called_once_with(paused=True)
+
+    @patch.object(main.alerts, "critical")
     def test_startup_reconciliation_alerts_when_evidence_is_unhealthy(self, critical):
         """Startup must not report zero checked recipients as a green reconciliation."""
         result = {
