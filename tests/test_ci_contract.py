@@ -9,6 +9,15 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 LINK_CHECKER = ROOT / "scripts" / "check_markdown_links.py"
+REQUIREMENTS = ROOT / "requirements.txt"
+
+
+def test_security_remediation_pins_safe_http_and_env_dependencies():
+    """The runtime lockfile must retain the reviewed advisory remediations."""
+    requirements = REQUIREMENTS.read_text(encoding="utf-8")
+
+    assert "python-dotenv==1.2.2" in requirements
+    assert "requests==2.33.0" in requirements
 
 
 def test_markdown_link_checker_accepts_tracked_documentation():

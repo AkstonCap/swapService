@@ -366,23 +366,20 @@ rejection for a clean stop.
 Remaining release evidence: configure values appropriate to the vault, deliver and independently
 verify at least one live alert channel, and exercise that configuration in the live acceptance matrix.
 
-### E-013 — Pinned dependencies carry known advisories
+### E-013 — Pinned dependencies carried known advisories
 
-**Priority:** P2 compatibility-tested security maintenance
+**Priority:** P2 compatibility-tested security maintenance — **remediated locally**
 
-`pip-audit -r requirements.txt` reports three advisories in two pinned packages:
+The targeted remediation pins `python-dotenv==1.2.2` (CVE-2026-28684) and
+`requests==2.33.0` (CVE-2024-47081 and CVE-2026-25645). A clean virtual environment installed
+the complete pinned set with `solana==0.36.9` and `solders==0.26.0` unchanged; `pip check`,
+`pip-audit -r requirements.txt`, byte-compilation, Markdown-link validation and the full suite
+passed. The regression contract asserts the two safe pins so a future dependency edit cannot
+silently restore the advisory-bearing versions.
 
-| Package | Current | Advisory | Fixed version |
-|---|---:|---|---:|
-| `python-dotenv` | 1.0.1 | CVE-2026-28684 | 1.2.2 |
-| `requests` | 2.32.3 | CVE-2024-47081 | 2.32.4 |
-| `requests` | 2.32.3 | CVE-2026-25645 | 2.33.0 |
-
-The repository does not call the vulnerable `python-dotenv.set_key()`/`unset_key()` or
-`requests.utils.extract_zipped_paths()` paths. The Requests `.netrc` credential-disclosure
-advisory is potentially relevant to HTTP clients, although service URLs are operator-controlled
-or fixed rather than user-provided. Preserve Nexus/Solana compatibility: test targeted upgrades
-to `python-dotenv==1.2.2` and `requests==2.33.0` rather than performing a broad dependency refresh.
+This is deliberately a narrow HTTP/environment-layer update: Nexus HTTPS API wrappers, Solana
+JSON-RPC/Jupiter callers, and the pinned Solana SDK pair were not changed. It is local compatibility
+evidence only; the target Nexus node and Solana devnet/testnet matrix remains a separate release gate.
 
 ---
 
@@ -538,8 +535,9 @@ hold-resolution, incident-response and key-rotation procedures.
 ### Batch 6 — Custody, dependency and maintainability hardening
 
 1. ✅ Production uses the verified Nexus HTTPS API POST transport instead of CLI argv for PIN/session; it requires credential-free `NEXUS_API_URL` HTTPS plus API Basic credentials, while the CLI fallback remains development-only. Target-node TLS and POST-form acceptance remain live-matrix evidence.
-2. Compatibility-test `python-dotenv==1.2.2` and `requests==2.33.0`; update only after the
-   Nexus/Solana suite and live matrix remain green.
+2. ✅ Compatibility-tested and pinned `python-dotenv==1.2.2` and `requests==2.33.0` in a clean
+   environment with the existing Nexus/Solana SDK pins unchanged. The live matrix remains required
+   before deployment.
 3. Remove dead configuration and unsafe dormant helpers or clearly isolate them.
 4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
 5. Fix remaining moved-document paths, add structured logging and refresh this evaluation
@@ -561,9 +559,9 @@ hold-resolution, incident-response and key-rotation procedures.
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 79 passed, 10 subtests passed on `16e2e38` local verification |
+| Full `python -m pytest -q` | 80 passed, 10 subtests passed in a clean Python 3.11 virtual environment after the targeted dependency remediation |
 | CI workflow | Passed on code head `16e2e38` — [run 33282805163](https://github.com/distordialabs-brutus/swapService/actions/runs/33282805163); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
-| `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
+| `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
 
