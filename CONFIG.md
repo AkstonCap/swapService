@@ -146,20 +146,13 @@ of the live acceptance matrix.
 | HEARTBEAT_WATERLINE_SOLANA_FIELD | str | last_safe_timestamp_solana | Field name on asset. |
 | HEARTBEAT_WATERLINE_NEXUS_FIELD | str | last_safe_timestamp_nexus | Field name on asset. MUST match the asset (format=basic locks fields at creation); a mismatch makes every heartbeat update fail atomically. |
 
-## Fee Conversion / Backing (Optional Feature Gate)
+## Backing Safety Monitoring
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| FEE_CONVERSION_ENABLED | bool | false | Legacy switch. Automated conversion remains safety-disabled in code until durable intent records and chain reconciliation exist; setting this true does not execute fund movements. |
-| FEE_CONVERSION_MIN_USDC | int | 0 | Minimum base units before attempt. |
-| SOL_TOPUP_MIN_LAMPORTS | int | 0 | Trigger threshold. |
-| SOL_TOPUP_TARGET_LAMPORTS | int | 0 | Refill target. |
-| NEXUS_NXS_TOPUP_MIN | int | 0 | Placeholder threshold for NXS. |
-| BACKING_DEFICIT_BPS_ALERT | int | 10 | Alert when backing < 99.9%. |
-| BACKING_DEFICIT_PAUSE_PCT | int | 90 | Pause swaps if backing ratio < this. |
-| BACKING_RECONCILE_INTERVAL_SEC | int | 3600 | Minimum spacing between reconcile mints. |
-| BACKING_SURPLUS_MINT_THRESHOLD_USDC | decimal | 20 | Only mint when vault > threshold. |
-| TARGET_SOL_PER_NXS_NUM | int | 1 | Target SOL numerator. |
-| TARGET_SOL_PER_NXS_DEN | int | 10000 | Target SOL denominator. |
+| BACKING_DEFICIT_BPS_ALERT | int | 10 | Alert threshold for backing deficit. |
+| BACKING_DEFICIT_PAUSE_PCT | int | 90 | Pause new swaps if backing ratio < this. |
+| BACKING_RECONCILE_INTERVAL_SEC | int | 3600 | Minimum spacing between read-only backing/surplus checks. |
+| BACKING_SURPLUS_MINT_THRESHOLD_USDC | decimal | 20 | Minimum vault balance for a read-only backing-surplus operator alert. It does not authorize a mint. |
 
 ## Quarantine & Accounts
 | Var | Type | Default | Notes |

@@ -449,13 +449,8 @@ def run():
                 # accept or pay out new Solana↔Nexus swaps until a later explicit green run.
                 should_pause = bool(should_pause or reconciliation_pause)
                 
-                # Optional: DEX conversions (SOL top-ups) with timeout protection
-                if config.FEE_CONVERSION_ENABLED:
-                    try:
-                        _safe_call(fees.process_fee_conversions, timeout_sec=15)
-                    except Exception as e:
-                        print(f"[fee_conversions] error: {e}")
-
+                # Surplus is alert-only until a separately designed, durable intent protocol
+                # exists; do not run automatic Solana DEX or Nexus mint/rebalance actions.
                 # Periodic operational metrics (lightweight) every METRICS_INTERVAL_SEC with timeout budget
                 METRICS_INTERVAL = getattr(config, 'METRICS_INTERVAL_SEC', 30)
                 if now % max(5, METRICS_INTERVAL) == 0:  # coarse modulus trigger

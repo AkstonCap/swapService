@@ -295,22 +295,11 @@ SKIP_OWNER_LOOKUP_FOR_MICRO_USDD = os.getenv("SKIP_OWNER_LOOKUP_FOR_MICRO_USDD",
 # If false, micro credits do not count against MAX_CREDITS_PER_LOOP (lets us drain real swaps faster under spam).
 MICRO_CREDIT_COUNT_AGAINST_LIMIT = os.getenv("MICRO_CREDIT_COUNT_AGAINST_LIMIT", "false").lower() in ("1","true","yes","on")
 
-# Fee conversions (scaffolding / optional)
-FEE_CONVERSION_ENABLED = os.getenv("FEE_CONVERSION_ENABLED", "false").lower() in ("1","true","yes","on")
-FEE_CONVERSION_MIN_USDC = int(os.getenv("FEE_CONVERSION_MIN_USDC", "0"))  # minimum USDC base units before attempting conversions
-SOL_TOPUP_MIN_LAMPORTS = int(os.getenv("SOL_TOPUP_MIN_LAMPORTS", "0"))
-SOL_TOPUP_TARGET_LAMPORTS = int(os.getenv("SOL_TOPUP_TARGET_LAMPORTS", "0"))
-NEXUS_NXS_TOPUP_MIN = int(os.getenv("NEXUS_NXS_TOPUP_MIN", "0"))  # units TBD by Nexus, placeholder
-BACKING_DEFICIT_BPS_ALERT = int(os.getenv("BACKING_DEFICIT_BPS_ALERT", "10"))  # >0.1% triggers fee transfer to vault
+# Backing safety controls. Surplus is only alerted for operator review; no automated
+# Solana DEX swap or Nexus mint/rebalance path exists in this service.
+BACKING_DEFICIT_BPS_ALERT = int(os.getenv("BACKING_DEFICIT_BPS_ALERT", "10"))
 BACKING_DEFICIT_PAUSE_PCT = int(os.getenv("BACKING_DEFICIT_PAUSE_PCT", "90"))  # vault < 90% of circulating => pause
-BACKING_RECONCILE_INTERVAL_SEC = int(os.getenv("BACKING_RECONCILE_INTERVAL_SEC", "3600"))  # mint the Nexus-side token fees at most once per hour
-
-# Fee accounts and ranges
-# Solana-side fee token account already defined above
-FEES_USDC_MIN = int(os.getenv("FEES_USDC_MIN", "0"))
-FEES_USDC_MAX = int(os.getenv("FEES_USDC_MAX", "0"))
-FEES_USDD_MIN = int(os.getenv("FEES_USDD_MIN", "0"))
-FEES_USDD_MAX = int(os.getenv("FEES_USDD_MAX", "0"))
+BACKING_RECONCILE_INTERVAL_SEC = int(os.getenv("BACKING_RECONCILE_INTERVAL_SEC", "3600"))  # minimum spacing between read-only surplus alerts
 
 # Quarantine account for failed refunds (token account we own)
 USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
@@ -359,11 +348,7 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")      # POSTed a JSON body
 ALERT_COMMAND = os.getenv("ALERT_COMMAND")              # argv0; receives JSON on stdin
 ALERT_MIN_INTERVAL_SEC = int(os.getenv("ALERT_MIN_INTERVAL_SEC", "300"))  # per-event dedupe
 
-# Target accumulation ratio: 1 SOL for every 10000 NXS by default
-TARGET_SOL_PER_NXS_NUM = int(os.getenv("TARGET_SOL_PER_NXS_NUM", "1"))
-TARGET_SOL_PER_NXS_DEN = int(os.getenv("TARGET_SOL_PER_NXS_DEN", "10000"))
-
-# Backing surplus mint threshold: when ratio > 1 + margin and the vault > this, mint to bring back to 1
+# Minimum vault value before a read-only backing-surplus alert is emitted.
 _SURPLUS_THRESH_SOLANA = os.getenv("BACKING_SURPLUS_MINT_THRESHOLD_USDC", "20")
 try:
     from decimal import Decimal as _D

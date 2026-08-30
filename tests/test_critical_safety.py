@@ -556,23 +556,22 @@ class CriticalSafetyTests(unittest.TestCase):
 
         self.assertEqual(surplus, 0)
 
-    @patch.object(fees.config, "FEE_CONVERSION_ENABLED", True)
-    @patch.object(fees.config, "BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS", 0)
-    @patch.object(fees, "available_backing_surplus_solana_units", return_value=10_000_000)
-    @patch.object(solana_client, "get_token_account_balance", return_value=20_000_000)
-    @patch.object(solana_client, "get_vault_sol_balance", return_value=0)
-    @patch.object(nexus_client, "get_circulating_nexus_units", return_value=10_000_000)
-    @patch.object(nexus_client, "get_nxs_default_balance_units", return_value=0)
-    @patch.object(nexus_client, "mint_nexus_to_local", return_value=True)
-    @patch.object(solana_client, "swap_token_for_sol_via_jupiter", return_value=True)
-    def test_automatic_fee_conversion_is_disabled_without_durable_intent(
-        self, swap_sol, mint_nexus, _nxs_balance, _circ, _sol_balance,
-        _vault, _surplus
-    ):
-        fees.process_fee_conversions()
-
-        mint_nexus.assert_not_called()
-        swap_sol.assert_not_called()
+    def test_unsafe_automatic_fee_conversion_path_is_removed_not_feature_gated(self):
+        """No configuration edit may revive unintentional Nexus/Solana value movement."""
+        for setting in (
+            "FEE_CONVERSION_ENABLED",
+            "FEE_CONVERSION_MIN_USDC",
+            "SOL_TOPUP_MIN_LAMPORTS",
+            "SOL_TOPUP_TARGET_LAMPORTS",
+            "NEXUS_NXS_TOPUP_MIN",
+        ):
+            self.assertFalse(hasattr(config, setting), setting)
+        for helper in (
+            "automatic_surplus_actions_enabled",
+            "process_fee_conversions",
+            "reconcile_fees_to_fee_account",
+        ):
+            self.assertFalse(hasattr(fees, helper), helper)
 
     @patch.object(fees.config, "BACKING_DEFICIT_PAUSE_PCT", 90)
     @patch.object(fees.config, "nexus_units_to_solana", side_effect=lambda units: units)

@@ -410,14 +410,21 @@ The single most important systemic finding is that a large set of advertised saf
 - `HEARTBEAT_MIN_INTERVAL_SEC` — README claims the interval is enforced; it is not
 - `HEARTBEAT_WATERLINE_NEXUS_FIELD` — ignored by the writer (B-5)
 - `SOLANA_POLL_INTERVAL` / `NEXUS_POLL_INTERVAL` — only the global `POLL_INTERVAL` is read
-- `SOLANA_MAX_TX_FETCH_PER_POLL`, `MAX_DEPOSITS_PER_LOOP`, `MICRO_DEPOSIT_FEE_PCT`, `MICRO_CREDIT_FEE_PCT`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, `NEXUS_RPC_HOST`, `METRICS_BUDGET_SEC`, `STALE_ROW_SEC`, `BACKING_DEFICIT_BPS_ALERT`, `FEE_CONVERSION_MIN_USDC`, `TARGET_SOL_PER_NXS_*` — all defined, documented, unused
+- `SOLANA_MAX_TX_FETCH_PER_POLL`, `MAX_DEPOSITS_PER_LOOP`, `MICRO_DEPOSIT_FEE_PCT`, `MICRO_CREDIT_FEE_PCT`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, `NEXUS_RPC_HOST`, `METRICS_BUDGET_SEC`, `STALE_ROW_SEC`, `BACKING_DEFICIT_BPS_ALERT` — all defined, documented, unused
 - `SOL_MINT` — **listed in `REQUIRED_ENV`**, so the service refuses to start without it, yet it is used nowhere
 
 **Settings the code reads that are not in `config.py`** (each silently falls back to a hardcoded literal, so setting them in `.env` does nothing): `UNPROCESSED_PROCESS_BUDGET_SEC` (documented in `.env.example`), `UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC`, `POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES`, `FEE_EVENTS_FILE`, `VAULT_OWNER`.
 
 **Documented but entirely absent from the template:** `HELIUS_RPC_URL` / `HELIUS_API_KEY` — the code's preferred fast path and prominent in `SETUP.md`, yet nowhere in `.env.example`, `CONFIG.md` or `config.py`. An operator copying the template silently gets the slow fallback.
 
-**Root cause — B-27 (🟡 partially addressed): there is now `tests/test_smoke.py`** — it imports every module, calls 22 real functions against a temp DB, and AST-checks call-site arity against changed signatures. It was written after a real `ImportError` (`from . import state_db, state`, where no `state` module exists) survived byte-compilation and stubbed unit tests. **There is still no CI runner and no behavioural test suite.** Originally: `.github/` contains only `copilot-instructions.md`; there are no test files. Every Critical defect here and in EVALUATION §8–§11 — especially the calls to functions that do not exist — would be caught by an import smoke test plus modest unit tests. This is the underlying cause of the defect density, not merely a hygiene gap.
+**Automated value movement removed (2026-08-30):** the dormant fee-conversion/rebalance
+feature gate and its Solana DEX, SOL/NXS top-up and Nexus mint helpers have been removed. Backing
+surplus is now alert-only for operator review, so no configuration edit can revive that automatic
+cross-chain value movement without a new, reviewed durable-intent implementation.
+
+**Root cause — B-27 (historical):** this report predates the current pytest and CI gate.
+Current test/CI evidence and remaining release gates are maintained in the authoritative
+[`EVALUATION.md`](EVALUATION.md).
 
 **Compliance/governance (flagged, not assessed):** no sanctions/blocklist screening, no per-address limits, no exportable audit trail, and no documented key-rotation, incident-response or emergency-stop procedure. Material regulatory exposure for a custodial service, and out of scope for a code review.
 
