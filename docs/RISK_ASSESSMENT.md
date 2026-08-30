@@ -154,7 +154,8 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 
 > **Resolution: intent-before-action, then let the chain decide.** A `reference` column was added to `unprocessed_sigs` (with migration). The unique per-attempt reference and a `debit in flight` status are now persisted **before** the CLI is invoked. Any non-definitive outcome — exception, timeout, or the `(False, None)` returned when the call succeeded but the body was unparsable — is recorded as `debit unverified` and **never refunded on that signal alone**.
 >
-> A new pass, `resolve_unverified_debits()`, runs each cycle (before the confirmation pass) and resolves those rows against the chain via a new `find_nexus_debit_by_reference()`:
+> The batch `find_nexus_debits_by_references()` resolver runs each cycle (before the
+> confirmation pass) and resolves those rows against the chain:
 >
 > | on-chain lookup | action |
 > |---|---|
@@ -168,7 +169,10 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 >
 > All five branches verified by test.
 >
-> **Correction to this report's earlier recommendation:** §8 advised resolving ambiguity with the existing `was_nexus_debited_to_account_for_amount()`. On implementation that function proved unusable here — it inspects the **treasury account**, whereas this path mints via `finance/debit/token from=USDD` (the token *supply* register), and it compares `int(contract.amount)` (a decimal token amount, so `int("10.5")` raises and yields 0) against base units, so it can never match. It is left in place but documented as unsuitable; `find_nexus_debit_by_reference()` keys on the unique reference and is exact.
+> **Follow-up hardening:** the unsafe, uncalled
+> `was_nexus_debited_to_account_for_amount()` and other single-item history helpers were removed.
+> The resolver uses only the batch reference lookup, whose explicit completeness result cannot turn
+> a bounded negative scan into permission for another Nexus debit or a Solana-side refund.
 
 **Where:** `src/solana_client.py` (debit step); `src/nexus_client.py:151-177`
 
@@ -185,7 +189,9 @@ if not txid:   return (False, None)   # the CLI SUCCEEDED; we report failure
 
 The caller then marks the deposit `to be refunded` — so the service **mints the USDD and refunds the USDC**: a guaranteed double loss. (The `[DEBIT_NO_TXID]` branch that looks like it handles this is unreachable, since the function already returned `False`.) A CLI timeout is the same class of bug — reduced but not eliminated by the timeout increase in EVALUATION §8.
 
-Again the defence exists and is dead: `nexus_client.was_nexus_debited_to_account_for_amount()` (`nexus_client.py:443`), an on-chain "did we already debit this?" check, has **zero call sites**.
+The former on-chain account/amount double-debit check was uncalled and could not safely compare
+Nexus decimal contract amounts with base units. It has been removed; the durable intent/reference
+resolver is the only automatic ambiguity path.
 
 **Fix:** persist intent (+ reference) *before* invoking the CLI; on any ambiguous outcome — non-zero exit, unparsed output, timeout — treat state as **unknown** and resolve it against the chain before retrying or refunding.
 

@@ -596,24 +596,6 @@ def get_transactions_confirmations(txids, limit: int = 200) -> BatchLookup:
     return BatchLookup(out, False, "pagination_truncated")
 
 
-def get_transaction_confirmations(txid: str) -> int | None:
-    """Confirmations for a single txid (bounded). Prefer get_transactions_confirmations()."""
-    cmd = [config.NEXUS_CLI, "finance/transactions/token/txid,confirmations",
-           f"name={config.NEXUS_TOKEN_NAME}", "sort=timestamp", "order=desc", "limit=200"]
-    try:
-        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
-        if code != 0:
-            return None
-        res = _parse_json_lenient(out)
-        if not isinstance(res, list):
-            res = [res] if isinstance(res, dict) else []
-        res = [tx for tx in res if isinstance(tx, dict) and tx.get("txid") == txid]
-        return int(res[0].get("confirmations")) if res else None
-    except Exception as e:
-        print(f"Error fetching transaction {txid}: {e}")
-    return None
-
-
 def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     """Confirm positively observed Nexus debits; ambiguity stays pending.
 
@@ -1259,106 +1241,6 @@ def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
-
-
-def find_nexus_debit_by_reference(reference, limit: int = 100) -> Optional[str]:
-    """Return the txid of a Nexus-side DEBIT carrying exactly this reference, else None.
-
-    This is the authoritative "did my debit actually execute?" check for the
-    Solana->Nexus path. It keys on the per-attempt unique reference, so it is exact.
-
-    NOTE: `was_nexus_debited_to_account_for_amount()` below cannot be used for this.
-    It inspects the TREASURY account, but this path mints via
-    `finance/debit/token from=<token>` (the token supply register), and it compares
-    `int(contract.amount)` - a decimal token amount - against base units, so it never
-    matches. Prefer this function.
-    """
-    if reference is None:
-        return None
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.to,contracts.amount",
-        f"name={config.NEXUS_TOKEN_NAME}",
-        "sort=timestamp",
-        "order=desc",
-        f"limit={int(limit)}",
-    ]
-    try:
-        code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
-        if code != 0:
-            print("Nexus: debit-by-reference lookup error:", redact(err or out))
-            return None
-        data = _parse_json_lenient(out)
-        txs = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-        target = str(reference).strip()
-        for tx in txs or []:
-            if not isinstance(tx, dict):
-                continue
-            for c in (tx.get("contracts") or []):
-                if not isinstance(c, dict):
-                    continue
-                if str(c.get("OP") or "").upper() != "DEBIT":
-                    continue
-                ref = c.get("reference")
-                if ref is not None and str(ref).strip() == target:
-                    txid = tx.get("txid")
-                    return str(txid) if txid else None
-        return None
-    except Exception as e:
-        print("Nexus: debit-by-reference lookup exception:", e)
-        return None
-
-
-def was_nexus_debited_to_account_for_amount(to_addr: str, amount_units: int, lookback_sec: int = 60, min_confirmations: int = 0) -> bool:
-    """Check treasury debits to a recipient for an exact amount within a recent window.
-    This provides idempotency without relying on string references.
-    """
-    treas = config.NEXUS_USDD_TREASURY_ACCOUNT
-    if not treas:
-        return False
-    cmd = [config.NEXUS_CLI, "finance/transaction/account", f"address={treas}"]
-    try:
-        code, out, err = _run(cmd, timeout=15)
-        if code != 0:
-            return False
-        data = _parse_json_lenient(out)
-        txs = data if isinstance(data, list) else [data]
-        from time import time as _now
-        cutoff = int(_now()) - int(lookback_sec or 0)
-        scanned = 0
-        for tx in (txs or []):
-            if not isinstance(tx, dict):
-                continue
-            scanned += 1
-            # Optional time filter if available
-            try:
-                ts = int(tx.get("timestamp") or 0)
-                if ts and ts < cutoff:
-                    break
-            except Exception:
-                pass
-            conf = int(tx.get("confirmations") or 0)
-            if conf < int(min_confirmations or 0):
-                continue
-            for c in (tx.get("contracts") or []):
-                if not isinstance(c, dict):
-                    continue
-                if str(c.get("OP") or "").upper() != "DEBIT":
-                    continue
-                # Match by amount and recipient when possible
-                amt = None
-                try:
-                    amt = int(c.get("amount") or c.get("value") or 0)
-                except Exception:
-                    amt = 0
-                to_field = c.get("to") or c.get("address") or c.get("recipient") or None
-                if amt == int(amount_units) and (not to_field or str(to_field) == str(to_addr)):
-                    return True
-            if scanned > 200:
-                break
-        return False
-    except Exception:
-        return False
 
 
 # --- Nexus DEX (market) helpers ---

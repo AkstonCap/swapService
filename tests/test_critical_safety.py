@@ -71,6 +71,17 @@ class CriticalSafetyTests(unittest.TestCase):
         """An uncertain Nexus debit must hold for resolution, not age into a false negative."""
         self.assertFalse(hasattr(config, "DEBIT_VERIFY_GRACE_SEC"))
 
+    def test_ambiguous_nexus_debits_expose_only_batch_lookup_apis(self):
+        """No stale single-item Nexus history scan may be revived for a money decision."""
+        for legacy_helper in (
+            "get_transaction_confirmations",
+            "find_nexus_debit_by_reference",
+            "was_nexus_debited_to_account_for_amount",
+        ):
+            self.assertFalse(hasattr(nexus_client, legacy_helper), legacy_helper)
+        self.assertTrue(callable(nexus_client.get_transactions_confirmations))
+        self.assertTrue(callable(nexus_client.find_nexus_debits_by_references))
+
     def test_invalid_production_mode_in_environment_fails_configuration_loading(self):
         """A typo must never silently downgrade a production process to development mode."""
         try:

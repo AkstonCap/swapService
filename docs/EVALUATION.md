@@ -390,8 +390,11 @@ evidence only; the target Nexus node and Solana devnet/testnet matrix remains a 
 **Partially remediated:** `DEBIT_VERIFY_GRACE_SEC` has been removed from runtime configuration
 and current operator/state-machine documentation. An ambiguous Nexus debit now remains held unless
 positive reference evidence is found; no expiring negative-lookup setting can imply that a bounded
-scan proved non-execution. Legacy single-item lookup helpers and disabled fee-conversion code should
-still be removed or clearly isolated so future changes do not accidentally reactivate unsafe behavior.
+scan proved non-execution. The uncalled, single-item Nexus history helpers have also been removed:
+Solana→Nexus decisions now use only the batch interfaces that expose lookup completeness, so a
+stale `None`/`False` result cannot be reintroduced as proof of non-execution. Disabled
+fee-conversion code should still be removed or clearly isolated so future changes do not
+accidentally reactivate unsafe automated value movement.
 
 ### E-011 — Documentation relocation and identity drift
 
