@@ -16,7 +16,7 @@ Legend:
 | VAULT_USDC_ACCOUNT | Y | pubkey |  | SPL USDC token account (ATA) holding liquidity. |
 | USDC_MINT | Y | pubkey |  | USDC mint (mainnet or devnet). |
 | SOL_MINT | Y | pubkey |  | SOL mint (native wrapper constant). Needed for potential fee conversions. |
-| NEXUS_PIN | Y | str |  | PIN unlocking Nexus CLI operations. |
+| NEXUS_PIN | Y | str |  | PIN authorizing Nexus profile operations. Never log it; in production it is sent only in an HTTPS POST body, never a child process argument. |
 | NEXUS_USDD_TREASURY_ACCOUNT | Y | str |  | USDD treasury account receiving user USDD credits & paying refunds. |
 | SOL_MAIN_ACCOUNT | Y | pubkey |  | Base SOL account (used in some balance / backing logic). |
 
@@ -43,9 +43,12 @@ Legend:
 ## Nexus Accounts (Optional / Conditional)
 | Var | Req | Type | Default | Notes |
 |-----|-----|------|---------|-------|
-| NEXUS_CLI_PATH | N | path | ./nexus | Executable path. Ensure chmod +x. |
-| NEXUS_MULTIUSER | N | bool | false | Set true only if `nexus.conf` has `multiuser=1`. Controls whether `session=<id>` is appended to session-scoped API calls. |
-| NEXUS_SESSION | N | str |  | Session id from `sessions/create/local`. **Required when NEXUS_MULTIUSER=true** — every finance/*, assets/*, market/*, supply/* call needs it. Never sent in single-user mode (the API rejects it). Credential: redacted from logs and alerts. |
+| NEXUS_CLI_PATH | N | path | ./nexus | CLI fallback used only outside production; executable path when no API URL is configured. |
+| NEXUS_API_URL | Production: Y | https URL |  | Nexus HTTPS API base URL, e.g. `https://127.0.0.1:8443`. Must not embed credentials, a query, or a fragment. |
+| NEXUS_API_USER | Production: Y | str |  | HTTP Basic-auth user configured as `apiuser` in `nexus.conf`. |
+| NEXUS_API_PASSWORD | Production: Y | secret |  | HTTP Basic-auth password configured as `apipassword`; never log it. |
+| NEXUS_MULTIUSER | N | bool | false | Set true only if `nexus.conf` has `multiuser=1`. Controls whether `session=<id>` is included in the HTTPS POST body for session-scoped API calls. |
+| NEXUS_SESSION | N | str |  | Session id from `sessions/create/local`. **Required when NEXUS_MULTIUSER=true** — every finance/*, assets/*, market/*, supply/* call needs it. Never sent in single-user mode (the API rejects it). Credential: redacted from logs and alerts; production sends it only in the HTTPS request body. |
 | NEXUS_USDD_LOCAL_ACCOUNT | N | str |  | Receives micro USDD credits / congestion fees. |
 | NEXUS_USDD_QUARANTINE_ACCOUNT | N | str |  | Destination for quarantined failed USDD refunds. If unset, quarantined USDD stays in the treasury and keeps counting toward the backing ratio. |
 | NEXUS_USDD_FEES_ACCOUNT | N | str |  | If separating fee accrual from local account. |
@@ -68,7 +71,6 @@ Legend:
 |-----|------|---------|-------|
 | SOLANA_DEPOSIT_COMMITMENT | string | finalized | Commitment for ingesting deposits and settling our own payouts. `confirmed` is not rooted and can be reorged after USDD is minted against it (permanently unbacked supply). Relax only deliberately. |
 | SOLANA_FINALIZED_ABOVE_UNITS | int | 0 | If the commitment above is relaxed, deposits ≥ this many USDC base units still require finalization. 0 disables the carve-out. |
-| DEBIT_VERIFY_GRACE_SEC | int | 300 | How long an ambiguous USDD debit is verified against the chain before concluding it never executed. |
 | SOLANA_RPC_TIMEOUT_SEC | int | 8 | Per RPC HTTP call. |
 | SOLANA_TX_FETCH_TIMEOUT_SEC | int | 12 | Individual tx signature fetch. |
 | SOLANA_POLL_TIME_BUDGET_SEC | int | 15 | Soft cap per Solana loop. |
@@ -88,32 +90,45 @@ Legend:
 ## Fees & Thresholds
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **USDD→USDC** path (deducted from the USDC output). Named for the output token, not the input. |
-| FLAT_FEE_USDD | decimal | 0.1 | Tiny USDD threshold / micro gating. |
-| DYNAMIC_FEE_BPS | int | 10 | Applied both directions on success (0 = disable). |
-| MIN_DEPOSIT_USDC | decimal | 0.2 | Minimum USDC swapped (= 2x FLAT_FEE_USDD, nets ~0.0998 USDD). Values below 2x the flat fee are raised to it at startup and logged. |
-| MIN_CREDIT_USDD | decimal | 1.0 | Minimum USDD swapped (= 2x FLAT_FEE_USDC, nets ~0.499 USDC). Values below 2x the flat fee are raised to it at startup and logged. Credits below it are recorded and booked as fees. |
-| DUST_CREDIT_USDD | decimal | 0.01 | Anti-DoS dust floor. Credits below this are ignored entirely (no state, no accounting). Credits between this and MIN_CREDIT_USDD are recorded so the funds remain traceable. |
+| FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **Nexus→Solana** path, represented in Solana output base units. Must be exactly representable at both configured token precisions. |
+| FLAT_FEE_USDD | decimal | 0.1 | Fixed fee on the **Solana→Nexus** path, represented in Nexus output base units; the same token value is converted independently to Solana base units for refunds. Must be exactly representable at both configured precisions. |
+| DYNAMIC_FEE_BPS | int | 10 | Applied to the input amount in each direction, in that input token’s base-unit scale (0 = disable). |
+| MIN_DEPOSIT_USDC | decimal | 0.2 | Minimum Solana-side input (default = 2x the Solana-equivalent `FLAT_FEE_USDD`); values below the floor are raised at startup and logged. |
+| MIN_CREDIT_USDD | decimal | 1.0 | Minimum Nexus-side input (default = 2x the Nexus-equivalent `FLAT_FEE_USDC`); values below the floor are raised at startup and logged. Credits below it are recorded and booked as fees. |
+| DUST_CREDIT_USDD | decimal | 0.01 | Nexus-side anti-DoS floor (default = one tenth of the Nexus-equivalent `FLAT_FEE_USDC`). Credits below it are ignored; credits up to `MIN_CREDIT_USDD` remain traceable. |
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
 | NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | **Currently inert.** Intended to cover the on-chain cost of a Nexus refund, but no code path deducts it: all four refund sites return the full credited amount, so the operator absorbs the Nexus transaction cost. Set it if you like — nothing reads it beyond the unused `_apply_congestion_fee()` helper. |
 
-## Exposure Caps & Alerting
+## Production Admission, Exposure Caps & Alerting
+
+`SWAP_PRODUCTION_MODE` defaults to `false` for local development and test networks. Its accepted
+values are `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive; surrounding
+whitespace is accepted). Any other present value fails startup rather than silently disabling the
+production gate. When it is `true`, startup refuses to open the state database or start polling
+unless both single-swap caps, the daily Solana payout cap, one alert route, and both chain-side
+quarantine destinations are configured with non-zero/non-empty values. This is a configuration
+admission check, not proof that the alert route is deliverable; test the configured channel as part
+of the live acceptance matrix.
+
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| MAX_SWAP_USDC | decimal | 0 | Largest single USDC→USDD deposit accepted; larger is refunded. 0 disables. |
-| MAX_SWAP_USDD | decimal | 0 | Largest single USDD→USDC credit accepted; larger is refunded. 0 disables. |
-| DAILY_PAYOUT_CAP_USDC | decimal | 0 | Rolling 24h ceiling on total outbound USDC, enforced at the single send choke point. 0 disables. |
-| ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Without a channel, safety signals only reach stdout. |
-| ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. |
+| SWAP_PRODUCTION_MODE | bool | false | Enables mandatory production startup controls. |
+| MAX_SWAP_USDC | decimal | 0 | Largest single USDC→USDD deposit accepted; larger is refunded. 0 disables. Required > 0 in production mode. |
+| MAX_SWAP_USDD | decimal | 0 | Largest single USDD→USDC credit accepted; larger is refunded. 0 disables. Required > 0 in production mode. |
+| DAILY_PAYOUT_CAP_USDC | decimal | 0 | Rolling 24h ceiling on total outbound USDC, enforced at the single send choke point. 0 disables. Required > 0 in production mode. |
+| ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Required in production mode unless `ALERT_COMMAND` is set. |
+| ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. Required in production mode unless `ALERT_WEBHOOK_URL` is set. |
 | ALERT_MIN_INTERVAL_SEC | int | 300 | Per-event dedupe window. |
+| USDC_QUARANTINE_ACCOUNT | pubkey |  | Self-owned Solana SPL token account for failed USDC refunds. Required in production mode. |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | str |  | Self-owned Nexus token account for the separately authorized durable-intent quarantine disposition. Required in production mode. |
 
 ## Operator Dashboard (read-only UI)
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
 | DASHBOARD_HOST | str | 127.0.0.1 | Bind address. Anything non-loopback requires DASHBOARD_TOKEN; the dashboard refuses to start otherwise. |
 | DASHBOARD_PORT | int | 8787 | |
-| DASHBOARD_TOKEN | str |  | Bearer token. Required for non-loopback binds; recommended always. |
+| DASHBOARD_TOKEN | str |  | Bearer token. Required for non-loopback binds; recommended always. Supply only in `Authorization: Bearer <token>` (normally injected by a TLS reverse proxy); query-string tokens are rejected. |
 
 ## Micro / Advanced Handling Flags
 | Var | Type | Default | Notes |
@@ -131,25 +146,19 @@ Legend:
 | HEARTBEAT_WATERLINE_SOLANA_FIELD | str | last_safe_timestamp_solana | Field name on asset. |
 | HEARTBEAT_WATERLINE_NEXUS_FIELD | str | last_safe_timestamp_nexus | Field name on asset. MUST match the asset (format=basic locks fields at creation); a mismatch makes every heartbeat update fail atomically. |
 
-## Fee Conversion / Backing (Optional Feature Gate)
+## Backing Safety Monitoring
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| FEE_CONVERSION_ENABLED | bool | false | Legacy switch. Automated conversion remains safety-disabled in code until durable intent records and chain reconciliation exist; setting this true does not execute fund movements. |
-| FEE_CONVERSION_MIN_USDC | int | 0 | Minimum base units before attempt. |
-| SOL_TOPUP_MIN_LAMPORTS | int | 0 | Trigger threshold. |
-| SOL_TOPUP_TARGET_LAMPORTS | int | 0 | Refill target. |
-| NEXUS_NXS_TOPUP_MIN | int | 0 | Placeholder threshold for NXS. |
-| BACKING_DEFICIT_BPS_ALERT | int | 10 | Alert when backing < 99.9%. |
-| BACKING_DEFICIT_PAUSE_PCT | int | 90 | Pause swaps if backing ratio < this. |
-| BACKING_RECONCILE_INTERVAL_SEC | int | 3600 | Minimum spacing between reconcile mints. |
-| BACKING_SURPLUS_MINT_THRESHOLD_USDC | decimal | 20 | Only mint when vault > threshold. |
-| TARGET_SOL_PER_NXS_NUM | int | 1 | Target SOL numerator. |
-| TARGET_SOL_PER_NXS_DEN | int | 10000 | Target SOL denominator. |
+| BACKING_DEFICIT_BPS_ALERT | int | 10 | Alert threshold for backing deficit. |
+| BACKING_DEFICIT_PAUSE_PCT | int | 90 | Pause new swaps if backing ratio < this. |
+| BACKING_RECONCILE_INTERVAL_SEC | int | 3600 | Minimum spacing between read-only backing/surplus checks. |
+| BACKING_SURPLUS_MINT_THRESHOLD_USDC | decimal | 20 | Minimum vault balance for a read-only backing-surplus operator alert. It does not authorize a mint. |
 
 ## Quarantine & Accounts
 | Var | Type | Default | Notes |
 |-----|------|---------|-------|
-| USDC_QUARANTINE_ACCOUNT | pubkey |  | Holds USDC from failed refund attempts. |
+| USDC_QUARANTINE_ACCOUNT | pubkey |  | Holds USDC from failed refund attempts. Required in production mode; repeated above with other admission controls. |
+| NEXUS_USDD_QUARANTINE_ACCOUNT | str |  | Holds Nexus-side credits for a separately authorized durable-intent quarantine disposition. Required in production mode; repeated above with other admission controls. |
 
 ## Operational Philosophy
 - All monetary thresholds are enforced before expensive lookups (DoS mitigation).
@@ -169,4 +178,5 @@ At a minimum your `.env` must define: `SOLANA_RPC_URL`, `VAULT_KEYPAIR`, `VAULT_
 `config.py` raises on startup if any required var is missing; optional vars fall back to defaults above. Boolean parsing: values in ("1","true","yes","on") are treated as True case‑insensitively.
 
 ---
-See `SECURITY.md` for secure handling recommendations (permissions, rotation, secrets hygiene).
+See [docs/SECURITY.md](docs/SECURITY.md) for secure handling recommendations (permissions,
+rotation, and secrets hygiene).

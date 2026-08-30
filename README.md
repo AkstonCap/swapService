@@ -12,6 +12,8 @@ Configuration reference: **`CONFIG.md`**.
 | Document | Status | Read it for |
 |----------|--------|-------------|
 | [`docs/EVALUATION.md`](docs/EVALUATION.md) | **Current remediation plan** | Authoritative issue register, severity, repair priority, exit criteria and deployment definition. |
+| [`docs/DEVELOPMENT_REVIEW_2026-08-29.md`](docs/DEVELOPMENT_REVIEW_2026-08-29.md) | **Current weekly review** | Review of committed controls through `5e7d3b8` and the separate, not-commit-ready staged reconciliation proposal. |
+| [`docs/DEVELOPMENT_REVIEW_2026-08-28.md`](docs/DEVELOPMENT_REVIEW_2026-08-28.md) | Review history | Evidence-backed review of the preceding repair series through `f614897`. |
 | [`docs/POST_CHANGE_REVIEW_2026-08-24.md`](docs/POST_CHANGE_REVIEW_2026-08-24.md) | Review evidence | Independent/static review evidence for commit `1e4f20c` that feeds the current evaluation. |
 | [`docs/DEVELOPMENT_REVIEW_2026-08-24.md`](docs/DEVELOPMENT_REVIEW_2026-08-24.md) | Fix history | Original review, Critical findings, and the repair sequence that led to `1e4f20c`. |
 | [`docs/RISK_ASSESSMENT.md`](docs/RISK_ASSESSMENT.md) | History with current update | Whole-system risk history and current safety-gate note. |
@@ -243,8 +245,10 @@ Policy notes on USDD → USDC:
 - Solana transfers include confirmation attempts.
  - If all refund attempts fail:
    - USDC→USDD path: the remaining refundable amount (after the last attempt's flat fee) is moved from the vault USDC token account to a self-owned quarantine USDC token account.
-   - USDD→USDC path: the remaining refundable USDD is moved from the treasury to a self-owned Nexus USDD quarantine account.
-   - In both cases, the event is recorded in the `quarantined_sigs` or `quarantined_txids` database table for manual inspection.
+   - USDD→USDC path: no automatic Nexus quarantine or refund debit is issued. The source
+     credit is held for operator review; any future Nexus move must use a durable intent,
+     chain-reference resolution and separately authorized disposition.
+   - In both cases, the event is recorded for manual inspection.
 
 ## Finding and verifying a bridge
 

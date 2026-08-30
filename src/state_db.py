@@ -1,6 +1,7 @@
-import sqlite3
+import hashlib
 import os
-from typing import List, Optional, Tuple
+import sqlite3
+import time
 from typing import List, Optional, Tuple
 
 DB_PATH = os.getenv("STATE_DB_PATH", "swap_service.db")
@@ -93,6 +94,9 @@ def init_db():
             amount_usdc_units INTEGER,
             txid TEXT,
             amount_usdd REAL,
+            amount_usdd_units INTEGER,
+            nexus_destination TEXT,
+            memo TEXT,
             status TEXT,
             reference INTEGER
         )
@@ -104,6 +108,7 @@ def init_db():
             memo TEXT,
             from_address TEXT,
             amount_usdc_units INTEGER,
+            amount_usdd_units INTEGER,
             status TEXT,
             txid TEXT
         )
@@ -153,6 +158,7 @@ def init_db():
             txid TEXT PRIMARY KEY,
             timestamp INTEGER,
             amount_usdd REAL,
+            amount_usdd_units INTEGER,
             from_address TEXT,
             to_address TEXT,
             owner TEXT,
@@ -223,6 +229,57 @@ def init_db():
             last_timestamp INTEGER
         )
     """)
+
+    # Every Nexus-side transfer must first have a durable local intent. A source
+    # credit may authorize exactly one remote debit: allowing one "refund" and one
+    # "quarantine" intent for the same source would permit two dispositions of the
+    # same funds. The source-only unique index below also migrates existing ledgers.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS nexus_transfer_intents (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            source_txid TEXT NOT NULL,
+            from_address TEXT NOT NULL,
+            to_address TEXT NOT NULL,
+            amount_usdd_units INTEGER NOT NULL,
+            reference TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            remote_txid TEXT,
+            created_timestamp INTEGER NOT NULL,
+            last_attempt_timestamp INTEGER,
+            resolved_timestamp INTEGER,
+            UNIQUE(kind, source_txid)
+        )
+    """)
+    try:
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_transfer_intents_source "
+            "ON nexus_transfer_intents(source_txid)"
+        )
+    except sqlite3.IntegrityError as exc:
+        # Do not guess which pre-upgrade duplicate intent is safe. Refusing startup
+        # preserves both records for manual chain-evidence resolution.
+        conn.close()
+        raise RuntimeError(
+            "unsafe duplicate Nexus transfer intents share a source_txid; "
+            "resolve them manually before starting the service"
+        ) from exc
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nexus_transfer_intents_status ON nexus_transfer_intents(status, created_timestamp)")
+    # The ledger is append-only: authorization and final disposition are not inferred
+    # from a mutable status value, but attributable to a named operator and rationale.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS nexus_transfer_audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            intent_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            evidence TEXT,
+            timestamp INTEGER NOT NULL,
+            UNIQUE(intent_id, action)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nexus_transfer_audit_events_intent ON nexus_transfer_audit_events(intent_id, timestamp)")
     
     # Counters table for atomic sequence generation (e.g., reference numbers)
     cursor.execute("""
@@ -320,17 +377,485 @@ def init_db():
     if "hold_reason" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN hold_reason TEXT")
 
-    # unprocessed_sigs.reference records the Nexus debit reference BEFORE the debit is
-    # attempted, so a crash or an unparsed CLI response can be resolved against the
-    # chain instead of being guessed at (which previously double-minted, or minted
-    # AND refunded).
+    # A debit intent fixes both the exact Nexus output and its unique reference before
+    # the debit is attempted. The output cannot be recomputed later under changed fee
+    # configuration: that would turn an active first-time recipient into a false
+    # remote surplus during reconciliation.
     cursor.execute("PRAGMA table_info(unprocessed_sigs)")
     _usig_cols = {row[1] for row in cursor.fetchall()}
     if "reference" not in _usig_cols:
         cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN reference INTEGER")
+    if "amount_usdd_units" not in _usig_cols:
+        cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN amount_usdd_units INTEGER")
+
+    # Completed Solana->Nexus mints must retain all evidence required for later
+    # reconciliation.  The queue row is deliberately removed after confirmation, so
+    # recovering its memo or destination by joining back to unprocessed_sigs makes a
+    # missing-evidence reconciliation look healthy.
+    cursor.execute("PRAGMA table_info(processed_sigs)")
+    _psig_cols = {row[1] for row in cursor.fetchall()}
+    for _column, _definition in (
+        ("amount_usdd_units", "INTEGER"),
+        ("nexus_destination", "TEXT"),
+        ("memo", "TEXT"),
+    ):
+        if _column not in _psig_cols:
+            cursor.execute(f"ALTER TABLE processed_sigs ADD COLUMN {_column} {_definition}")
+
+    # The legacy REAL token amount cannot safely participate in reconciliation.
+    # Current processed Nexus credits record their source amount in base units; older
+    # rows remain explicitly incomplete rather than being silently rounded.
+    cursor.execute("PRAGMA table_info(processed_txids)")
+    _ptx_cols = {row[1] for row in cursor.fetchall()}
+    if "amount_usdd_units" not in _ptx_cols:
+        cursor.execute("ALTER TABLE processed_txids ADD COLUMN amount_usdd_units INTEGER")
 
     conn.commit()
     conn.close()
+
+
+# Nexus transfer intents -------------------------------------------------------
+#
+# A Nexus CLI timeout/non-zero result is not proof the node did not accept a
+# debit.  These rows capture all debit inputs before invocation and make the
+# persisted reference the only identifier used for post-crash resolution.
+_NEXUS_TRANSFER_COLUMNS = (
+    "id", "kind", "source_txid", "from_address", "to_address",
+    "amount_usdd_units", "reference", "status", "remote_txid",
+    "created_timestamp", "last_attempt_timestamp", "resolved_timestamp",
+)
+_NEXUS_TRANSFER_AUDIT_COLUMNS = (
+    "id", "intent_id", "action", "actor", "rationale", "evidence", "timestamp",
+)
+
+
+def _nexus_transfer_intent_id(source_txid: str) -> str:
+    """Stable identity for the one permissible Nexus transfer per source credit."""
+    return "nexus-transfer-" + hashlib.sha256(source_txid.encode("utf-8")).hexdigest()[:32]
+
+
+def _nexus_transfer_reference(intent_id: str) -> str:
+    # Reference fields are visible on-chain and may be length-limited. The durable
+    # database row holds the expanded context; this compact value is unique/stable.
+    return "bridge-xfer:" + intent_id.rsplit("-", 1)[-1]
+
+
+def _nexus_transfer_intent_dict(row) -> dict | None:
+    return dict(zip(_NEXUS_TRANSFER_COLUMNS, row)) if row else None
+
+
+def _nexus_transfer_audit_dict(row) -> dict | None:
+    return dict(zip(_NEXUS_TRANSFER_AUDIT_COLUMNS, row)) if row else None
+
+
+def _require_operator_text(value: str, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"Nexus transfer {field} is required")
+    if len(text) > 500:
+        raise ValueError(f"Nexus transfer {field} is too long")
+    return text
+
+
+def _record_nexus_transfer_audit_event(
+    conn, *, intent_id: str, action: str, actor: str, rationale: str, evidence: str | None = None
+) -> None:
+    """Append one immutable operator event. Repeating an action is idempotent."""
+    conn.execute(
+        """INSERT OR IGNORE INTO nexus_transfer_audit_events
+           (intent_id, action, actor, rationale, evidence, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (intent_id, action, actor, rationale, evidence, int(time.time())),
+    )
+
+
+def create_nexus_transfer_intent(
+    *,
+    kind: str,
+    source_txid: str,
+    from_address: str,
+    to_address: str,
+    amount_usdd_units: int,
+) -> dict:
+    """Persist a deterministic Nexus transfer intent before any CLI invocation.
+
+    Repeating the exact request returns the existing row. Reusing the same source
+    with different transfer inputs is rejected: it would be a distinct remote debit
+    without a distinct source authorization.
+    """
+    kind = str(kind or "").strip()
+    source_txid = str(source_txid or "").strip()
+    from_address = str(from_address or "").strip()
+    to_address = str(to_address or "").strip()
+    units = int(amount_usdd_units)
+    if not kind or not source_txid or not from_address or not to_address or units <= 0:
+        raise ValueError("Nexus transfer intent requires kind, source, addresses and positive units")
+
+    intent_id = _nexus_transfer_intent_id(source_txid)
+    reference = _nexus_transfer_reference(intent_id)
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
+            " FROM nexus_transfer_intents WHERE source_txid = ?",
+            (source_txid,),
+        ).fetchone()
+        if row:
+            existing = _nexus_transfer_intent_dict(row)
+            if existing is None:  # pragma: no cover - row is truthy above
+                raise RuntimeError("could not decode existing Nexus transfer intent")
+            expected = (kind, from_address, to_address, units)
+            observed = (existing["kind"], existing["from_address"], existing["to_address"],
+                        int(existing["amount_usdd_units"]))
+            if observed != expected:
+                raise ValueError("existing Nexus transfer intent conflicts with requested inputs")
+            conn.commit()
+            return existing
+        conn.execute(
+            """INSERT INTO nexus_transfer_intents
+               (id, kind, source_txid, from_address, to_address, amount_usdd_units,
+                reference, status, created_timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?)""",
+            (intent_id, kind, source_txid, from_address, to_address, units, reference, now),
+        )
+        conn.commit()
+        created = get_nexus_transfer_intent(intent_id, conn=conn)
+        if created is None:  # pragma: no cover - same transaction inserted the row
+            raise RuntimeError("could not read newly created Nexus transfer intent")
+        return created
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_nexus_transfer_intent(intent_id: str, *, conn=None) -> dict | None:
+    """Return the complete durable transfer record, if it exists."""
+    owns_connection = conn is None
+    conn = conn or sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
+            " FROM nexus_transfer_intents WHERE id = ?", (intent_id,)
+        ).fetchone()
+        return _nexus_transfer_intent_dict(row)
+    finally:
+        if owns_connection:
+            conn.close()
+
+
+def claim_nexus_transfer_intent(intent_id: str) -> dict | None:
+    """Atomically claim one authorized intent for its sole allowed remote invocation."""
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        requested = conn.execute(
+            """SELECT 1 FROM nexus_transfer_audit_events
+               WHERE intent_id = ? AND action = 'execution_requested' AND evidence =
+               (SELECT reference FROM nexus_transfer_intents WHERE id = ?)""",
+            (intent_id, intent_id),
+        ).fetchone()
+        if requested is None:
+            conn.commit()
+            return None
+        updated = conn.execute(
+            """UPDATE nexus_transfer_intents
+               SET status = 'executing', last_attempt_timestamp = ?
+               WHERE id = ? AND status = 'authorized'""",
+            (now, intent_id),
+        ).rowcount
+        if not updated:
+            conn.commit()
+            return None
+        row = get_nexus_transfer_intent(intent_id, conn=conn)
+        if row is None:  # pragma: no cover - UPDATE succeeded for an existing row
+            raise RuntimeError("could not read claimed Nexus transfer intent")
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def recover_interrupted_nexus_transfer_intents() -> int:
+    """Turn pre-completion execution claims into explicit restart holds.
+
+    This is called only during startup, after the singleton lock is held. An ``executing``
+    row proves that the sole permitted CLI attempt may already have reached the node, but
+    the process died before recording a parsed result. It must therefore become
+    ``outcome_unknown`` and require positive chain-reference resolution, never another debit.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        recovered = conn.execute(
+            """UPDATE nexus_transfer_intents
+               SET status = 'outcome_unknown'
+               WHERE status = 'executing'"""
+        ).rowcount
+        conn.commit()
+        return int(recovered)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def authorize_nexus_transfer_intent(
+    intent_id: str, *, actor: str, rationale: str, expected_reference: str
+) -> dict:
+    """Authorize exactly one prepared transfer after an operator confirms its reference."""
+    actor = _require_operator_text(actor, "operator")
+    rationale = _require_operator_text(rationale, "authorization rationale")
+    expected_reference = _require_operator_text(expected_reference, "reference confirmation")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is None:
+            raise ValueError("Nexus transfer intent does not exist")
+        if expected_reference != str(intent["reference"]):
+            raise ValueError("Nexus transfer reference confirmation does not match")
+        if intent["status"] != "prepared":
+            raise ValueError("only a prepared Nexus transfer intent may be authorized")
+        preparation = conn.execute(
+            """SELECT 1 FROM nexus_transfer_audit_events
+               WHERE intent_id = ? AND action = ? AND evidence = ?""",
+            (intent_id, f"prepared_{intent['kind']}", str(intent["reference"])),
+        ).fetchone()
+        if preparation is None:
+            raise ValueError("Nexus transfer requires an audited preparation before authorization")
+        conn.execute("UPDATE nexus_transfer_intents SET status = 'authorized' WHERE id = ?", (intent_id,))
+        _record_nexus_transfer_audit_event(
+            conn, intent_id=intent_id, action="authorized_execution", actor=actor,
+            rationale=rationale, evidence=expected_reference,
+        )
+        conn.commit()
+        authorized = get_nexus_transfer_intent(intent_id, conn=conn)
+        if authorized is None:  # pragma: no cover - same transaction updated the row
+            raise RuntimeError("could not read authorized Nexus transfer intent")
+        return authorized
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def record_nexus_transfer_preparation(
+    intent_id: str, *, actor: str, rationale: str
+) -> None:
+    """Attribute the operator decision that prepared a transfer from a held credit."""
+    actor = _require_operator_text(actor, "operator")
+    rationale = _require_operator_text(rationale, "preparation rationale")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is None or intent["status"] != "prepared":
+            raise ValueError("only a prepared Nexus transfer intent may be attributed")
+        _record_nexus_transfer_audit_event(
+            conn, intent_id=intent_id, action=f"prepared_{intent['kind']}", actor=actor,
+            rationale=rationale, evidence=str(intent["reference"]),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def record_nexus_transfer_execution_request(
+    intent_id: str, *, actor: str, rationale: str
+) -> None:
+    """Durably attribute the manual command that will consume an authorization."""
+    actor = _require_operator_text(actor, "operator")
+    rationale = _require_operator_text(rationale, "execution rationale")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is None or intent["status"] != "authorized":
+            raise ValueError("only an authorized Nexus transfer intent may be executed")
+        _record_nexus_transfer_audit_event(
+            conn, intent_id=intent_id, action="execution_requested", actor=actor,
+            rationale=rationale, evidence=str(intent["reference"]),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_nexus_transfer_audit_events(intent_id: str) -> list[dict]:
+    """Return immutable authorization and disposition events in append order."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_AUDIT_COLUMNS) +
+            " FROM nexus_transfer_audit_events WHERE intent_id = ? ORDER BY id ASC",
+            (intent_id,),
+        ).fetchall()
+        return [event for row in rows if (event := _nexus_transfer_audit_dict(row)) is not None]
+    finally:
+        conn.close()
+
+
+def finalize_nexus_transfer_disposition(
+    intent_id: str, *, actor: str, rationale: str, expected_remote_txid: str
+) -> bool:
+    """Move a held source row only after its completed transfer has exact chain evidence."""
+    actor = _require_operator_text(actor, "operator")
+    rationale = _require_operator_text(rationale, "disposition rationale")
+    expected_remote_txid = _require_operator_text(expected_remote_txid, "remote txid confirmation")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if (intent is None or intent["status"] != "completed" or
+                str(intent.get("remote_txid") or "") != expected_remote_txid):
+            conn.commit()
+            return False
+        source = conn.execute(
+            """SELECT txid, timestamp, amount_usdd, from_address, to_address,
+                      owner_from_address, confirmations_credit, status, amount_usdd_units
+               FROM unprocessed_txids WHERE txid = ?""",
+            (intent["source_txid"],),
+        ).fetchone()
+        if source is None:
+            conn.commit()
+            return False
+        txid, timestamp, amount, sender, treasury, owner, confirmations, source_status, units = source
+        if (source_status != "refund held for operator review" or
+                int(units or -1) != int(intent["amount_usdd_units"]) or
+                str(treasury or "") != str(intent["from_address"])):
+            conn.commit()
+            return False
+        if intent["kind"] == "refund":
+            if str(sender or "") != str(intent["to_address"]):
+                conn.commit()
+                return False
+            conn.execute(
+                """INSERT OR REPLACE INTO refunded_txids
+                   (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address,
+                    confirmations_credit, status, sig)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (txid, timestamp, amount, sender, treasury, owner, confirmations,
+                 "refund_confirmed_by_operator", expected_remote_txid),
+            )
+            action = "finalized_refund"
+        elif intent["kind"] == "quarantine":
+            conn.execute(
+                """INSERT OR REPLACE INTO quarantined_txids
+                   (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (txid, timestamp, amount, sender, treasury, owner, expected_remote_txid,
+                 "quarantine_confirmed_by_operator"),
+            )
+            action = "finalized_quarantine"
+        else:
+            conn.commit()
+            return False
+        conn.execute("DELETE FROM unprocessed_txids WHERE txid = ?", (txid,))
+        _record_nexus_transfer_audit_event(
+            conn, intent_id=intent_id, action=action, actor=actor, rationale=rationale,
+            evidence=expected_remote_txid,
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def update_nexus_transfer_intent(
+    intent_id: str,
+    *,
+    status: str,
+    remote_txid: str | None = None,
+    resolved: bool = False,
+) -> None:
+    """Advance one execution intent without allowing ambiguous state regression.
+
+    The row is a durable record of the sole permitted Nexus debit.  In particular,
+    completed chain evidence must never be replaced by ``outcome_unknown`` by a
+    delayed recovery path; that would hide proof needed for operator disposition.
+    """
+    transitions = {
+        "executing": {"submitted", "outcome_unknown", "completed"},
+        "submitted": {"completed"},
+        "outcome_unknown": {"completed"},
+    }
+    status = str(status or "").strip()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is None:
+            raise ValueError("Nexus transfer intent does not exist")
+        current_status = str(intent["status"])
+        if status not in transitions.get(current_status, set()):
+            raise ValueError(
+                f"cannot transition Nexus transfer intent from {current_status!r} to {status!r}"
+            )
+        next_remote_txid = str(remote_txid or intent.get("remote_txid") or "").strip()
+        if status in {"submitted", "completed"} and not next_remote_txid:
+            raise ValueError("submitted or completed Nexus transfer intent requires a remote txid")
+        if resolved and status != "completed":
+            raise ValueError("only a completed Nexus transfer intent may be marked resolved")
+        now = int(time.time())
+        conn.execute(
+            """UPDATE nexus_transfer_intents
+               SET status = ?, remote_txid = COALESCE(?, remote_txid),
+                   resolved_timestamp = CASE WHEN ? THEN ? ELSE resolved_timestamp END
+               WHERE id = ?""",
+            (status, remote_txid, 1 if resolved else 0, now, intent_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_nexus_transfer_intents_by_status(statuses: tuple[str, ...], limit: int = 200) -> list[dict]:
+    """List nonterminal intents for positive on-chain reference resolution."""
+    if not statuses:
+        return []
+    marks = ",".join("?" for _ in statuses)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
+            f" FROM nexus_transfer_intents WHERE status IN ({marks}) "
+            "ORDER BY created_timestamp ASC LIMIT ?",
+            tuple(statuses) + (int(limit),),
+        ).fetchall()
+        return [intent for row in rows
+                if (intent := _nexus_transfer_intent_dict(row)) is not None]
+    finally:
+        conn.close()
 
 
 ## Unprocessed Signatures
@@ -517,13 +1042,93 @@ def update_unprocessed_sig_txid(sig: str, txid: str | None):
     conn.commit()
     conn.close()
 
-def set_unprocessed_sig_reference(sig: str, reference: int | None):
-    """Persist the Nexus debit reference for a deposit (written BEFORE the debit)."""
+def set_unprocessed_sig_reference(sig: str, reference: int) -> None:
+    """Persist one immutable Nexus debit reference before any remote action."""
+    if isinstance(reference, bool) or not isinstance(reference, int):
+        raise ValueError("Nexus debit reference must be an integer")
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE unprocessed_sigs SET reference = ? WHERE sig = ?", (reference, sig))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.execute(
+            """UPDATE unprocessed_sigs SET reference = ?
+               WHERE sig = ? AND (reference IS NULL OR reference = ?)""",
+            (reference, sig, reference),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError(
+                f"queued deposit {sig} is missing or already has a different Nexus reference"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_unprocessed_sig_debit_intent(sig: str, reference: int, amount_usdd_units: int) -> None:
+    """Atomically persist an intent and make it recoverable before a debit.
+
+    The same transaction moves the deposit out of ``ready for processing``.  A crash
+    after this commit must enter chain-evidence resolution rather than permit a fresh
+    processing pass to allocate another reference or submit a second Nexus debit.
+    """
+    if isinstance(reference, bool) or not isinstance(reference, int):
+        raise ValueError("Nexus debit reference must be an integer")
+    if (isinstance(amount_usdd_units, bool) or not isinstance(amount_usdd_units, int)
+            or amount_usdd_units <= 0):
+        raise ValueError("Nexus debit amount must be positive integer base units")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            """UPDATE unprocessed_sigs
+           SET reference = ?, amount_usdd_units = ?,
+               status = CASE WHEN status = 'ready for processing'
+                             THEN 'debit in flight' ELSE status END
+           WHERE sig = ?
+             AND status IN ('ready for processing', 'debit in flight',
+                            'debited, awaiting confirmation')
+             AND (reference IS NULL OR reference = ?)
+             AND (amount_usdd_units IS NULL OR amount_usdd_units = ?)""",
+            (reference, amount_usdd_units, sig, reference, amount_usdd_units),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError(
+                f"queued deposit {sig} is missing or already has a different Nexus debit intent"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unprocessed_sig_reference(sig: str) -> int | None:
+    """Return the exact persisted debit reference for one queued deposit."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT reference FROM unprocessed_sigs WHERE sig = ?", (sig,)
+        ).fetchone()
+        if not row or row[0] is None:
+            return None
+        if isinstance(row[0], bool) or not isinstance(row[0], int):
+            raise ValueError(f"queued deposit {sig} has a non-integer Nexus reference")
+        return row[0]
+    finally:
+        conn.close()
+
+
+def get_unprocessed_sig_nexus_amount(sig: str) -> int | None:
+    """Return the exact output persisted before a Nexus debit was attempted."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT amount_usdd_units FROM unprocessed_sigs WHERE sig = ?", (sig,)
+        ).fetchone()
+        if not row or row[0] is None:
+            return None
+        if isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] <= 0:
+            raise ValueError(f"queued deposit {sig} has invalid Nexus debit amount")
+        return row[0]
+    finally:
+        conn.close()
 
 
 def get_sigs_pending_debit_verification(statuses: tuple, limit: int = 500) -> List[Tuple]:
@@ -569,6 +1174,10 @@ def mark_processed_sig(
     amount_usdd: float | None = None,
     status: str | None = None,
     reference: int | None = None,
+    *,
+    amount_usdd_units: int | None = None,
+    nexus_destination: str | None = None,
+    memo: str | None = None,
 ):
     """Insert/update a processed signature record.
 
@@ -586,10 +1195,13 @@ def mark_processed_sig(
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT OR REPLACE INTO processed_sigs (sig, timestamp, amount_usdc_units, txid, amount_usdd, status, reference)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO processed_sigs
+        (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
+         nexus_destination, memo, status, reference)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (sig, timestamp, amount_usdc_units, txid, amount_usdd, status, reference),
+        (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
+         nexus_destination, memo, status, reference),
     )
     conn.commit()
     conn.close()
@@ -717,16 +1329,19 @@ def mark_processed_txid(
     owner: str,
     sig: str,
     status: str | None = None,
+    *,
+    amount_usdd_units: int | None = None,
 ):
     """Insert/update processed txid. Status optional (e.g. 'credited', 'skipped')."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT OR REPLACE INTO processed_txids (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO processed_txids
+        (txid, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status),
+        (txid, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status),
     )
     conn.commit()
     conn.close()

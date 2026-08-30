@@ -12,7 +12,7 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 | Item | Guidance |
 |------|----------|
 | Solana Vault Keypair | Store outside repo; restrict permissions (0600). Consider hardware signer if volume grows. |
-| Nexus PIN / Session | Both are credentials — on a `multiuser=1` node the session id plus the PIN authorises spending. Both are redacted from logs and alerts. Never log. Use environment variable injection (systemd drop‑in / Docker secret). **Known limitation:** the PIN is currently passed as a Nexus CLI *argument*, so it is visible to any local user via `ps` / `/proc/<pid>/cmdline` for the duration of the call. Treat local shell access to the host as equivalent to holding the PIN. |
+| Nexus PIN / Session | Both are credentials — on a `multiuser=1` node the session id plus the PIN authorises spending. Both are redacted from logs and alerts. Never log them. In `SWAP_PRODUCTION_MODE=true`, the service requires `NEXUS_API_URL` with `https`, `NEXUS_API_USER`, and `NEXUS_API_PASSWORD`; it sends the PIN/session only in the authenticated HTTPS POST body, never in a child-process argv. Keep the endpoint local or firewall/VPN-restricted, validate its TLS certificate, and use environment-variable injection (systemd drop-in / Docker secret). The CLI fallback is development-only; local shell access remains sensitive because it can read the service environment. |
 | Backups | Encrypted offsite copy of keypair + state files daily. |
 
 ## File Permissions
@@ -39,7 +39,12 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Consider raising `SOLANA_POLL_INTERVAL` or lowering `SOLANA_MAX_TX_FETCH_PER_POLL` under sustained attack.
 
 ## Refund Safety
-- Attempts bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion USDC moves to `USDC_QUARANTINE_ACCOUNT` and USDD is transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`; if the latter is unset the USDD stays in the treasury and the row records `quarantined (USDD NOT moved)`.
+- Attempts are bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion, USDC may move to `USDC_QUARANTINE_ACCOUNT`; USDD→USDC credits instead remain held because automatic Nexus refunds and quarantine moves are disabled.
+- Any future Nexus account debit must first create a durable intent containing source, destination, exact base units and a unique reference. Timeout, non-zero CLI exit or unparsed output is `outcome_unknown` and requires positive chain-reference resolution; it is never retried blindly.
+- The only supported Nexus held-credit disposition is `nexus_transfer_operator.py`: a named
+  operator prepares an intent, confirms its exact reference, authorizes it, then issues one
+  debit. Finalization also requires the exact positively observed remote txid and records
+  immutable authorization/execution/disposition evidence in SQLite. See `SETUP.md`.
 - Keep quarantine accounts separate from active treasury/vault to simplify reconciliation and avoid accidental reuse.
 
 ## Heartbeat & Liveness

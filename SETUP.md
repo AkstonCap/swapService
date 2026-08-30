@@ -37,7 +37,7 @@ A Python service that automates swaps between USDC (Solana) and USDD (Nexus). It
 1. User sends USDD to treasury.
 2. User publishes or updates Nexus Asset containing `txid_toService` and `receival_account`.
 3. Service polls treasury transactions; for each credit above threshold it queries assets by `txid_toService` & owner.
-4. Valid mapping -> send USDC to receival account (ATA required). Missing mapping -> pending until timeout -> refund.
+4. Valid mapping -> send USDC to receival account (ATA required). Missing mapping -> hold for operator review (no automatic Nexus refund).
 5. Micro credits below `MIN_CREDIT_USDD` treated as fees (aggregated fee-only entries).
 
 ### State & Database
@@ -94,38 +94,43 @@ solana --version      # Should be 1.16+ or 2.x
 spl-token --version   # Should be 3.x+
 ```
 
-### Nexus Node & CLI Access
+### Nexus Node & API Access
 
-The service invokes the Nexus CLI binary as a subprocess for all Nexus operations (debits, asset queries, heartbeat updates).
+The service sends profile-authenticated Nexus operations through the daemon API. In production it
+uses HTTPS POST rather than a CLI child process, so profile credentials never appear in `ps` or
+`/proc/<pid>/cmdline`.
 
 **Requirements:**
-1. **Nexus daemon running** — The CLI connects to a local Nexus daemon. Ensure the daemon is started and synced.
-2. **API server enabled** — The daemon must have its API server active. Configure in `nexus.conf`:
+1. **Nexus daemon running and synced** — Verify `system/get/info` before allowing a live bridge to process funds.
+2. **Authenticated TLS API enabled** — Production `nexus.conf` must contain:
+   ```conf
+   apiuser=<random-api-user>
+   apipassword=<random-api-password>
+   apiauth=1
+   apissl=1
+   apisslrequired=1
+   apisslport=8443
+   apiremote=0
    ```
-   # Option A: Disable authentication (local/trusted networks only)
-   apiauth=0
-
-   # Option B: Set API credentials (recommended for remote access)
-   apiuser=your_api_user
-   apipassword=your_api_password
-   ```
-   Without either setting, the API server will not start and the CLI will not work.
-3. **Active session** — The service uses `pin=<PIN>` in CLI commands, which requires an active session. Create one before starting the service:
+   The API credentials protect node access; they are distinct from Nexus profile credentials.
+   A service on the same host may use `https://127.0.0.1:8443`; otherwise restrict access with
+   a firewall/VPN and validate the server certificate. Do not use `--insecure`-style TLS bypasses.
+3. **Active profile/session** — `pin=<PIN>` remains a Nexus command parameter and a multiuser
+   node requires a session, but the production transport sends both only in the HTTPS POST body.
+   Create a session on the trusted node before starting the service:
    ```bash
    ./nexus sessions/create/local username=<YOUR_USER> password=<YOUR_PASS> pin=<YOUR_PIN>
    ```
-   The session must remain active while the service runs. If the daemon restarts, re-create the session.
-4. **CLI binary accessible** — Set `NEXUS_CLI_PATH` in `.env` to the path of the CLI binary:
+   The session must remain active while the service runs. If the daemon restarts, re-create it.
+4. **Production environment transport** — configure:
    ```env
-   NEXUS_CLI_PATH=./nexus       # Relative (from repo root)
-   NEXUS_CLI_PATH=/usr/bin/nexus # Absolute
+   NEXUS_API_URL=https://127.0.0.1:8443
+   NEXUS_API_USER=<apiuser>
+   NEXUS_API_PASSWORD=<apipassword>
    ```
-   On Linux/macOS, ensure it's executable: `chmod +x ./nexus`
-
-**Nexus CLI Timeout:** If the CLI is slow (e.g., large transaction history), increase:
-```env
-NEXUS_CLI_TIMEOUT_SEC=20  # Default 20s; increase for slow nodes
-```
+   `SWAP_PRODUCTION_MODE=true` rejects a missing/non-HTTPS URL, embedded URL credentials,
+   or missing Basic-auth values before opening SQLite or polling either the Nexus or Solana chain.
+   The CLI path remains a local-development compatibility fallback only.
 
 ### Nexus Account Setup
 
@@ -179,10 +184,17 @@ Key required:
 Also required in practice:
 - `NEXUS_HEARTBEAT_ASSET_NAME` — without the heartbeat asset the Solana poller cannot start
 
+Before a live production start, set `SWAP_PRODUCTION_MODE=true`, then set positive values for
+`MAX_SWAP_USDC`, `MAX_SWAP_USDD`, and `DAILY_PAYOUT_CAP_USDC`; configure either
+`ALERT_WEBHOOK_URL` or `ALERT_COMMAND`; and set both `USDC_QUARANTINE_ACCOUNT` and
+`NEXUS_USDD_QUARANTINE_ACCOUNT`. The production switch accepts only
+`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other present value fails startup. The
+service refuses to start in production mode if any admission control is absent and returns a
+non-zero status to its supervisor. A configured route is not evidence of delivery: send and
+verify a test alert separately.
+
 Optional but recommended:
 - `HELIUS_RPC_URL` or `HELIUS_API_KEY` — optimized Solana deposit polling (1-2 calls vs N+1)
-- `ALERT_WEBHOOK_URL` or `ALERT_COMMAND` — **without one, safety alerts only reach stdout**
-- `NEXUS_USDD_QUARANTINE_ACCOUNT` / `USDC_QUARANTINE_ACCOUNT` — isolating failed refunds
 - `MAX_SWAP_USDC` / `MAX_SWAP_USDD` / `DAILY_PAYOUT_CAP_USDC` — exposure caps (0 = disabled)
 - `SOLANA_DEPOSIT_COMMITMENT` — leave at `finalized`; `confirmed` can be reorged after you have minted
 
@@ -268,7 +280,9 @@ spl-token balance <VAULT_USDC_ACCOUNT>
 
 **1. Daemon + session**
 ```bash
-# nexus.conf must have apiauth=0 (local only) or apiuser/apipassword set
+# Production requires authenticated TLS: apiauth=1, apiuser/apipassword, apissl=1,
+# apisslrequired=1, and an HTTPS API port. apiauth=0 is only for an isolated local
+# development node with apiremote=0; never use it for a live bridge.
 ./nexus sessions/create/local username=<USER> password=<PASS> pin=<PIN>
 ```
 The session must stay active while the service runs; re-create it if the daemon restarts.
@@ -292,7 +306,7 @@ Which calls are affected, per the bundled API docs:
 |------------|---------------------------|---------|
 | `finance/*` | **Required** | USDD debits, refunds, supply and balance reads |
 | `assets/*` | **Required** | Heartbeat create/read/update |
-| `market/*` | **Required** | Optional DEX fee conversions |
+| `market/*` | Not used | Automatic DEX fee conversion is intentionally absent; backing surplus is alert-only |
 | `register/*` | Not used | Deposit scanning, asset mapping lookups, account validation |
 
 The service validates this at startup and refuses to proceed quietly if
@@ -300,8 +314,9 @@ The service validates this at startup and refuses to proceed quietly if
 heartbeat update would fail and it would look like a total Nexus outage.
 
 > The session id is a credential: combined with the PIN it authorises spending. It is
-> redacted from logs and alerts, but like the PIN it is passed as a CLI argument and is
-> therefore visible to local users via `ps`. See [SECURITY.md](docs/SECURITY.md).
+> redacted from logs and alerts. In production both values are carried only in the HTTPS POST
+> body to the authenticated Nexus API, not a child-process argv; keep the TLS endpoint local or
+> firewall/VPN-restricted and protect the `.env` file. See [docs/SECURITY.md](docs/SECURITY.md).
 
 **2. Accounts**
 
@@ -445,7 +460,7 @@ ssh -L 8787:127.0.0.1:8787 operator@your-host
 |----------|---------|-------|
 | `DASHBOARD_HOST` | `127.0.0.1` | Binding anything else **requires** `DASHBOARD_TOKEN`; the service refuses otherwise |
 | `DASHBOARD_PORT` | `8787` | |
-| `DASHBOARD_TOKEN` | unset | Bearer token (`Authorization: Bearer …`, or `?token=`) |
+| `DASHBOARD_TOKEN` | unset | Bearer token. Send it only as `Authorization: Bearer <token>` (for example, from a TLS reverse proxy); URL query tokens are rejected to prevent credential leakage. |
 
 **What it shows**
 - Backing ratio, vault USDC, circulating USDD, fees collected, 24h payouts against the cap
@@ -470,6 +485,46 @@ Run the tests before exposing it:
 ```bash
 python -m pytest -q tests/test_legacy_scripts.py
 ```
+
+## Nexus Held-Credit Disposition
+
+Automatic Nexus refunds and treasury-to-quarantine movements are intentionally disabled.
+Use `nexus_transfer_operator.py` only after independently reviewing the source credit and
+target-chain evidence. The service loop never invokes this CLI.
+
+Every movement has six durable, inspectable steps. `--operator` and `--reason` are required
+on each human decision; the reference and remote txid must be copied exactly from the prior
+output. Do **not** rerun `execute` after a timeout, non-zero exit, or unparsable response.
+
+```bash
+# 1. Create an immutable intent only for an existing `refund held for operator review` credit.
+python3 nexus_transfer_operator.py prepare --kind refund --txid <CREDIT_TXID> \
+  --operator <NAME> --reason "asset mapping permanently absent"
+
+# 2. Inspect immutable intent inputs, reference, and previous operator events.
+python3 nexus_transfer_operator.py show --intent <INTENT_ID>
+
+# 3. Authorize the exact displayed reference (a separate durable action).
+python3 nexus_transfer_operator.py authorize --intent <INTENT_ID> \
+  --confirm-reference <REFERENCE> --operator <NAME> --reason "evidence reviewed"
+
+# 4. Invoke the Nexus CLI once. A failure is `outcome_unknown`, not permission to retry.
+python3 nexus_transfer_operator.py execute --intent <INTENT_ID> \
+  --operator <NAME> --reason "approved one-time debit"
+
+# 5. Resolve only by a positive on-chain reference match; this command never debits.
+python3 nexus_transfer_operator.py resolve
+
+# 6. Move the held source row to refunded/quarantined only after the exact remote txid matches.
+python3 nexus_transfer_operator.py finalize --intent <INTENT_ID> \
+  --confirm-remote-txid <REMOTE_TXID> --operator <NAME> \
+  --reason "target-node reference and txid confirmed"
+```
+
+Use `prepare --kind quarantine` only when the independently reviewed disposition is a move
+to `NEXUS_USDD_QUARANTINE_ACCOUNT`. `list` and `show` are read-only. The local ledger retains
+who authorized, requested execution, and finalized a disposition; it is not a substitute for
+the required target-node timeout/crash acceptance matrix.
 
 ## Fees & Economics
 
@@ -499,23 +554,26 @@ python -m pytest -q tests/test_legacy_scripts.py
 - Future: optional WebSocket subscription to cut signature polls.
 
 ## Troubleshooting (Highlights)
-See also `SECURITY.md` for security incidents & hardening.
+See also [docs/SECURITY.md](docs/SECURITY.md) for security incidents & hardening.
 
 Missing asset mapping: ensure asset includes both `txid_toService` and `receival_account` before timeout.
 High RPC usage: increase `SOLANA_POLL_INTERVAL`, reduce max fetch caps, or enable delta skip. Consider using Helius for enriched RPC.
 Stalled waterline: investigate unprocessed rows with old timestamps; they may be quarantined or awaiting mapping.
 Refund loop failures: query `quarantined_sigs` and `quarantined_txids` tables; cross-check on-chain balances.
-Nexus CLI errors: verify the daemon is running, a session is active, and `apiauth=0` is set.
+Nexus API errors: verify the daemon is running and synced, a session is active, and the
+authenticated TLS API settings (`apiauth=1`, `apissl=1`, `apisslrequired=1`) match the configured
+`NEXUS_API_URL`. Use `apiauth=0` only for an isolated non-production development node with
+`apiremote=0`.
 RPC timeouts: increase `SOLANA_RPC_TIMEOUT_SEC` or switch to a dedicated RPC provider.
 
 ## Pointers
-- Full security guidance: `SECURITY.md`
+- Full security guidance: [docs/SECURITY.md](docs/SECURITY.md)
 - Exhaustive configuration reference: `CONFIG.md`
 - User swap instructions: `README.md`
-- Initiator state machines: `SWAP_INITIATOR_STATE_MACHINES.md`
-- Server-side state machines: `STATE_MACHINES.md`
+- Initiator state machines: [docs/SWAP_INITIATOR_STATE_MACHINES.md](docs/SWAP_INITIATOR_STATE_MACHINES.md)
+- Server-side state machines: [docs/STATE_MACHINES.md](docs/STATE_MACHINES.md)
 - Operator dashboard: `python3 dashboard.py` (see above)
-- Audit findings: `AUDIT_FINDINGS.md`
+- Audit findings: [docs/AUDIT_FINDINGS.md](docs/AUDIT_FINDINGS.md)
 
 ## Appendix: Configuration Variables
 See `.env.example` for the exhaustive, annotated list. Highlights:

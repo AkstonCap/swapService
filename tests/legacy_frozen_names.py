@@ -93,10 +93,21 @@ EXPECTED_SCHEMA = {
     "metrics_snapshot": ["id", "timestamp", "vault_usdc_units", "circulating_usdd_units",
                          "ratio_bps", "paused", "payouts_24h_units", "fees_usdc_units",
                          "fees_usdd_units"],
+    # Every state-changing Nexus transfer must be tied to a durable, attributable
+    # operator decision. The event table is append-only and the action field is unique
+    # per intent, so repeating a CLI command cannot rewrite past authorization evidence.
+    "nexus_transfer_audit_events": ["id", "intent_id", "action", "actor", "rationale",
+                                    "evidence", "timestamp"],
+    "nexus_transfer_intents": ["id", "kind", "source_txid", "from_address", "to_address",
+                               "amount_usdd_units", "reference", "status", "remote_txid",
+                               "created_timestamp", "last_attempt_timestamp", "resolved_timestamp"],
     "payouts": ["id", "kind", "amount_usdc_units", "reference", "timestamp"],
+    # These append-only fields are intentionally introduced by the E-004 durable
+    # reconciliation migration. Existing rows retain their original columns and are
+    # treated as incomplete evidence until a separately verified backfill exists.
     "processed_sigs": ["sig", "timestamp", "amount_usdc_units", "txid", "amount_usdd",
-                       "status", "reference"],
-    "processed_txids": ["txid", "timestamp", "amount_usdd", "from_address", "to_address",
+                       "amount_usdd_units", "nexus_destination", "memo", "status", "reference"],
+    "processed_txids": ["txid", "timestamp", "amount_usdd", "amount_usdd_units", "from_address", "to_address",
                         "owner", "sig", "status"],
     "quarantined_sigs": ["sig", "timestamp", "from_address", "amount_usdc_units", "memo",
                          "quarantine_sig", "quarantined_units", "status"],
@@ -108,7 +119,7 @@ EXPECTED_SCHEMA = {
                        "owner_from_address", "confirmations_credit", "status", "sig"],
     "reservations": ["kind", "key", "timestamp"],
     "unprocessed_sigs": ["sig", "timestamp", "memo", "from_address", "amount_usdc_units",
-                         "status", "txid", "reference"],
+                         "amount_usdd_units", "status", "txid", "reference"],
     "unprocessed_txids": ["txid", "timestamp", "amount_usdd", "from_address", "to_address",
                           "owner_from_address", "confirmations_credit", "status",
                           "receival_account", "sig", "amount_usdd_units", "hold_reason"],

@@ -8,4 +8,7 @@ from src.main import run
 
 
 if __name__ == "__main__":
-    run()
+    # ``False`` is reserved for an admission-control rejection before state is opened.
+    # Preserve successful graceful shutdowns (which return ``None``) as exit status zero.
+    if run() is False:
+        raise SystemExit(1)

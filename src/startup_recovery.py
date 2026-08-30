@@ -353,6 +353,12 @@ def perform_startup_recovery() -> dict:
     Falls back to recent-only scan if waterlines unavailable or too old.
     """
     print("🔧 Starting recovery...")
+
+    # A process can die after atomically claiming the sole permitted CLI execution
+    # but before recording its result. Convert that state to an explicit hold before
+    # any scans run; later resolution must find positive chain evidence and can never
+    # consume the authorization a second time.
+    interrupted_nexus_transfers_held = state_db.recover_interrupted_nexus_transfer_intents()
     
     # Fetch waterlines from heartbeat asset
     heartbeat = nexus_client.get_heartbeat_asset()
@@ -363,6 +369,7 @@ def perform_startup_recovery() -> dict:
         seeded = nexus_client.get_last_reference()
         return {
             'reference_seeded': seeded,
+            'interrupted_nexus_transfers_held': interrupted_nexus_transfers_held,
             **stats,
         }
     
@@ -401,6 +408,7 @@ def perform_startup_recovery() -> dict:
         seeded = nexus_client.get_last_reference()
         return {
             'reference_seeded': seeded,
+            'interrupted_nexus_transfers_held': interrupted_nexus_transfers_held,
             **stats,
         }
     
@@ -432,6 +440,7 @@ def perform_startup_recovery() -> dict:
         'nexus_waterline': nexus_waterline,
         'solana_waterline': solana_waterline,
         'reference_seeded': seeded,
+        'interrupted_nexus_transfers_held': interrupted_nexus_transfers_held,
         **nexus_stats,
         **solana_stats,
     }

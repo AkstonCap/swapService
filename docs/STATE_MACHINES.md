@@ -14,6 +14,24 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > automatically; incomplete enumeration holds; and only the poller may
 > advance a Nexus checkpoint from scan evidence. Live-chain verification is
 > still required.
+>
+> **Weekly review update (2026-08-28, `f614897`):** automatic Nexus refunds and
+> treasury-to-quarantine movements remain disabled in the service loop. A separate
+> intent-first operator workflow now persists one disposition per source credit,
+> requires audited preparation/authorization/execution request, executes once, holds
+> ambiguous outcomes, resolves only an exact positive reference/source/destination/
+> amount/txid match, and archives only after explicit remote-txid confirmation. This
+> protocol and empty Nexus enumeration semantics have not passed the target-node
+> crash/pagination matrix, so they are release gates rather than production evidence.
+>
+> **Weekly review update (2026-08-29, committed `5e7d3b8` plus a separately
+> staged proposal):** startup demotes persisted `executing` Nexus transfer
+> intents to `outcome_unknown`, and explicit production mode requires payout
+> caps and an alert route. Reconciliation still does not latch an exposure pause
+> on error/unhealthy output. The staged remote scan includes active recipients
+> and refuses multi-page ambiguity, but its exact valid new-recipient case and
+> target-node one-page boundary/order semantics remain unproven. See
+> `DEVELOPMENT_REVIEW_2026-08-29.md`.
 
 ---
 
@@ -111,12 +129,14 @@ flowchart TD
 
     TradeBal -->|asset appeared| Ready
     TradeBal -->|"lookup failed / malformed / incomplete"| TradeBal
-    TradeBal -->|"complete lookup still absent"| Collecting["collecting refund"]
+    TradeBal -->|"complete lookup still absent"| RefundHold["refund held for operator review"]
 
-    Collecting -->|USDD returned| Refunded["refunded ✓"]
-    Collecting -->|"attempts spent / no sender"| Quarantined
-    RefundPending -->|USDD returned| Refunded
-    RefundPending -->|"attempts spent / no sender"| Quarantined
+    RefundHold -->|"operator prepares, confirms reference and authorizes"| IntentAuthorized["durable transfer intent authorized"]
+    IntentAuthorized -->|"one CLI attempt"| IntentOutcome["submitted / outcome_unknown"]
+    IntentOutcome -->|"positive on-chain reference match + exact remote txid confirmation"| Disposition["refunded or quarantined ✓"]
+
+    Collecting -->|legacy state| RefundHold
+    RefundPending -->|legacy state| RefundHold
 ```
 
 ### USDD → USDC State Descriptions
@@ -130,11 +150,14 @@ flowchart TD
 | **Sending** | USDC send attempted | `unprocessed_txids` | `"sending"` |
 | **Awaiting** | Signature stored, awaiting finality | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
 | **Processed** | USDC delivered | `processed_txids` | `"processed"` |
-| **TradeBal** | Mapping timed out; one more lookup before refunding | `unprocessed_txids` | `"trade balance to be checked"` |
-| **Collecting** | Refund being collected | `unprocessed_txids` | `"collecting refund"` |
-| **RefundPending** | Refund queued | `unprocessed_txids` | `"refund pending"` |
-| **Refunded** | USDD returned to sender | `refunded_txids` | `"refunded"` |
-| **Quarantined** | Manual review; USDD **moved** to `NEXUS_USDD_QUARANTINE_ACCOUNT` | `quarantined_txids` | `"quarantined"`, or `"quarantined (USDD NOT moved)"` if that account is unset |
+| **TradeBal** | Legacy mapping-timeout recheck; complete absence now holds | `unprocessed_txids` | `"trade balance to be checked"` |
+| **Collecting** | Legacy refund state converted to a hold | `unprocessed_txids` | `"collecting refund"` |
+| **RefundPending** | Legacy refund state converted to a hold | `unprocessed_txids` | `"refund pending"` |
+| **RefundHold** | Refund/quarantine requires operator review; no automatic Nexus debit | `unprocessed_txids` | `"refund held for operator review"` |
+| **IntentAuthorized** | Operator has confirmed the immutable reference and authorized exactly one CLI debit | `nexus_transfer_intents` | `"authorized"` |
+| **IntentOutcome** | CLI result is submitted or unknown; resolver only accepts a positive on-chain reference match | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
+| **Disposition** | A named operator confirms the exact remote txid, then the source moves to its terminal archive | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
+| **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
 
 > **A USDC-confirmation timeout quarantines — it does not refund.** The USDC may in fact
 > have been sent and only the lookup failed; refunding would pay twice.
@@ -146,9 +169,9 @@ flowchart TD
 | 1 | `pending_receival` (confirmations > 1) | Resolve `receival_account` by (`txid_toService`, `owner`) | No |
 | 2 | `ready for processing` | Liquidity check, then send USDC with memo `nexus_txid:<txid>` | **Yes** |
 | 3 | `sig created, awaiting confirmations` | Confirm the stored signature; memo scan only as fallback | No |
-| 4 | `trade balance to be checked` | Retry lookup, else → `collecting refund` | No |
-| 5 | `collecting refund` | Refund USDD, else quarantine | No |
-| 6 | `refund pending` | Refund USDD, else quarantine | No |
+| 4 | `trade balance to be checked` | Retry lookup, else hold for operator review | No |
+| 5 | `collecting refund` | Convert legacy state to an operator hold | No |
+| 6 | `refund pending` | Convert legacy state to an operator hold | No |
 
 ---
 
@@ -176,14 +199,16 @@ alert is emitted.
 | Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **USDD→USDC only** | `process_unprocessed_txids()` P1 |
 | Debit-confirmation observation window | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD; a negative/incomplete lookup still holds for manual resolution | `check_unconfirmed_debits()` |
 | USDC-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
-| Ambiguous-debit observation grace | `DEBIT_VERIFY_GRACE_SEC` | 300s | USDC→USDD; no automatic retry/refund on a negative scan | `resolve_unverified_debits()` |
+| Ambiguous Nexus debit | N/A | held until positive reference evidence or manual resolution | USDC→USDD; a negative, failed or incomplete lookup never authorizes an automatic retry/refund | `resolve_unverified_debits()` |
 | Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | USDC→USDD | `_process_stale_deposits()` |
 
 **Retry:** `MAX_ACTION_ATTEMPTS` (3) attempts, with `ACTION_RETRY_COOLDOWN_SEC` (300s)
 enforced between them. `should_attempt()` returns False for *either* reason;
 `attempts_exhausted()` distinguishes them, so a cooldown never causes a premature
-quarantine. After exhaustion, USDC goes to `USDC_QUARANTINE_ACCOUNT` and USDD is
-transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`.
+quarantine. After exhaustion, eligible USDC-side actions may move USDC to
+`USDC_QUARANTINE_ACCOUNT`. USDD-side automatic treasury-to-quarantine transfers
+remain disabled; the source enters an operator hold and can move only through the
+audited durable-intent workflow.
 
 ---
 
@@ -194,6 +219,7 @@ transferred to `NEXUS_USDD_QUARANTINE_ACCOUNT`.
 | `unprocessed_sigs` / `processed_sigs` / `refunded_sigs` / `quarantined_sigs` | USDC→USDD lifecycle |
 | `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | USDD→USDC lifecycle |
 | `attempts` | Retry counters + `last_timestamp` (cooldown) |
+| `nexus_transfer_intents` / `nexus_transfer_audit_events` | Immutable Nexus debit inputs plus named operator authorization, execution-request and final-disposition evidence |
 | `reservations` | Cross-worker mutual exclusion on money actions |
 | `counters` | Atomic Nexus debit `reference` sequence |
 | `payouts` | Outbound USDC ledger for the rolling 24h cap |
@@ -242,6 +268,7 @@ The Nexus poller applies the same proof rule:
 | Full page budget or processing budget exhausted | held (`pagination_truncated`), even when active rows exist |
 | Unprocessed credits exist after a complete poll | poller may pin behind the oldest |
 | Complete scan with persisted page data | may advance to the oldest scanned timestamp minus safety |
+| Empty successful unfiltered response | implementation advances to `now − safety`; **deployment-blocked until the target endpoint proves this is a complete stable range** |
 | Processing pass | always held; it has no scan evidence and never proposes a waterline |
 
 A missing Nexus transaction or reference is **never** an automatic proof of
@@ -264,6 +291,7 @@ resolution rather than authorizing retry or refund.
 | USDD→USDC polling | `src/swap_nexus.py` | `poll_nexus_deposits()` |
 | USDD→USDC processing | `src/swap_nexus.py` | `process_unprocessed_txids()` |
 | USDD quarantine transfer | `src/nexus_client.py` | `quarantine_nexus_token()` |
+| Held-credit operator disposition | `nexus_transfer_operator.py` | `prepare`, `authorize`, `execute`, `resolve`, `finalize` |
 | Alerting | `src/alerts.py` | `critical()`, `warning()`, `info()` |
 | Startup recovery | `src/startup_recovery.py` | `perform_startup_recovery()` |
 

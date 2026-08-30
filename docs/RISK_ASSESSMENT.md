@@ -13,6 +13,35 @@
 > enumeration cannot advance the waterline. Backing checks now fail closed.
 > Deployment remains blocked pending independent/live verification and the
 > remaining High findings.
+>
+> **Weekly review update (2026-08-28, `f614897`):** the original negative-lookup,
+> unresolved-liability, explicit enumeration-failure, fail-open backing and mixed-decimal
+> defects are closed in local logic, and the complete suite/CI are green. A durable,
+> operator-only Nexus transfer ledger now provides strong at-most-once local controls, but
+> automatic execution remains disabled pending crash-boundary and target-node evidence.
+> Deployment is still hard-blocked: empty Nexus enumeration can advance the checkpoint
+> without proven stable-range semantics, and reconciliation remains High because startup
+> can print a green result when the producer is unhealthy and no authoritative remote
+> transaction-history read-back has been demonstrated. See
+> [`DEVELOPMENT_REVIEW_2026-08-28.md`](DEVELOPMENT_REVIEW_2026-08-28.md).
+>
+> **Weekly review update (2026-08-29, committed `5e7d3b8` plus a separately
+> staged proposal):** returned unhealthy startup reconciliation is no longer
+> printed as green, interrupted claimed Nexus transfers restart as
+> `outcome_unknown`, and explicit production mode requires caps and alerting.
+> Deployment remains hard-blocked. Reconciliation failures do not pause new
+> exposure. The staged remote read-back now includes active destinations and
+> fail-closes when one page cannot prove the requested history boundary, but the
+> exact valid first-time-recipient case and target-node boundary/order semantics
+> remain unproven. Invalid `SWAP_PRODUCTION_MODE` text also silently disables the
+> gate. See
+> [`DEVELOPMENT_REVIEW_2026-08-29.md`](DEVELOPMENT_REVIEW_2026-08-29.md).
+>
+> **Resolution update (2026-08-29, post-review):** invalid present
+> `SWAP_PRODUCTION_MODE` text now fails configuration loading instead of falling back to
+> development mode. A valid production admission-control rejection returns non-zero from
+> the service entrypoint. The historical review above retains the finding as evidence; see
+> [`EVALUATION.md`](EVALUATION.md) for the current remediation status.
 
 **Method:** Static review of the money paths, state machine, polling loop, recovery logic, helper tooling, configuration, and documentation, plus targeted reasoning about Solana/Nexus finality and SQLite semantics. Arithmetic and SQL claims were executed in isolation to confirm them. **No live run was possible** — the runtime dependencies (`solana`, `solders`, `python-dotenv`) and RPC/Nexus access are unavailable in this environment.
 
@@ -125,19 +154,25 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 
 > **Resolution: intent-before-action, then let the chain decide.** A `reference` column was added to `unprocessed_sigs` (with migration). The unique per-attempt reference and a `debit in flight` status are now persisted **before** the CLI is invoked. Any non-definitive outcome — exception, timeout, or the `(False, None)` returned when the call succeeded but the body was unparsable — is recorded as `debit unverified` and **never refunded on that signal alone**.
 >
-> A new pass, `resolve_unverified_debits()`, runs each cycle (before the confirmation pass) and resolves those rows against the chain via a new `find_nexus_debit_by_reference()`:
+> The batch `find_nexus_debits_by_references()` resolver runs each cycle (before the
+> confirmation pass) and resolves those rows against the chain:
 >
 > | on-chain lookup | action |
 > |---|---|
 > | reference found | record the txid, proceed — never refund |
-> | not found, inside grace (`DEBIT_VERIFY_GRACE_SEC`, 300 s) | leave alone |
-> | not found, past grace, attempts remain | provably never landed → safe retry with a **new** reference (also fixes PROC-1, the missing debit retry) |
-> | not found, past grace, attempts exhausted | refund |
+> | not found, failed or incomplete lookup | leave held; a bounded negative scan never proves non-execution |
 > | no reference recorded (pre-upgrade row) | quarantine for manual review — never guess |
+>
+> **Superseded safety correction:** the former grace-window retry/refund policy was removed.
+> Current code has no `DEBIT_VERIFY_GRACE_SEC`: only positive reference evidence resolves an
+> ambiguous debit automatically; all other outcomes remain held for manual resolution.
 >
 > All five branches verified by test.
 >
-> **Correction to this report's earlier recommendation:** §8 advised resolving ambiguity with the existing `was_nexus_debited_to_account_for_amount()`. On implementation that function proved unusable here — it inspects the **treasury account**, whereas this path mints via `finance/debit/token from=USDD` (the token *supply* register), and it compares `int(contract.amount)` (a decimal token amount, so `int("10.5")` raises and yields 0) against base units, so it can never match. It is left in place but documented as unsuitable; `find_nexus_debit_by_reference()` keys on the unique reference and is exact.
+> **Follow-up hardening:** the unsafe, uncalled
+> `was_nexus_debited_to_account_for_amount()` and other single-item history helpers were removed.
+> The resolver uses only the batch reference lookup, whose explicit completeness result cannot turn
+> a bounded negative scan into permission for another Nexus debit or a Solana-side refund.
 
 **Where:** `src/solana_client.py` (debit step); `src/nexus_client.py:151-177`
 
@@ -154,7 +189,9 @@ if not txid:   return (False, None)   # the CLI SUCCEEDED; we report failure
 
 The caller then marks the deposit `to be refunded` — so the service **mints the USDD and refunds the USDC**: a guaranteed double loss. (The `[DEBIT_NO_TXID]` branch that looks like it handles this is unreachable, since the function already returned `False`.) A CLI timeout is the same class of bug — reduced but not eliminated by the timeout increase in EVALUATION §8.
 
-Again the defence exists and is dead: `nexus_client.was_nexus_debited_to_account_for_amount()` (`nexus_client.py:443`), an on-chain "did we already debit this?" check, has **zero call sites**.
+The former on-chain account/amount double-debit check was uncalled and could not safely compare
+Nexus decimal contract amounts with base units. It has been removed; the durable intent/reference
+resolver is the only automatic ambiguity path.
 
 **Fix:** persist intent (+ reference) *before* invoking the CLI; on any ambiguous outcome — non-zero exit, unparsed output, timeout — treat state as **unknown** and resolve it against the chain before retrying or refunding.
 
@@ -373,14 +410,21 @@ The single most important systemic finding is that a large set of advertised saf
 - `HEARTBEAT_MIN_INTERVAL_SEC` — README claims the interval is enforced; it is not
 - `HEARTBEAT_WATERLINE_NEXUS_FIELD` — ignored by the writer (B-5)
 - `SOLANA_POLL_INTERVAL` / `NEXUS_POLL_INTERVAL` — only the global `POLL_INTERVAL` is read
-- `SOLANA_MAX_TX_FETCH_PER_POLL`, `MAX_DEPOSITS_PER_LOOP`, `MICRO_DEPOSIT_FEE_PCT`, `MICRO_CREDIT_FEE_PCT`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, `NEXUS_RPC_HOST`, `METRICS_BUDGET_SEC`, `STALE_ROW_SEC`, `BACKING_DEFICIT_BPS_ALERT`, `FEE_CONVERSION_MIN_USDC`, `TARGET_SOL_PER_NXS_*` — all defined, documented, unused
+- `SOLANA_MAX_TX_FETCH_PER_POLL`, `MAX_DEPOSITS_PER_LOOP`, `MICRO_DEPOSIT_FEE_PCT`, `MICRO_CREDIT_FEE_PCT`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, `NEXUS_RPC_HOST`, `METRICS_BUDGET_SEC`, `STALE_ROW_SEC`, `BACKING_DEFICIT_BPS_ALERT` — all defined, documented, unused
 - `SOL_MINT` — **listed in `REQUIRED_ENV`**, so the service refuses to start without it, yet it is used nowhere
 
 **Settings the code reads that are not in `config.py`** (each silently falls back to a hardcoded literal, so setting them in `.env` does nothing): `UNPROCESSED_PROCESS_BUDGET_SEC` (documented in `.env.example`), `UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC`, `POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES`, `FEE_EVENTS_FILE`, `VAULT_OWNER`.
 
 **Documented but entirely absent from the template:** `HELIUS_RPC_URL` / `HELIUS_API_KEY` — the code's preferred fast path and prominent in `SETUP.md`, yet nowhere in `.env.example`, `CONFIG.md` or `config.py`. An operator copying the template silently gets the slow fallback.
 
-**Root cause — B-27 (🟡 partially addressed): there is now `tests/test_smoke.py`** — it imports every module, calls 22 real functions against a temp DB, and AST-checks call-site arity against changed signatures. It was written after a real `ImportError` (`from . import state_db, state`, where no `state` module exists) survived byte-compilation and stubbed unit tests. **There is still no CI runner and no behavioural test suite.** Originally: `.github/` contains only `copilot-instructions.md`; there are no test files. Every Critical defect here and in EVALUATION §8–§11 — especially the calls to functions that do not exist — would be caught by an import smoke test plus modest unit tests. This is the underlying cause of the defect density, not merely a hygiene gap.
+**Automated value movement removed (2026-08-30):** the dormant fee-conversion/rebalance
+feature gate and its Solana DEX, SOL/NXS top-up and Nexus mint helpers have been removed. Backing
+surplus is now alert-only for operator review, so no configuration edit can revive that automatic
+cross-chain value movement without a new, reviewed durable-intent implementation.
+
+**Root cause — B-27 (historical):** this report predates the current pytest and CI gate.
+Current test/CI evidence and remaining release gates are maintained in the authoritative
+[`EVALUATION.md`](EVALUATION.md).
 
 **Compliance/governance (flagged, not assessed):** no sanctions/blocklist screening, no per-address limits, no exportable audit trail, and no documented key-rotation, incident-response or emergency-stop procedure. Material regulatory exposure for a custodial service, and out of scope for a code review.
 

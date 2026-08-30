@@ -346,8 +346,6 @@ class _Handler(BaseHTTPRequestHandler):
         if not token:
             return True
         supplied = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        if not supplied:
-            supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
         return secrets.compare_digest(supplied, token)
 
     def do_GET(self):
@@ -468,8 +466,7 @@ const TABS=[["issues","Issues"],
  ["quarantined_solana","Quarantine "+SOL],["quarantined_nexus","Quarantine "+NXS],
  ["payouts","Payouts 24h"],["fees","Fees"]];
 let tab="issues";
-const qs=new URLSearchParams(location.search), tok=qs.get("token");
-const api=p=>fetch(p+(tok?(p.includes("?")?"&":"?")+"token="+encodeURIComponent(tok):""))
+const api=p=>fetch(p)
   .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.json()});
 
 function card(k,v,s,cls){const c=el("div","card");c.append(el("div","k",k));

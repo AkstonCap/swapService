@@ -131,6 +131,10 @@ def get(path, token=None):
 
 code, _, _ = get("/api/summary")
 check("unauthenticated request refused", code == 401, f"got {code}")
+# A bearer token in a URL leaks through browser history, proxy/access logs and referrers.
+# It is never a valid credential, even on the loopback-only default binding.
+code, _, _ = get("/api/summary?token=s3cret-token")
+check("query token refused", code == 401, f"got {code}")
 code, body, hdrs = get("/api/summary", "s3cret-token")
 check("authenticated request served", code == 200, f"got {code}")
 check("CSP header present", "default-src 'none'" in hdrs.get("Content-Security-Policy", ""))

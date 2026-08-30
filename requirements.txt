@@ -3,10 +3,10 @@
 # Pinning exact versions for reproducibility in production.
 # If you deliberately want to upgrade, adjust here and re-test.
 ############################################################
-python-dotenv==1.0.1         # Env file loading
+python-dotenv==1.2.2         # Env file loading; CVE-2026-28684 remediation
 solana==0.36.9               # Solana Python SDK (compatible with solders 0.26.x)
 solders==0.26.0              # Fast serializers / transaction building
-requests==2.32.3             # HTTP (Jupiter quotes, Nexus API wrappers)
+requests==2.33.0             # HTTP (Jupiter quotes, Nexus API wrappers); CVE remediations
 
 # Optional (uncomment if you want faster event loop / DNS on Linux):
 # uvloop==0.19.0
