@@ -387,14 +387,15 @@ evidence only; the target Nexus node and Solana devnet/testnet matrix remains a 
 
 ### E-010 — Stale/dead configuration and helper paths
 
-**Partially remediated:** `DEBIT_VERIFY_GRACE_SEC` has been removed from runtime configuration
-and current operator/state-machine documentation. An ambiguous Nexus debit now remains held unless
-positive reference evidence is found; no expiring negative-lookup setting can imply that a bounded
-scan proved non-execution. The uncalled, single-item Nexus history helpers and the entire dormant automatic
-fee-conversion/rebalance path have been removed. Solana→Nexus decisions now use only batch
-interfaces that expose lookup completeness; backing surplus is alert-only for named operator
-review, so no configuration switch can reactivate an unaudited Solana DEX movement or Nexus
-mint. A stale `None`/`False` result cannot be reintroduced as proof of non-execution.
+**Remediated locally:** `DEBIT_VERIFY_GRACE_SEC` and the obsolete required `SOL_MINT` setting
+have been removed from runtime configuration and current operator/state-machine documentation. The
+unsafe legacy Nexus DEX listing/execution, rebalancer and direct mint helpers are also absent from
+the runtime surface: no configuration edit can invoke an unaudited `market/execute/order` or
+supply debit. An ambiguous Nexus debit remains held unless positive reference evidence is found;
+no expiring negative-lookup setting can imply that a bounded scan proved non-execution. Solana→Nexus
+decisions use only batch interfaces that expose lookup completeness; backing surplus is alert-only
+for named operator review. A stale `None`/`False` result cannot be reintroduced as proof of
+non-execution.
 
 ### E-011 — Documentation relocation and identity drift
 
@@ -548,10 +549,15 @@ hold-resolution, incident-response and key-rotation procedures.
 2. ✅ Compatibility-tested and pinned `python-dotenv==1.2.2` and `requests==2.33.0` in a clean
    environment with the existing Nexus/Solana SDK pins unchanged. The live matrix remains required
    before deployment.
-3. Remove dead configuration and unsafe dormant helpers or clearly isolate them.
+3. ✅ Remove dead configuration and unsafe dormant helpers: `SOL_MINT`, the direct Nexus
+   DEX execution/rebalancer helpers and the direct local mint helper are absent from runtime;
+   the regression contract prevents their reintroduction.
 4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
-5. Fix remaining moved-document paths, add structured logging and refresh this evaluation
-   against the final reviewed commit.
+5. **In progress:** structured JSON logging now covers operator alerts and Nexus/Solana
+   deposit lifecycle transitions, with field-level credential redaction. Both chain pollers now
+   emit stable ingestion/classification summaries and fail-closed enumeration failures (including
+   Nexus page and reason context) instead of console prose. Migrate the remaining lower-level
+   client money-path output and refresh this evaluation against the final reviewed commit.
 
 ---
 

@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -61,12 +61,92 @@ os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
 from src import (  # noqa: E402
-    balance_reconciler, config, fees, main, nexus_client, solana_client, startup_recovery,
-    state_db, swap_nexus,
+    alerts, balance_reconciler, config, fees, main, nexus_client, solana_client,
+    startup_recovery, state_db, swap_nexus, swap_solana,
 )
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    def test_solana_poll_money_path_summaries_are_structured_events(self):
+        """A Nexus→Solana payout operator must not have to parse console prose."""
+        with patch.object(swap_solana.nexus_client, "get_heartbeat_asset", return_value={
+            "last_safe_timestamp_solana": 100,
+        }), patch.object(
+            swap_solana.solana_client, "fetch_incoming_deposits_via_helius", return_value=[]
+        ), patch.object(
+            swap_solana.solana_client, "process_helius_deposits", return_value=(2, None)
+        ), patch.object(
+            swap_solana.solana_client, "process_unprocessed_solana_deposits",
+            return_value=[3, 4, 5, 6],
+        ), patch.object(
+            swap_solana.solana_client, "process_solana_deposits_refunding", return_value=7
+        ), patch.object(
+            swap_solana.solana_client, "process_solana_deposits_quarantine", return_value=8
+        ), patch.object(
+            swap_solana.solana_client, "check_sig_confirmations", return_value=9
+        ), patch.object(
+            swap_solana.solana_client, "check_quarantine_confirmations", return_value=10
+        ), patch.object(
+            swap_solana.nexus_client, "resolve_unverified_debits", return_value=11
+        ), patch.object(
+            swap_solana.nexus_client, "check_unconfirmed_debits", return_value=12
+        ), patch.object(
+            swap_solana.nexus_client, "update_heartbeat_asset"
+        ), patch.object(
+            swap_solana.nexus_client, "publish_service_record"
+        ), patch.object(
+            swap_solana.solana_client, "get_token_account_balance", return_value=100
+        ), patch.object(
+            swap_solana.state_db, "save_last_vault_balance"
+        ), patch.object(
+            swap_solana, "_advance_solana_waterline"
+        ), patch.object(swap_solana, "_log") as log:
+            swap_solana.poll_solana_deposits()
+
+        self.assertIn(
+            call("SOLANA_DEPOSITS_INGESTED", count=2),
+            log.call_args_list,
+        )
+        self.assertIn(
+            call(
+                "SOLANA_PROCESSING_SUMMARY",
+                swap_debits=3,
+                refunds_pending=4,
+                quarantines_pending=5,
+                micro_deposits=6,
+            ),
+            log.call_args_list,
+        )
+        for event, count in (
+            ("SOLANA_REFUNDS_SUBMITTED", 7),
+            ("SOLANA_QUARANTINES_SUBMITTED", 8),
+            ("SOLANA_REFUNDS_CONFIRMED", 9),
+            ("SOLANA_QUARANTINES_CONFIRMED", 10),
+            ("NEXUS_DEBITS_RESOLVED", 11),
+            ("NEXUS_DEBITS_CONFIRMED", 12),
+        ):
+            self.assertIn(call(event, count=count), log.call_args_list)
+
+    def test_operator_alerts_use_structured_events_not_terminal_prose(self):
+        """Critical Nexus/Solana custody events must be parseable by incident tooling."""
+        with patch.object(alerts.structured_logging, "emit") as emit:
+            alerts.alert(
+                alerts.CRITICAL,
+                "nexus_debit_held",
+                "Nexus debit needs resolution",
+                intent_id="intent-1",
+                solana_signature="sig-1",
+            )
+
+        emit.assert_called_once_with(
+            alerts._LOG,
+            __import__("logging").CRITICAL,
+            "nexus_debit_held",
+            "Nexus debit needs resolution",
+            intent_id="intent-1",
+            solana_signature="sig-1",
+        )
+
     def test_ambiguous_nexus_debits_have_no_expiring_negative_lookup_window(self):
         """An uncertain Nexus debit must hold for resolution, not age into a false negative."""
         self.assertFalse(hasattr(config, "DEBIT_VERIFY_GRACE_SEC"))
@@ -81,6 +161,20 @@ class CriticalSafetyTests(unittest.TestCase):
             self.assertFalse(hasattr(nexus_client, legacy_helper), legacy_helper)
         self.assertTrue(callable(nexus_client.get_transactions_confirmations))
         self.assertTrue(callable(nexus_client.find_nexus_debits_by_references))
+
+    def test_dormant_nexus_dex_and_rebalance_paths_are_not_available_to_runtime(self):
+        """The bridge must not retain unaudited automatic money-movement helpers."""
+        self.assertFalse(hasattr(config, "SOL_MINT"))
+        for legacy_helper in (
+            "mint_nexus_to_local",
+            "token_nxs_market",
+            "nxs_token_market",
+            "list_market_bids",
+            "list_market_asks",
+            "execute_market_order",
+            "buy_nxs_with_token_budget",
+        ):
+            self.assertFalse(hasattr(nexus_client, legacy_helper), legacy_helper)
 
     def test_invalid_production_mode_in_environment_fails_configuration_loading(self):
         """A typo must never silently downgrade a production process to development mode."""
@@ -671,6 +765,28 @@ class CriticalSafetyTests(unittest.TestCase):
                 swap_nexus.poll_nexus_deposits()
 
         propose_waterline.assert_not_called()
+
+    @patch.object(swap_nexus.nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch("subprocess.run", side_effect=TimeoutError("node timeout"))
+    def test_nexus_poller_enumeration_error_is_structured_event(self, _run, _heartbeat):
+        """A Nexus enumeration failure must be machine-readable and keep its page context."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                swap_nexus, "_log"
+            ) as log:
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        self.assertIn(
+            call(
+                "NEXUS_ENUMERATION_FAILED",
+                page=0,
+                reason="exception",
+                error="node timeout",
+            ),
+            log.call_args_list,
+        )
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
     @patch(

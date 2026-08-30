@@ -1,13 +1,13 @@
+import logging
 from decimal import Decimal
-from . import config, state_db, nexus_client, solana_client, fees, alerts
+from . import config, state_db, nexus_client, solana_client, fees, alerts, structured_logging
 
-# Lightweight structured logging for deposit lifecycle only
+_LOG = structured_logging.get_logger("swapService.solana")
+
+
 def _log(event: str, **fields):
-    parts = [f"{event}"]
-    for k, v in fields.items():
-        if v is not None:
-            parts.append(f"{k}={v}")
-    print(" ".join(parts))
+    """Record Solana deposit lifecycle transitions as structured bridge events."""
+    structured_logging.emit(_LOG, logging.INFO, event, **fields)
 
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
@@ -129,36 +129,48 @@ def poll_solana_deposits(paused: bool = False):
                 # no per-deposit re-fetch, so the Helius fast path stays 1-2 RPC calls.
                 unprocessed_deposits_added, deferred_ts = solana_client.process_helius_deposits(solana_deposits, True)
                 fetch_ok = True
-                print(f"New deposits fetched and added for processing: {unprocessed_deposits_added}\n")
+                _log("SOLANA_DEPOSITS_INGESTED", count=unprocessed_deposits_added)
             except Exception as e:
                 # A failed enumeration must not advance the waterline (see _advance_solana_waterline).
                 _log("SOLANA_FETCH_FAILED", error=str(e))
 
         if not paused:
             [proc_count_swap, proc_count_refund, proc_count_quar, proc_count_mic] = solana_client.process_unprocessed_solana_deposits(1000, 8.0)
-            print(f"Debited, awaiting confirmation: {proc_count_swap}, \nTo be refunded: {proc_count_refund}, \nTo be quarantined: {proc_count_quar}, \nMicro-sigs found: {proc_count_mic}\n")
+            _log(
+                "SOLANA_PROCESSING_SUMMARY",
+                swap_debits=proc_count_swap,
+                refunds_pending=proc_count_refund,
+                quarantines_pending=proc_count_quar,
+                micro_deposits=proc_count_mic,
+            )
 
         refunds = solana_client.process_solana_deposits_refunding(1000, 8.0)
-        print(f"Processed refunds, awaiting confirmation: {refunds}\n") if refunds > 0 else None
+        if refunds > 0:
+            _log("SOLANA_REFUNDS_SUBMITTED", count=refunds)
 
         quarantines = solana_client.process_solana_deposits_quarantine(1000, 8.0)
-        print(f"Processed quarantines: {quarantines}\n") if quarantines > 0 else None
+        if quarantines > 0:
+            _log("SOLANA_QUARANTINES_SUBMITTED", count=quarantines)
 
         confirmed_ref = solana_client.check_sig_confirmations(100, 8.0)
-        print(f"Confirmed refunds: {confirmed_ref}\n") if confirmed_ref > 0 else None
+        if confirmed_ref > 0:
+            _log("SOLANA_REFUNDS_CONFIRMED", count=confirmed_ref)
 
         # Bug #8 fix: Check quarantine confirmations (mirrors refund confirmation pattern)
         confirmed_quar = solana_client.check_quarantine_confirmations(100, 8.0)
-        print(f"Confirmed quarantines: {confirmed_quar}\n") if confirmed_quar > 0 else None
+        if confirmed_quar > 0:
+            _log("SOLANA_QUARANTINES_CONFIRMED", count=confirmed_quar)
 
         # Resolve any debit whose outcome is unknown (crash, timeout, unparsable CLI
         # response) against the chain BEFORE the confirmation pass, so an executed
         # debit is never mistaken for a failure and refunded.
         resolved = nexus_client.resolve_unverified_debits()
-        print(f"Resolved unverified debits: {resolved}\n") if resolved > 0 else None
+        if resolved > 0:
+            _log("NEXUS_DEBITS_RESOLVED", count=resolved)
 
         confirmed_debits = nexus_client.check_unconfirmed_debits(10, 8.0)
-        print(f"Confirmed debits: {confirmed_debits}\n") if confirmed_debits > 0 else None
+        if confirmed_debits > 0:
+            _log("NEXUS_DEBITS_CONFIRMED", count=confirmed_debits)
 
         _advance_solana_waterline(wline_sol, poll_start, fetch_ok, deferred_ts)
 

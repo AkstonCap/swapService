@@ -176,7 +176,6 @@ Key required:
 - `VAULT_KEYPAIR` — Path to vault keypair JSON file
 - `VAULT_USDC_ACCOUNT` — Vault's USDC token account (ATA) address
 - `USDC_MINT` — USDC mint address (mainnet: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`)
-- `SOL_MINT` — Native SOL mint (default okay: `So11111111111111111111111111111111111111112`)
 - `SOL_MAIN_ACCOUNT` — Vault wallet address (base account, not token account)
 - `NEXUS_PIN` — PIN for the Nexus signature chain
 - `NEXUS_USDD_TREASURY_ACCOUNT` — Nexus USDD treasury account address

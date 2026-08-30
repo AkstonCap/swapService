@@ -253,7 +253,7 @@ Combined with B-6 (the poller aborts when the heartbeat is unusable), a fresh de
 
 ### 🟠 B-6 — Amounts are computed in binary floating point and reach the CLI in scientific notation — ✅ **FIXED (2026-06-15)**
 
-> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_nexus_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_nexus_token_with_txid()` now takes base units and formats them with `_format_nexus_amount()` (fixed-point, never exponent form). All call sites — the swap debit, the backing reconcile mint, and `mint_nexus_to_local()` — pass base units. Verified against the previously-failing inputs:
+> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_nexus_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_nexus_token_with_txid()` now takes base units and formats them with `_format_nexus_amount()` (fixed-point, never exponent form). All live call sites use base units. The former backing-reconcile mint and `mint_nexus_to_local()` paths were removed because automatic surplus movement is safety-disabled. Verified against the previously-failing inputs:
 >
 > | deposit (USDC units) | old float string | new CLI string |
 > |---|---|---|
@@ -391,7 +391,7 @@ No lockfile, PID file or `flock` anywhere. A double `systemd` start, a manual ru
 | **B-23** ✅ | **FIXED** — Priority 4 now re-checks `asset_owner == owner` explicitly, matching Priority 1. Original text: **inconsistent owner verification.** Priority 1 explicitly re-checks `str(asset_owner) == str(owner)` before payout (`swap_nexus.py:117`); the Priority 4 recovery path pays out relying only on the query filter, with no explicit re-check. Not currently exploitable, but the defence-in-depth is asymmetric. |
 | **B-24** ✅ | **FIXED** — `is_valid_nexus_token_account()` and all four `name=USDD` CLI arguments now use `config.NEXUS_TOKEN_NAME`. Original text: **hardcoded ticker.** `is_valid_nexus_token_account()` compares `info.get("ticker") != "USDD"` literally (`nexus_client.py:74`) rather than `config.NEXUS_TOKEN_NAME`, so the token name is not actually configurable. |
 | **B-25** ✅ | **MITIGATED** — the address is kept (users of *this* deployment need it) but now carries an explicit warning to verify it against the on-chain heartbeat and to replace it when forking. Original text: **README publishes a live vault address.** `README.md:30,36` hardcode `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ` in the user instructions where every other doc uses `<VAULT_USDC_ACCOUNT>`. Not a secret, but anyone deploying a fork ships instructions that send user funds to the **original operator's vault**. |
-| **B-26** 🟡 | **PARTIALLY ADDRESSED** — money-path failures now raise operator alerts (`src/alerts.py`) rather than only printing, and `update_heartbeat_asset` no longer dereferences a possibly-`None` parse result. A general move to the `logging` module with levels is still outstanding. Original text: **broad exception swallowing** throughout the money paths is what allowed B-2, B-3 and the previously-found dead-code calls to persist unnoticed. Money-path errors should be logged with type and context, not silently defaulted. |
+| **B-26** 🟡 | **PARTIALLY ADDRESSED** — money-path failures raise operator alerts and `update_heartbeat_asset` no longer dereferences a possibly-`None` parse result. Operator alerts and Nexus/Solana deposit lifecycle events now use structured JSON logs with UTC timestamp, level, stable event name, fields and credential redaction. A full migration of remaining money-path console output is still outstanding. Original text: **broad exception swallowing** throughout the money paths is what allowed B-2, B-3 and the previously-found dead-code calls to persist unnoticed. Money-path errors should be logged with type and context, not silently defaulted. |
 
 ---
 
@@ -411,7 +411,8 @@ The single most important systemic finding is that a large set of advertised saf
 - `HEARTBEAT_WATERLINE_NEXUS_FIELD` — ignored by the writer (B-5)
 - `SOLANA_POLL_INTERVAL` / `NEXUS_POLL_INTERVAL` — only the global `POLL_INTERVAL` is read
 - `SOLANA_MAX_TX_FETCH_PER_POLL`, `MAX_DEPOSITS_PER_LOOP`, `MICRO_DEPOSIT_FEE_PCT`, `MICRO_CREDIT_FEE_PCT`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, `NEXUS_RPC_HOST`, `METRICS_BUDGET_SEC`, `STALE_ROW_SEC`, `BACKING_DEFICIT_BPS_ALERT` — all defined, documented, unused
-- `SOL_MINT` — **listed in `REQUIRED_ENV`**, so the service refuses to start without it, yet it is used nowhere
+- `SOL_MINT` — **removed** with the dormant SOL/NXS conversion path; it is no longer
+  required at startup or exposed in the operator template.
 
 **Settings the code reads that are not in `config.py`** (each silently falls back to a hardcoded literal, so setting them in `.env` does nothing): `UNPROCESSED_PROCESS_BUDGET_SEC` (documented in `.env.example`), `UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC`, `POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES`, `FEE_EVENTS_FILE`, `VAULT_OWNER`.
 
