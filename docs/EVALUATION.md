@@ -560,7 +560,7 @@ hold-resolution, incident-response and key-rotation procedures.
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
 | Full `python -m pytest -q` | 80 passed, 10 subtests passed in a clean Python 3.11 virtual environment after the targeted dependency remediation |
-| CI workflow | Passed on code head `16e2e38` — [run 33282805163](https://github.com/distordialabs-brutus/swapService/actions/runs/33282805163); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
+| CI workflow | Passed on dependency-remediation code head `f9e9406` — [run 33291622439](https://github.com/distordialabs-brutus/swapService/actions/runs/33291622439); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
 | `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
