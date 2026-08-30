@@ -398,8 +398,11 @@ mint. A stale `None`/`False` result cannot be reintroduced as proof of non-execu
 
 ### E-011 — Documentation relocation and identity drift
 
-- The Copilot-instructions link to the moved security document is fixed.
-- Stale moved-document paths remain in `CONFIG.md:173` and `SETUP.md:504,514,517-520`.
+**Remediated locally:** operator documents now use canonical links to the moved `docs/` security,
+state-machine and audit documents. `SETUP.md` also states the fail-closed USDD→USDC mapping hold
+policy, documents production Nexus API requirements (`apiauth=1`, TLS, no remote exposure), and
+labels `apiauth=0` as isolated-development-only. The CI-contract regression test protects these
+paths and safety statements from drifting back.
 - Historical review documents intentionally retain their reviewed heads; this evaluation now
   identifies the current head and is authoritative for current status.
 - Current-tree whitespace checks pass.

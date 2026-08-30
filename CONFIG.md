@@ -178,4 +178,5 @@ At a minimum your `.env` must define: `SOLANA_RPC_URL`, `VAULT_KEYPAIR`, `VAULT_
 `config.py` raises on startup if any required var is missing; optional vars fall back to defaults above. Boolean parsing: values in ("1","true","yes","on") are treated as True case‑insensitively.
 
 ---
-See `SECURITY.md` for secure handling recommendations (permissions, rotation, secrets hygiene).
+See [docs/SECURITY.md](docs/SECURITY.md) for secure handling recommendations (permissions,
+rotation, and secrets hygiene).

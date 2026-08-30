@@ -37,7 +37,7 @@ A Python service that automates swaps between USDC (Solana) and USDD (Nexus). It
 1. User sends USDD to treasury.
 2. User publishes or updates Nexus Asset containing `txid_toService` and `receival_account`.
 3. Service polls treasury transactions; for each credit above threshold it queries assets by `txid_toService` & owner.
-4. Valid mapping -> send USDC to receival account (ATA required). Missing mapping -> pending until timeout -> refund.
+4. Valid mapping -> send USDC to receival account (ATA required). Missing mapping -> hold for operator review (no automatic Nexus refund).
 5. Micro credits below `MIN_CREDIT_USDD` treated as fees (aggregated fee-only entries).
 
 ### State & Database
@@ -280,7 +280,9 @@ spl-token balance <VAULT_USDC_ACCOUNT>
 
 **1. Daemon + session**
 ```bash
-# nexus.conf must have apiauth=0 (local only) or apiuser/apipassword set
+# Production requires authenticated TLS: apiauth=1, apiuser/apipassword, apissl=1,
+# apisslrequired=1, and an HTTPS API port. apiauth=0 is only for an isolated local
+# development node with apiremote=0; never use it for a live bridge.
 ./nexus sessions/create/local username=<USER> password=<PASS> pin=<PIN>
 ```
 The session must stay active while the service runs; re-create it if the daemon restarts.
@@ -304,7 +306,7 @@ Which calls are affected, per the bundled API docs:
 |------------|---------------------------|---------|
 | `finance/*` | **Required** | USDD debits, refunds, supply and balance reads |
 | `assets/*` | **Required** | Heartbeat create/read/update |
-| `market/*` | **Required** | Optional DEX fee conversions |
+| `market/*` | Not used | Automatic DEX fee conversion is intentionally absent; backing surplus is alert-only |
 | `register/*` | Not used | Deposit scanning, asset mapping lookups, account validation |
 
 The service validates this at startup and refuses to proceed quietly if
@@ -314,7 +316,7 @@ heartbeat update would fail and it would look like a total Nexus outage.
 > The session id is a credential: combined with the PIN it authorises spending. It is
 > redacted from logs and alerts. In production both values are carried only in the HTTPS POST
 > body to the authenticated Nexus API, not a child-process argv; keep the TLS endpoint local or
-> firewall/VPN-restricted and protect the `.env` file. See [SECURITY.md](docs/SECURITY.md).
+> firewall/VPN-restricted and protect the `.env` file. See [docs/SECURITY.md](docs/SECURITY.md).
 
 **2. Accounts**
 
@@ -552,23 +554,26 @@ the required target-node timeout/crash acceptance matrix.
 - Future: optional WebSocket subscription to cut signature polls.
 
 ## Troubleshooting (Highlights)
-See also `SECURITY.md` for security incidents & hardening.
+See also [docs/SECURITY.md](docs/SECURITY.md) for security incidents & hardening.
 
 Missing asset mapping: ensure asset includes both `txid_toService` and `receival_account` before timeout.
 High RPC usage: increase `SOLANA_POLL_INTERVAL`, reduce max fetch caps, or enable delta skip. Consider using Helius for enriched RPC.
 Stalled waterline: investigate unprocessed rows with old timestamps; they may be quarantined or awaiting mapping.
 Refund loop failures: query `quarantined_sigs` and `quarantined_txids` tables; cross-check on-chain balances.
-Nexus CLI errors: verify the daemon is running, a session is active, and `apiauth=0` is set.
+Nexus API errors: verify the daemon is running and synced, a session is active, and the
+authenticated TLS API settings (`apiauth=1`, `apissl=1`, `apisslrequired=1`) match the configured
+`NEXUS_API_URL`. Use `apiauth=0` only for an isolated non-production development node with
+`apiremote=0`.
 RPC timeouts: increase `SOLANA_RPC_TIMEOUT_SEC` or switch to a dedicated RPC provider.
 
 ## Pointers
-- Full security guidance: `SECURITY.md`
+- Full security guidance: [docs/SECURITY.md](docs/SECURITY.md)
 - Exhaustive configuration reference: `CONFIG.md`
 - User swap instructions: `README.md`
-- Initiator state machines: `SWAP_INITIATOR_STATE_MACHINES.md`
-- Server-side state machines: `STATE_MACHINES.md`
+- Initiator state machines: [docs/SWAP_INITIATOR_STATE_MACHINES.md](docs/SWAP_INITIATOR_STATE_MACHINES.md)
+- Server-side state machines: [docs/STATE_MACHINES.md](docs/STATE_MACHINES.md)
 - Operator dashboard: `python3 dashboard.py` (see above)
-- Audit findings: `AUDIT_FINDINGS.md`
+- Audit findings: [docs/AUDIT_FINDINGS.md](docs/AUDIT_FINDINGS.md)
 
 ## Appendix: Configuration Variables
 See `.env.example` for the exhaustive, annotated list. Highlights:

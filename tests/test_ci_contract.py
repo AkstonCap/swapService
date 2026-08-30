@@ -33,6 +33,25 @@ def test_markdown_link_checker_accepts_tracked_documentation():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_operator_docs_use_current_security_paths_and_fail_closed_nexus_guidance():
+    """Operator instructions must not revive moved paths or unsafe Nexus refund/API settings."""
+    config_guide = (ROOT / "CONFIG.md").read_text(encoding="utf-8")
+    setup_guide = (ROOT / "SETUP.md").read_text(encoding="utf-8")
+
+    assert "[docs/SECURITY.md](docs/SECURITY.md)" in config_guide
+    for expected in (
+        "[docs/SECURITY.md](docs/SECURITY.md)",
+        "[docs/SWAP_INITIATOR_STATE_MACHINES.md](docs/SWAP_INITIATOR_STATE_MACHINES.md)",
+        "[docs/STATE_MACHINES.md](docs/STATE_MACHINES.md)",
+        "[docs/AUDIT_FINDINGS.md](docs/AUDIT_FINDINGS.md)",
+        "`apiauth=1`",
+        "Missing mapping -> hold for operator review (no automatic Nexus refund).",
+    ):
+        assert expected in setup_guide
+    assert "nexus.conf must have apiauth=0" not in setup_guide
+    assert "Missing mapping -> pending until timeout -> refund." not in setup_guide
+
+
 def test_ci_workflow_runs_the_required_quality_gates():
     """The checked-in workflow must enforce the release-quality baseline."""
     workflow = WORKFLOW.read_text(encoding="utf-8")
