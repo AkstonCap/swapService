@@ -82,6 +82,20 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertTrue(callable(nexus_client.get_transactions_confirmations))
         self.assertTrue(callable(nexus_client.find_nexus_debits_by_references))
 
+    def test_dormant_nexus_dex_and_rebalance_paths_are_not_available_to_runtime(self):
+        """The bridge must not retain unaudited automatic money-movement helpers."""
+        self.assertFalse(hasattr(config, "SOL_MINT"))
+        for legacy_helper in (
+            "mint_nexus_to_local",
+            "token_nxs_market",
+            "nxs_token_market",
+            "list_market_bids",
+            "list_market_asks",
+            "execute_market_order",
+            "buy_nxs_with_token_budget",
+        ):
+            self.assertFalse(hasattr(nexus_client, legacy_helper), legacy_helper)
+
     def test_invalid_production_mode_in_environment_fails_configuration_loading(self):
         """A typo must never silently downgrade a production process to development mode."""
         try:

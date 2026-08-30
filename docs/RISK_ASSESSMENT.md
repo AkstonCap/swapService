@@ -253,7 +253,7 @@ Combined with B-6 (the poller aborts when the heartbeat is unusable), a fresh de
 
 ### 🟠 B-6 — Amounts are computed in binary floating point and reach the CLI in scientific notation — ✅ **FIXED (2026-06-15)**
 
-> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_nexus_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_nexus_token_with_txid()` now takes base units and formats them with `_format_nexus_amount()` (fixed-point, never exponent form). All call sites — the swap debit, the backing reconcile mint, and `mint_nexus_to_local()` — pass base units. Verified against the previously-failing inputs:
+> **Resolution:** the debit path is now exact integer/Decimal arithmetic end to end. `get_nexus_send_amount_units()` returns **base units** via `Decimal` with `ROUND_DOWN`, and `debit_nexus_token_with_txid()` now takes base units and formats them with `_format_nexus_amount()` (fixed-point, never exponent form). All live call sites use base units. The former backing-reconcile mint and `mint_nexus_to_local()` paths were removed because automatic surplus movement is safety-disabled. Verified against the previously-failing inputs:
 >
 > | deposit (USDC units) | old float string | new CLI string |
 > |---|---|---|
@@ -411,7 +411,8 @@ The single most important systemic finding is that a large set of advertised saf
 - `HEARTBEAT_WATERLINE_NEXUS_FIELD` — ignored by the writer (B-5)
 - `SOLANA_POLL_INTERVAL` / `NEXUS_POLL_INTERVAL` — only the global `POLL_INTERVAL` is read
 - `SOLANA_MAX_TX_FETCH_PER_POLL`, `MAX_DEPOSITS_PER_LOOP`, `MICRO_DEPOSIT_FEE_PCT`, `MICRO_CREDIT_FEE_PCT`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, `NEXUS_RPC_HOST`, `METRICS_BUDGET_SEC`, `STALE_ROW_SEC`, `BACKING_DEFICIT_BPS_ALERT` — all defined, documented, unused
-- `SOL_MINT` — **listed in `REQUIRED_ENV`**, so the service refuses to start without it, yet it is used nowhere
+- `SOL_MINT` — **removed** with the dormant SOL/NXS conversion path; it is no longer
+  required at startup or exposed in the operator template.
 
 **Settings the code reads that are not in `config.py`** (each silently falls back to a hardcoded literal, so setting them in `.env` does nothing): `UNPROCESSED_PROCESS_BUDGET_SEC` (documented in `.env.example`), `UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC`, `POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES`, `FEE_EVENTS_FILE`, `VAULT_OWNER`.
 

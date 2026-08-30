@@ -15,7 +15,6 @@ Legend:
 | VAULT_KEYPAIR | Y | path |  | JSON keypair file for Solana vault signer. |
 | VAULT_USDC_ACCOUNT | Y | pubkey |  | SPL USDC token account (ATA) holding liquidity. |
 | USDC_MINT | Y | pubkey |  | USDC mint (mainnet or devnet). |
-| SOL_MINT | Y | pubkey |  | SOL mint (native wrapper constant). Needed for potential fee conversions. |
 | NEXUS_PIN | Y | str |  | PIN authorizing Nexus profile operations. Never log it; in production it is sent only in an HTTPS POST body, never a child process argument. |
 | NEXUS_USDD_TREASURY_ACCOUNT | Y | str |  | USDD treasury account receiving user USDD credits & paying refunds. |
 | SOL_MAIN_ACCOUNT | Y | pubkey |  | Base SOL account (used in some balance / backing logic). |
@@ -172,7 +171,7 @@ of the live acceptance matrix.
 4. (If sensitive) do NOT add a real value—leave placeholder.  
 
 ## Minimal Required Set (Barebones)
-At a minimum your `.env` must define: `SOLANA_RPC_URL`, `VAULT_KEYPAIR`, `VAULT_USDC_ACCOUNT`, `USDC_MINT`, `SOL_MINT`, `NEXUS_PIN`, `NEXUS_USDD_TREASURY_ACCOUNT`, `SOL_MAIN_ACCOUNT`.
+At a minimum your `.env` must define: `SOLANA_RPC_URL`, `VAULT_KEYPAIR`, `VAULT_USDC_ACCOUNT`, `USDC_MINT`, `NEXUS_PIN`, `NEXUS_USDD_TREASURY_ACCOUNT`, `SOL_MAIN_ACCOUNT`.
 
 ## Validation Behavior
 `config.py` raises on startup if any required var is missing; optional vars fall back to defaults above. Boolean parsing: values in ("1","true","yes","on") are treated as True case‑insensitively.

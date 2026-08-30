@@ -10,7 +10,6 @@ REQUIRED_ENV = [
     ("VAULT_KEYPAIR",),
     ("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT"),
     ("SOLANA_TOKEN_MINT", "USDC_MINT"),
-    ("SOL_MINT",),
     ("NEXUS_PIN",),
     ("NEXUS_USDD_TREASURY_ACCOUNT",),
     ("SOL_MAIN_ACCOUNT",),
@@ -70,7 +69,6 @@ SOLANA_TOKEN_MINT = USDC_MINT
 # Display ticker for the Solana-side token; used in logs, the dashboard and the on-chain
 # service record. Purely cosmetic - the mint above is what is enforced.
 SOLANA_TOKEN_SYMBOL = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
-SOL_MINT = PublicKey.from_string(os.getenv("SOL_MINT"))
 SOL_MAIN_ACCOUNT = PublicKey.from_string(os.getenv("SOL_MAIN_ACCOUNT"))
 
 # Decimals for each side of the pair
