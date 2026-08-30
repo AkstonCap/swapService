@@ -3,6 +3,7 @@
 
 import importlib
 import json
+import logging
 import os
 import runpy
 import sqlite3
@@ -1780,6 +1781,57 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(stored["remote_txid"], "chain-txid")
         self.assertEqual(run.call_count, 1)
+
+    @patch("builtins.print")
+    @patch.object(nexus_client, "_run", return_value=(1, "", "Nexus API request failed"))
+    def test_ambiguous_nexus_transfer_client_never_uses_console_prose(self, _run, print_mock):
+        """A durable Nexus transfer hold must be emitted to structured logging, not print()."""
+        intent = {
+            "id": "intent-structured-log",
+            "from_address": "TREASURY",
+            "to_address": "QUARANTINE",
+            "amount_usdd_units": 2_000_000,
+            "reference": "bridge-xfer:intent-structured-log",
+        }
+        with patch.object(nexus_client.config, "NEXUS_PIN", "test-pin"), patch.object(
+            nexus_client.state_db, "claim_nexus_transfer_intent", return_value=intent
+        ), patch.object(nexus_client.state_db, "update_nexus_transfer_intent"), patch.object(
+            nexus_client, "_log"
+        ) as log:
+            result = nexus_client.execute_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(result.status, "outcome_unknown")
+        print_mock.assert_not_called()
+        log.assert_called_once_with(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id="intent-structured-log",
+            reference="bridge-xfer:intent-structured-log",
+            reason="cli_error",
+            error="Nexus API request failed",
+        )
+
+    @patch.object(nexus_client, "_run", return_value=(1, "", "Nexus API request failed"))
+    def test_nexus_transfer_outcome_is_persisted_when_structured_logging_fails(self, _run):
+        """An observability failure must never make an ambiguous Nexus debit retryable."""
+        intent = {
+            "id": "intent-log-failure",
+            "from_address": "TREASURY",
+            "to_address": "QUARANTINE",
+            "amount_usdd_units": 2_000_000,
+            "reference": "bridge-xfer:intent-log-failure",
+        }
+        with patch.object(nexus_client.config, "NEXUS_PIN", "test-pin"), patch.object(
+            nexus_client.state_db, "claim_nexus_transfer_intent", return_value=intent
+        ), patch.object(
+            nexus_client.state_db, "update_nexus_transfer_intent"
+        ) as update, patch.object(
+            nexus_client.structured_logging, "emit", side_effect=RuntimeError("logger failed")
+        ):
+            result = nexus_client.execute_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(result.status, "outcome_unknown")
+        update.assert_called_once_with(intent["id"], status="outcome_unknown")
 
     def test_restart_marks_interrupted_nexus_transfer_as_outcome_unknown_without_reexecution(self):
         """A crash after claiming an intent leaves an explicit hold, never a second debit."""

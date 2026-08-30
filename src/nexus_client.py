@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import subprocess
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
@@ -12,8 +13,20 @@ from urllib.request import (
     build_opener,
 )
 from . import config
-from . import state_db, nexus_client
+from . import state_db, nexus_client, structured_logging
 import time
+
+
+_LOG = structured_logging.get_logger("swapService.nexus_client")
+
+
+def _log(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    """Best-effort secret-safe diagnostics that cannot interrupt money-path state changes."""
+    try:
+        structured_logging.emit(_LOG, level, event, **fields)
+    except Exception:
+        # Logging must never turn a known/unknown transfer result into a retryable state.
+        pass
 
 
 # API families whose endpoints operate under a logged-in signature chain. Per the Nexus
@@ -451,6 +464,12 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
 
     if not config.NEXUS_PIN:
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reason="missing_pin",
+        )
         return TransferExecution(False, "outcome_unknown")
 
     amount_str = _format_nexus_amount(int(intent["amount_usdd_units"]))
@@ -466,13 +485,27 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
     try:
         code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
     except Exception as exc:
-        print("Nexus transfer outcome unknown:", redact(str(exc)))
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reference=intent["reference"],
+            reason="exception",
+            error=redact(str(exc)),
+        )
         return TransferExecution(True, "outcome_unknown")
 
     if code != 0:
-        print("Nexus transfer outcome unknown:", redact(err or out))
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reference=intent["reference"],
+            reason="cli_error",
+            error=redact(err or out),
+        )
         return TransferExecution(True, "outcome_unknown")
 
     data = _parse_json_lenient(out)
@@ -481,11 +514,24 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
         # Text-only success is deliberately not treated as a safe retry.  The
         # persisted reference is resolved against the chain in a later pass.
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reference=intent["reference"],
+            reason="unparsed_success",
+        )
         return TransferExecution(True, "outcome_unknown")
 
     remote_txid = str(remote_txid)
     state_db.update_nexus_transfer_intent(
         intent_id, status="submitted", remote_txid=remote_txid
+    )
+    _log(
+        "NEXUS_TRANSFER_SUBMITTED",
+        intent_id=intent_id,
+        reference=intent["reference"],
+        remote_txid=remote_txid,
     )
     return TransferExecution(True, "submitted", remote_txid)
 
@@ -513,13 +559,24 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
         ]
         matching_txids = {evidence.remote_txid for evidence in candidates}
         if len(matching_txids) != 1:
-            print("[NEXUS_TRANSFER_HOLD] intent=%s reference=%s lookup=%s" % (
-                intent["id"], reference, lookup.reason or "no_exact_debit_match"
-            ))
+            _log(
+                "NEXUS_TRANSFER_HELD",
+                level=logging.WARNING,
+                intent_id=intent["id"],
+                reference=reference,
+                reason=lookup.reason or "no_exact_debit_match",
+                matching_txids=len(matching_txids),
+            )
             continue
         remote_txid = matching_txids.pop()
         state_db.update_nexus_transfer_intent(
             intent["id"], status="completed", remote_txid=remote_txid, resolved=True
+        )
+        _log(
+            "NEXUS_TRANSFER_RESOLVED",
+            intent_id=intent["id"],
+            reference=reference,
+            remote_txid=remote_txid,
         )
         resolved += 1
     return resolved

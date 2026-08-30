@@ -556,8 +556,13 @@ hold-resolution, incident-response and key-rotation procedures.
 5. **In progress:** structured JSON logging now covers operator alerts and Nexus/Solana
    deposit lifecycle transitions, with field-level credential redaction. Both chain pollers now
    emit stable ingestion/classification summaries and fail-closed enumeration failures (including
-   Nexus page and reason context) instead of console prose. Migrate the remaining lower-level
-   client money-path output and refresh this evaluation against the final reviewed commit.
+   Nexus page and reason context) instead of console prose. The durable Nexus transfer-intent
+   client now emits redacted, machine-readable submission, ambiguous-outcome, hold and positive
+   resolution events keyed by immutable intent ID/reference and remote txid. The diagnostics are
+   best-effort and cannot interrupt durable state transitions, so operators can correlate a Nexus
+   debit with the related Solana payout path without reopening an ambiguous retry path. Migrate the
+   remaining lower-level Nexus and Solana client money-path output and refresh this evaluation
+   against the final reviewed commit.
 
 ---
 
