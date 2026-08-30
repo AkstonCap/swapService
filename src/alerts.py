@@ -16,12 +16,15 @@ Identical events are rate-limited to one per ALERT_MIN_INTERVAL_SEC so a stuck c
 cannot flood the channel.
 """
 import json
+import logging
 import subprocess
 import threading
 import time
 from typing import Any, Dict
 
-from . import config
+from . import config, structured_logging
+
+_LOG = structured_logging.get_logger("swapService.alerts")
 
 CRITICAL = "critical"
 WARNING = "warning"
@@ -50,7 +53,11 @@ def _deliver(payload: dict) -> None:
                           headers={"Content-Type": "application/json"},
                           timeout=10)
         except Exception as e:
-            print(f"[alert] webhook delivery failed: {e}")
+            structured_logging.emit(
+                _LOG, logging.WARNING, "alert_webhook_delivery_failed",
+                "operator alert webhook delivery failed",
+                error_type=type(e).__name__, error=str(e),
+            )
 
     cmd = getattr(config, "ALERT_COMMAND", None)
     if cmd:
@@ -58,15 +65,26 @@ def _deliver(payload: dict) -> None:
             subprocess.run([cmd], input=body, text=True, timeout=15,
                            capture_output=True)
         except Exception as e:
-            print(f"[alert] command delivery failed: {e}")
+            structured_logging.emit(
+                _LOG, logging.WARNING, "alert_command_delivery_failed",
+                "operator alert command delivery failed",
+                error_type=type(e).__name__, error=str(e),
+            )
 
 
 def alert(level: str, event: str, message: str = "", **fields) -> None:
     """Emit an operator alert. Always logs; delivers if a channel is configured."""
     try:
         safe_fields = {k: _redact(v) for k, v in fields.items()}
-        detail = " ".join(f"{k}={v}" for k, v in safe_fields.items() if v is not None)
-        print(f"[ALERT:{level}] {event} {_redact(message)} {detail}".rstrip())
+        structured_logging.emit(
+            _LOG,
+            {CRITICAL: logging.CRITICAL, WARNING: logging.WARNING, INFO: logging.INFO}.get(
+                level, logging.INFO
+            ),
+            event,
+            _redact(message),
+            **safe_fields,
+        )
 
         # Rate-limit identical events so a persistent condition cannot flood the channel.
         now = time.monotonic()
@@ -91,7 +109,10 @@ def alert(level: str, event: str, message: str = "", **fields) -> None:
         # Deliver off the hot path; a slow webhook must not stall the swap loop.
         threading.Thread(target=_deliver, args=(payload,), daemon=True).start()
     except Exception as e:
-        print(f"[alert] error emitting alert: {e}")
+        structured_logging.emit(
+            _LOG, logging.ERROR, "alert_emit_failed", "operator alert emission failed",
+            error_type=type(e).__name__, error=str(e),
+        )
 
 
 def critical(event: str, message: str = "", **fields) -> None:

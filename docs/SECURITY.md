@@ -60,8 +60,12 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 
 ## Logging & Monitoring
 - Configure `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. Without one, backing-deficit pauses,
-  unbacked-mint discrepancies and halted pollers are only visible on stdout.
-- Capture stdout/stderr to log aggregation (with rotation). Remove sensitive env echoing.
+  unbacked-mint discrepancies and halted pollers remain local to the service host.
+- Operator alerts plus Nexus/Solana deposit lifecycle transitions are emitted as one
+  JSON object per line on stdout, with UTC timestamp, severity, stable event name and
+  contextual fields. Collect stdout/stderr with rotation; do not parse human terminal prose.
+- Structured logging redacts Nexus PIN/session/API-password material, Solana keypair paths and
+  alert webhook URLs before output. Do not add raw chain credentials to arbitrary log messages.
 - Monitor: processed swaps per hour, refund counts, micro credit ratio, backlog queue length, RPC error rate.
 - Alerting: high refund failure rate, backing ratio breach (< BACKING_DEFICIT_PAUSE_PCT), stale heartbeat.
 

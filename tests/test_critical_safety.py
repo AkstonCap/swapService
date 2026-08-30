@@ -61,12 +61,32 @@ os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
 from src import (  # noqa: E402
-    balance_reconciler, config, fees, main, nexus_client, solana_client, startup_recovery,
-    state_db, swap_nexus,
+    alerts, balance_reconciler, config, fees, main, nexus_client, solana_client,
+    startup_recovery, state_db, swap_nexus,
 )
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    def test_operator_alerts_use_structured_events_not_terminal_prose(self):
+        """Critical Nexus/Solana custody events must be parseable by incident tooling."""
+        with patch.object(alerts.structured_logging, "emit") as emit:
+            alerts.alert(
+                alerts.CRITICAL,
+                "nexus_debit_held",
+                "Nexus debit needs resolution",
+                intent_id="intent-1",
+                solana_signature="sig-1",
+            )
+
+        emit.assert_called_once_with(
+            alerts._LOG,
+            __import__("logging").CRITICAL,
+            "nexus_debit_held",
+            "Nexus debit needs resolution",
+            intent_id="intent-1",
+            solana_signature="sig-1",
+        )
+
     def test_ambiguous_nexus_debits_have_no_expiring_negative_lookup_window(self):
         """An uncertain Nexus debit must hold for resolution, not age into a false negative."""
         self.assertFalse(hasattr(config, "DEBIT_VERIFY_GRACE_SEC"))

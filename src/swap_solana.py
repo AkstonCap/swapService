@@ -1,13 +1,13 @@
+import logging
 from decimal import Decimal
-from . import config, state_db, nexus_client, solana_client, fees, alerts
+from . import config, state_db, nexus_client, solana_client, fees, alerts, structured_logging
 
-# Lightweight structured logging for deposit lifecycle only
+_LOG = structured_logging.get_logger("swapService.solana")
+
+
 def _log(event: str, **fields):
-    parts = [f"{event}"]
-    for k, v in fields.items():
-        if v is not None:
-            parts.append(f"{k}={v}")
-    print(" ".join(parts))
+    """Record Solana deposit lifecycle transitions as structured bridge events."""
+    structured_logging.emit(_LOG, logging.INFO, event, **fields)
 
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:

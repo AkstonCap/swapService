@@ -553,8 +553,9 @@ hold-resolution, incident-response and key-rotation procedures.
    DEX execution/rebalancer helpers and the direct local mint helper are absent from runtime;
    the regression contract prevents their reintroduction.
 4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
-5. Fix remaining moved-document paths, add structured logging and refresh this evaluation
-   against the final reviewed commit.
+5. **In progress:** structured JSON logging now covers operator alerts and Nexus/Solana
+   deposit lifecycle transitions, with field-level credential redaction. Migrate the remaining
+   money-path console output and refresh this evaluation against the final reviewed commit.
 
 ---
 

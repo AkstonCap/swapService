@@ -1,6 +1,9 @@
+import logging
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from . import config, state_db, solana_client, nexus_client, fees, alerts
+from . import config, state_db, solana_client, nexus_client, fees, alerts, structured_logging
 import time
+
+_LOG = structured_logging.get_logger("swapService.nexus")
 
 # Allowed lifecycle comments for unprocessed txids
 NEXUS_STATUS_PENDING = "pending_receival"
@@ -32,11 +35,8 @@ _NEXUS_ALLOWED_STATUSES = {
 
 
 def _log(kind: str, **fields):
-    try:
-        parts = [f"{k}={v}" for k, v in fields.items() if v is not None]
-        print(f"[{kind}] " + " ".join(parts))
-    except Exception:
-        pass
+    """Record Nexus deposit lifecycle transitions as structured bridge events."""
+    structured_logging.emit(_LOG, logging.INFO, kind, **fields)
 
 
 def _parse_decimal_amount(val) -> Decimal:
