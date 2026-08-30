@@ -98,6 +98,9 @@ class CriticalSafetyTests(unittest.TestCase):
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0),
             patch.object(config, "ALERT_WEBHOOK_URL", ""),
             patch.object(config, "ALERT_COMMAND", ""),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
             patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
             patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
         ):
@@ -115,6 +118,34 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(main.alerts, "critical")
+    def test_production_controls_require_https_nexus_api_transport(self, critical):
+        """A live bridge must not place Nexus credentials in a child-process argv."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+            patch.object(config, "NEXUS_API_URL", "", create=True),
+            patch.object(config, "NEXUS_API_USER", "", create=True),
+            patch.object(config, "NEXUS_API_PASSWORD", "", create=True),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=[
+                "NEXUS_API_URL (HTTPS)",
+                "NEXUS_API_USER",
+                "NEXUS_API_PASSWORD",
+            ],
+        )
+
+    @patch.object(main.alerts, "critical")
     def test_production_controls_require_both_quarantine_destinations(self, critical):
         """A live bridge cannot strand either chain's failed-payout funds in its vault."""
         with (
@@ -124,6 +155,9 @@ class CriticalSafetyTests(unittest.TestCase):
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
             patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
             patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
             patch.object(config, "USDC_QUARANTINE_ACCOUNT", ""),
             patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", ""),
         ):
@@ -157,6 +191,91 @@ class CriticalSafetyTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 1)
         init_db.assert_not_called()
+
+    def test_production_nexus_transport_rejects_malformed_or_ambiguous_urls(self):
+        """A production URL must unambiguously name one HTTPS Nexus API origin."""
+        invalid_urls = (
+            "http://127.0.0.1:8080",
+            "https://:8443",
+            "https://127.0.0.1?",
+            "https://127.0.0.1#",
+            "https://127.0.0.1:not-a-port",
+            "https://user:pass@127.0.0.1:8443",
+        )
+        for url in invalid_urls:
+            with self.subTest(url=url):
+                with (
+                    patch.object(config, "NEXUS_API_URL", url),
+                    patch.object(config, "NEXUS_API_USER", "api-user"),
+                    patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+                ):
+                    self.assertEqual(
+                        nexus_client.nexus_api_transport_errors(),
+                        ["NEXUS_API_URL (HTTPS)"],
+                    )
+
+    @patch("src.nexus_client.build_opener")
+    def test_nexus_api_transport_disables_http_redirects(self, build_opener):
+        """Basic API credentials must never follow a redirect to another origin."""
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+            def read(self):
+                return b'{}'
+
+        build_opener.return_value.open.return_value = Response()
+        with (
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+        ):
+            self.assertEqual(nexus_client._run([config.NEXUS_CLI, "system/get/info"]), (0, "{}", ""))
+
+        handlers = build_opener.call_args.args
+        self.assertTrue(any(isinstance(handler, nexus_client._NoRedirect) for handler in handlers))
+        build_opener.return_value.open.assert_called_once()
+
+    @patch("src.nexus_client.build_opener")
+    def test_nexus_api_transport_sends_nexus_credentials_only_in_post_body(self, build_opener):
+        """Production Nexus calls must not expose PIN/session through process argv."""
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+            def read(self):
+                return b'{"txid":"remote-tx"}'
+
+        build_opener.return_value.open.return_value = Response()
+        with (
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+        ):
+            code, out, err = nexus_client._run([
+                config.NEXUS_CLI,
+                "finance/debit/token",
+                "from=USDD",
+                "to=recipient",
+                "amount=1",
+                "pin=PIN123",
+                "session=SESSION-ABC",
+            ])
+
+        self.assertEqual((code, out, err), (0, '{"txid":"remote-tx"}', ""))
+        request = build_opener.return_value.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://127.0.0.1:8443/finance/debit/token")
+        payload = request.data.decode("utf-8")
+        self.assertIn("pin=PIN123", payload)
+        self.assertIn("session=SESSION-ABC", payload)
+        self.assertEqual(request.get_header("Content-type"), "application/x-www-form-urlencoded")
+        self.assertTrue(request.get_header("Authorization").startswith("Basic "))
 
     @patch.object(nexus_client.state_db, "update_unprocessed_sig_status")
     @patch.object(nexus_client.state_db, "filter_unprocessed_sigs")

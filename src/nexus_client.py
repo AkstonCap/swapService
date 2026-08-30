@@ -1,8 +1,16 @@
+import base64
 import json
 import subprocess
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    Request,
+    build_opener,
+)
 from . import config
 from . import state_db, nexus_client
 import time
@@ -50,8 +58,133 @@ def redact(text: str) -> str:
     return out
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Raise on 3xx instead of forwarding Basic credentials to another URL."""
+
+    @staticmethod
+    def _blocked_redirect(req: Request, fp: Any, code: int, msg: str,
+                          headers: Any) -> Any:
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+    def http_error_301(self, req: Request, fp: Any, code: int,
+                       msg: str, headers: Any) -> Any:
+        return self._blocked_redirect(req, fp, code, msg, headers)
+
+    def http_error_302(self, req: Request, fp: Any, code: int,
+                       msg: str, headers: Any) -> Any:
+        return self._blocked_redirect(req, fp, code, msg, headers)
+
+    def http_error_303(self, req: Request, fp: Any, code: int,
+                       msg: str, headers: Any) -> Any:
+        return self._blocked_redirect(req, fp, code, msg, headers)
+
+    def http_error_307(self, req: Request, fp: Any, code: int,
+                       msg: str, headers: Any) -> Any:
+        return self._blocked_redirect(req, fp, code, msg, headers)
+
+    def http_error_308(self, req: Request, fp: Any, code: int,
+                       msg: str, headers: Any) -> Any:
+        return self._blocked_redirect(req, fp, code, msg, headers)
+
+
+def _is_valid_nexus_api_url(api_url: str) -> bool:
+    """Require an unambiguous credential-free HTTPS base URL."""
+    raw = str(api_url or "").strip()
+    try:
+        parsed = urlsplit(raw)
+        # Accessing ``port`` validates malformed/non-numeric/out-of-range port values.
+        _ = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "https"
+        and parsed.netloc
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and "?" not in raw
+        and "#" not in raw
+    )
+
+
+def nexus_api_transport_errors() -> list[str]:
+    """Return production-blocking errors for the credential-safe Nexus transport."""
+    errors: list[str] = []
+    api_url = str(getattr(config, "NEXUS_API_URL", "") or "").strip()
+    # HTTP is adequate only for deliberately isolated development nodes. Production carries
+    # a PIN and (often) a spending-authorising multiuser session, so it needs TLS and must
+    # not permit userinfo embedded in a URL that could be logged by a proxy or exception.
+    if not _is_valid_nexus_api_url(api_url):
+        errors.append("NEXUS_API_URL (HTTPS)")
+    if not str(getattr(config, "NEXUS_API_USER", "") or "").strip():
+        errors.append("NEXUS_API_USER")
+    if not str(getattr(config, "NEXUS_API_PASSWORD", "") or "").strip():
+        errors.append("NEXUS_API_PASSWORD")
+    return errors
+
+
+def _run_via_nexus_api(cmd: list[str], timeout: int) -> tuple[int, str, str]:
+    """POST a Nexus CLI-shaped command without putting credentials in ``argv``.
+
+    Nexus accepts the same logical endpoint and key/value fields through its HTTP API.
+    The CLI-shaped command is retained at call sites so the fallback remains compatible,
+    while the PIN/session move into an in-memory form body protected by HTTPS.
+    """
+    if len(cmd) < 2 or not str(cmd[1]).strip():
+        return 1, "", "Nexus API request has no endpoint"
+    base_url = str(getattr(config, "NEXUS_API_URL", "") or "").strip().rstrip("/")
+    if not _is_valid_nexus_api_url(base_url):
+        return 1, "", "Nexus API URL is invalid"
+    endpoint = str(cmd[1]).lstrip("/")
+    if "?" in endpoint or "#" in endpoint:
+        return 1, "", "Nexus API endpoint is invalid"
+
+    fields: list[tuple[str, str]] = []
+    for raw_arg in cmd[2:]:
+        arg = str(raw_arg)
+        if "=" not in arg:
+            return 1, "", "Nexus API cannot encode a non key=value CLI argument"
+        key, value = arg.split("=", 1)
+        if not key:
+            return 1, "", "Nexus API cannot encode an empty parameter name"
+        fields.append((key, value))
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    api_user = str(getattr(config, "NEXUS_API_USER", "") or "")
+    api_password = str(getattr(config, "NEXUS_API_PASSWORD", "") or "")
+    if api_user or api_password:
+        if not (api_user and api_password):
+            return 1, "", "Nexus API Basic authentication is incomplete"
+        credentials = base64.b64encode(f"{api_user}:{api_password}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {credentials}"
+
+    request = Request(
+        f"{base_url}/{endpoint}", data=urlencode(fields).encode("utf-8"),
+        headers=headers, method="POST",
+    )
+    try:
+        # Never follow redirects: an HTTP 3xx must not forward Basic credentials (or the
+        # PIN/session body) from the configured Nexus API origin to another endpoint.
+        opener = build_opener(_NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
+            return 0, response.read().decode("utf-8"), ""
+    except HTTPError as exc:
+        # Deliberately do not surface a server response body: a misconfigured node could
+        # echo submitted form data, including the PIN/session, in its error text.
+        return int(exc.code or 1), "", f"Nexus API HTTP {exc.code}"
+    except (URLError, TimeoutError, OSError, UnicodeDecodeError):
+        return 1, "", "Nexus API request failed"
+
+
 def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
     cmd = apply_session(cmd)
+    if str(getattr(config, "NEXUS_API_URL", "") or "").strip():
+        return _run_via_nexus_api(cmd, timeout)
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return res.returncode, res.stdout, res.stderr
 

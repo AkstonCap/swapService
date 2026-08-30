@@ -4,7 +4,11 @@ import threading
 from . import config, state_db, alerts  # switched from JSON state to DB only
 from .swap_solana import poll_solana_deposits
 from .swap_nexus import poll_nexus_deposits, process_unprocessed_txids
-from .nexus_client import get_heartbeat_asset, update_heartbeat_asset
+from .nexus_client import (
+    get_heartbeat_asset,
+    update_heartbeat_asset,
+    nexus_api_transport_errors,
+)
 
 _last_heartbeat = 0
 _last_reconcile = 0
@@ -105,6 +109,10 @@ def validate_production_controls() -> bool:
         missing.append("USDC_QUARANTINE_ACCOUNT")
     if not str(getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "") or "").strip():
         missing.append("NEXUS_USDD_QUARANTINE_ACCOUNT")
+    # The CLI accepts PIN/session only as argv parameters. Production must use the
+    # equivalent HTTPS POST transport, which keeps these spending credentials out of
+    # process listings while preserving Nexus' Basic API authentication boundary.
+    missing.extend(nexus_api_transport_errors())
 
     if not missing:
         return True

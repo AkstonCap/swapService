@@ -16,7 +16,7 @@ Legend:
 | VAULT_USDC_ACCOUNT | Y | pubkey |  | SPL USDC token account (ATA) holding liquidity. |
 | USDC_MINT | Y | pubkey |  | USDC mint (mainnet or devnet). |
 | SOL_MINT | Y | pubkey |  | SOL mint (native wrapper constant). Needed for potential fee conversions. |
-| NEXUS_PIN | Y | str |  | PIN unlocking Nexus CLI operations. |
+| NEXUS_PIN | Y | str |  | PIN authorizing Nexus profile operations. Never log it; in production it is sent only in an HTTPS POST body, never a child process argument. |
 | NEXUS_USDD_TREASURY_ACCOUNT | Y | str |  | USDD treasury account receiving user USDD credits & paying refunds. |
 | SOL_MAIN_ACCOUNT | Y | pubkey |  | Base SOL account (used in some balance / backing logic). |
 
@@ -43,9 +43,12 @@ Legend:
 ## Nexus Accounts (Optional / Conditional)
 | Var | Req | Type | Default | Notes |
 |-----|-----|------|---------|-------|
-| NEXUS_CLI_PATH | N | path | ./nexus | Executable path. Ensure chmod +x. |
-| NEXUS_MULTIUSER | N | bool | false | Set true only if `nexus.conf` has `multiuser=1`. Controls whether `session=<id>` is appended to session-scoped API calls. |
-| NEXUS_SESSION | N | str |  | Session id from `sessions/create/local`. **Required when NEXUS_MULTIUSER=true** — every finance/*, assets/*, market/*, supply/* call needs it. Never sent in single-user mode (the API rejects it). Credential: redacted from logs and alerts. |
+| NEXUS_CLI_PATH | N | path | ./nexus | CLI fallback used only outside production; executable path when no API URL is configured. |
+| NEXUS_API_URL | Production: Y | https URL |  | Nexus HTTPS API base URL, e.g. `https://127.0.0.1:8443`. Must not embed credentials, a query, or a fragment. |
+| NEXUS_API_USER | Production: Y | str |  | HTTP Basic-auth user configured as `apiuser` in `nexus.conf`. |
+| NEXUS_API_PASSWORD | Production: Y | secret |  | HTTP Basic-auth password configured as `apipassword`; never log it. |
+| NEXUS_MULTIUSER | N | bool | false | Set true only if `nexus.conf` has `multiuser=1`. Controls whether `session=<id>` is included in the HTTPS POST body for session-scoped API calls. |
+| NEXUS_SESSION | N | str |  | Session id from `sessions/create/local`. **Required when NEXUS_MULTIUSER=true** — every finance/*, assets/*, market/*, supply/* call needs it. Never sent in single-user mode (the API rejects it). Credential: redacted from logs and alerts; production sends it only in the HTTPS request body. |
 | NEXUS_USDD_LOCAL_ACCOUNT | N | str |  | Receives micro USDD credits / congestion fees. |
 | NEXUS_USDD_QUARANTINE_ACCOUNT | N | str |  | Destination for quarantined failed USDD refunds. If unset, quarantined USDD stays in the treasury and keeps counting toward the backing ratio. |
 | NEXUS_USDD_FEES_ACCOUNT | N | str |  | If separating fee accrual from local account. |

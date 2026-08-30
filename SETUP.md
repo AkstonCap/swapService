@@ -94,38 +94,43 @@ solana --version      # Should be 1.16+ or 2.x
 spl-token --version   # Should be 3.x+
 ```
 
-### Nexus Node & CLI Access
+### Nexus Node & API Access
 
-The service invokes the Nexus CLI binary as a subprocess for all Nexus operations (debits, asset queries, heartbeat updates).
+The service sends profile-authenticated Nexus operations through the daemon API. In production it
+uses HTTPS POST rather than a CLI child process, so profile credentials never appear in `ps` or
+`/proc/<pid>/cmdline`.
 
 **Requirements:**
-1. **Nexus daemon running** — The CLI connects to a local Nexus daemon. Ensure the daemon is started and synced.
-2. **API server enabled** — The daemon must have its API server active. Configure in `nexus.conf`:
+1. **Nexus daemon running and synced** — Verify `system/get/info` before allowing a live bridge to process funds.
+2. **Authenticated TLS API enabled** — Production `nexus.conf` must contain:
+   ```conf
+   apiuser=<random-api-user>
+   apipassword=<random-api-password>
+   apiauth=1
+   apissl=1
+   apisslrequired=1
+   apisslport=8443
+   apiremote=0
    ```
-   # Option A: Disable authentication (local/trusted networks only)
-   apiauth=0
-
-   # Option B: Set API credentials (recommended for remote access)
-   apiuser=your_api_user
-   apipassword=your_api_password
-   ```
-   Without either setting, the API server will not start and the CLI will not work.
-3. **Active session** — The service uses `pin=<PIN>` in CLI commands, which requires an active session. Create one before starting the service:
+   The API credentials protect node access; they are distinct from Nexus profile credentials.
+   A service on the same host may use `https://127.0.0.1:8443`; otherwise restrict access with
+   a firewall/VPN and validate the server certificate. Do not use `--insecure`-style TLS bypasses.
+3. **Active profile/session** — `pin=<PIN>` remains a Nexus command parameter and a multiuser
+   node requires a session, but the production transport sends both only in the HTTPS POST body.
+   Create a session on the trusted node before starting the service:
    ```bash
    ./nexus sessions/create/local username=<YOUR_USER> password=<YOUR_PASS> pin=<YOUR_PIN>
    ```
-   The session must remain active while the service runs. If the daemon restarts, re-create the session.
-4. **CLI binary accessible** — Set `NEXUS_CLI_PATH` in `.env` to the path of the CLI binary:
+   The session must remain active while the service runs. If the daemon restarts, re-create it.
+4. **Production environment transport** — configure:
    ```env
-   NEXUS_CLI_PATH=./nexus       # Relative (from repo root)
-   NEXUS_CLI_PATH=/usr/bin/nexus # Absolute
+   NEXUS_API_URL=https://127.0.0.1:8443
+   NEXUS_API_USER=<apiuser>
+   NEXUS_API_PASSWORD=<apipassword>
    ```
-   On Linux/macOS, ensure it's executable: `chmod +x ./nexus`
-
-**Nexus CLI Timeout:** If the CLI is slow (e.g., large transaction history), increase:
-```env
-NEXUS_CLI_TIMEOUT_SEC=20  # Default 20s; increase for slow nodes
-```
+   `SWAP_PRODUCTION_MODE=true` rejects a missing/non-HTTPS URL, embedded URL credentials,
+   or missing Basic-auth values before opening SQLite or polling either the Nexus or Solana chain.
+   The CLI path remains a local-development compatibility fallback only.
 
 ### Nexus Account Setup
 
@@ -307,8 +312,9 @@ The service validates this at startup and refuses to proceed quietly if
 heartbeat update would fail and it would look like a total Nexus outage.
 
 > The session id is a credential: combined with the PIN it authorises spending. It is
-> redacted from logs and alerts, but like the PIN it is passed as a CLI argument and is
-> therefore visible to local users via `ps`. See [SECURITY.md](docs/SECURITY.md).
+> redacted from logs and alerts. In production both values are carried only in the HTTPS POST
+> body to the authenticated Nexus API, not a child-process argv; keep the TLS endpoint local or
+> firewall/VPN-restricted and protect the `.env` file. See [SECURITY.md](docs/SECURITY.md).
 
 **2. Accounts**
 

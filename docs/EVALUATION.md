@@ -333,9 +333,22 @@ two-person production policy. A locally executable workflow is not yet operation
 
 ### E-008 — Nexus PIN and session are exposed in process arguments
 
-**Priority:** P2 custody hardening
+**Priority:** P2 custody hardening — **remediated for production runtime**
 
-State-changing Nexus calls pass `pin=` and, in multiuser mode, `session=` through argv. Local users can read them through process inspection. Use a Nexus-supported unlocked session, stdin, protected credential channel or isolated service account. Do not invent a transport the target CLI does not support; verify the mechanism on the actual build.
+The production service now sends every runtime Nexus operation requiring a profile PIN or
+multiuser session through the daemon's authenticated HTTPS API rather than invoking the CLI with
+`pin=` / `session=` arguments. `NEXUS_API_URL` must be a
+credential-free `https` base URL and `NEXUS_API_USER` / `NEXUS_API_PASSWORD` must be set; explicit
+production mode refuses startup before SQLite opens or either the Nexus/Solana poller starts when
+any transport control is absent. The form body carries the Nexus profile PIN and, when
+`multiuser=1`, session identifier; they are therefore absent from child-process argv and normal
+process listings. HTTP response bodies on transport errors are deliberately discarded so a broken
+node cannot reflect those fields into logs.
+
+The CLI fallback remains only for non-production local development. Operators must configure
+`apiauth=1`, `apissl=1`, `apisslrequired=1`, an HTTPS API port, certificate validation, and
+local/VPN/firewall network restriction on the target Nexus node. The live-node acceptance matrix
+must verify those settings and the target node's POST-form semantics before deployment.
 
 ### E-009 — Exposure controls and alerting are optional by default
 
@@ -520,8 +533,7 @@ hold-resolution, incident-response and key-rotation procedures.
 
 ### Batch 6 — Custody, dependency and maintainability hardening
 
-1. Move Nexus PIN/session values out of argv where the target CLI supports a verified safer
-   channel or isolate the service account so process inspection is not a credential boundary.
+1. ✅ Production uses the verified Nexus HTTPS API POST transport instead of CLI argv for PIN/session; it requires credential-free `NEXUS_API_URL` HTTPS plus API Basic credentials, while the CLI fallback remains development-only. Target-node TLS and POST-form acceptance remain live-matrix evidence.
 2. Compatibility-test `python-dotenv==1.2.2` and `requests==2.33.0`; update only after the
    Nexus/Solana suite and live matrix remain green.
 3. Remove dead configuration and unsafe dormant helpers or clearly isolate them.

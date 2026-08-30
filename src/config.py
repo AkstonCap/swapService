@@ -121,6 +121,12 @@ def solana_units_to_nexus(units, round_up: bool = False) -> int:
 
 # Nexus
 NEXUS_CLI = os.getenv("NEXUS_CLI_PATH", "./nexus")
+# Development may retain the CLI compatibility path. Production must configure the
+# HTTPS API transport below, which keeps the profile PIN and multiuser session out of
+# a child process argv (and therefore out of ps /proc command-line inspection).
+NEXUS_API_URL = os.getenv("NEXUS_API_URL", "").strip().rstrip("/")
+NEXUS_API_USER = os.getenv("NEXUS_API_USER", "")
+NEXUS_API_PASSWORD = os.getenv("NEXUS_API_PASSWORD", "")
 NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
