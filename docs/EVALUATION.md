@@ -554,10 +554,10 @@ hold-resolution, incident-response and key-rotation procedures.
    the regression contract prevents their reintroduction.
 4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
 5. **In progress:** structured JSON logging now covers operator alerts and Nexus/Solana
-   deposit lifecycle transitions, with field-level credential redaction. The Solana poller now
-   emits stable ingestion, classification, refund/quarantine, and Nexus-debit resolution and
-   confirmation summaries rather than console prose. Migrate the remaining money-path console
-   output and refresh this evaluation against the final reviewed commit.
+   deposit lifecycle transitions, with field-level credential redaction. Both chain pollers now
+   emit stable ingestion/classification summaries and fail-closed enumeration failures (including
+   Nexus page and reason context) instead of console prose. Migrate the remaining lower-level
+   client money-path output and refresh this evaluation against the final reviewed commit.
 
 ---
 

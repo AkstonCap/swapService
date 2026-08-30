@@ -766,6 +766,28 @@ class CriticalSafetyTests(unittest.TestCase):
 
         propose_waterline.assert_not_called()
 
+    @patch.object(swap_nexus.nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch("subprocess.run", side_effect=TimeoutError("node timeout"))
+    def test_nexus_poller_enumeration_error_is_structured_event(self, _run, _heartbeat):
+        """A Nexus enumeration failure must be machine-readable and keep its page context."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                swap_nexus, "_log"
+            ) as log:
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        self.assertIn(
+            call(
+                "NEXUS_ENUMERATION_FAILED",
+                page=0,
+                reason="exception",
+                error="node timeout",
+            ),
+            log.call_args_list,
+        )
+
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
     @patch(
         "subprocess.run",

@@ -596,25 +596,25 @@ def poll_nexus_deposits():
                     timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12),
                 )
             except Exception as e:
-                print(f"Error fetching Nexus transactions page {page}: {e}")
+                _log("NEXUS_ENUMERATION_FAILED", page=page, reason="exception", error=str(e))
                 enumeration_complete = False
                 break
             if res.returncode != 0:
                 err = (res.stderr or res.stdout or "").strip()
-                print(f"Error fetching Nexus transactions page {page}: {err}")
+                _log("NEXUS_ENUMERATION_FAILED", page=page, reason="cli_error", error=err)
                 enumeration_complete = False
                 break
             txs = nexus_client._parse_json_lenient(res.stdout)
             if isinstance(txs, dict) and txs.get("error"):
-                print(f"Error fetching Nexus transactions page {page}: {txs.get('error')}")
+                _log("NEXUS_ENUMERATION_FAILED", page=page, reason="api_error", error=str(txs.get("error")))
                 enumeration_complete = False
                 break
             if txs is None:
-                print(f"Error fetching Nexus transactions page {page}: invalid response")
+                _log("NEXUS_ENUMERATION_FAILED", page=page, reason="invalid_response")
                 enumeration_complete = False
                 break
             if not isinstance(txs, (list, dict)):
-                print(f"Error fetching Nexus transactions page {page}: unexpected response")
+                _log("NEXUS_ENUMERATION_FAILED", page=page, reason="unexpected_response")
                 enumeration_complete = False
                 break
             if not isinstance(txs, list):
@@ -658,7 +658,7 @@ def poll_nexus_deposits():
                 if malformed:
                     break
             if malformed:
-                print(f"Error fetching Nexus transactions page {page}: malformed transaction schema")
+                _log("NEXUS_ENUMERATION_FAILED", page=page, reason="malformed_transaction_schema")
                 enumeration_complete = False
                 break
             # Determine if we've reached below cutoff (descending order => last element oldest)
@@ -829,7 +829,7 @@ def poll_nexus_deposits():
                 backlog_truncated = True
                 break
         if backlog_truncated:
-            print(f"[warn] USDD_PAGINATION_BACKLOG: reached max pages ({max_pages}) with full pages; potential older deposits pending.")
+            _log("NEXUS_PAGINATION_BACKLOG", max_pages=max_pages, limit=limit)
 
         # Step 6: waterline proposal (only advance when safe)
         try:
@@ -860,4 +860,4 @@ def poll_nexus_deposits():
         except Exception:
             pass
     except Exception as e:
-        print(f"Error polling Nexus deposits: {e}")
+        _log("POLL_NEXUS_ERROR", error=str(e))
