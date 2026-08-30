@@ -552,13 +552,13 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 68 passed plus 4 subtests passed on the latest local verification |
+| `python -m pytest -q tests/test_critical_safety.py` | 72 passed plus 10 subtests passed on the latest local verification |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 75 passed, 4 subtests passed on the latest local verification |
-| CI workflow | Latest runtime evidence passed on code head `3533023` — [run 33267576670](https://github.com/distordialabs-brutus/swapService/actions/runs/33267576670); the earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
+| Full `python -m pytest -q` | 79 passed, 10 subtests passed on `16e2e38` local verification |
+| CI workflow | Passed on code head `16e2e38` — [run 33282805163](https://github.com/distordialabs-brutus/swapService/actions/runs/33282805163); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
 | `pip-audit -r requirements.txt` | Three advisories in two packages; see E-013 |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
