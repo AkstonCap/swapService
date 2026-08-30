@@ -129,7 +129,7 @@ of the live acceptance matrix.
 |-----|------|---------|-------|
 | DASHBOARD_HOST | str | 127.0.0.1 | Bind address. Anything non-loopback requires DASHBOARD_TOKEN; the dashboard refuses to start otherwise. |
 | DASHBOARD_PORT | int | 8787 | |
-| DASHBOARD_TOKEN | str |  | Bearer token. Required for non-loopback binds; recommended always. |
+| DASHBOARD_TOKEN | str |  | Bearer token. Required for non-loopback binds; recommended always. Supply only in `Authorization: Bearer <token>` (normally injected by a TLS reverse proxy); query-string tokens are rejected. |
 
 ## Micro / Advanced Handling Flags
 | Var | Type | Default | Notes |

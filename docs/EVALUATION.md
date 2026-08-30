@@ -44,7 +44,7 @@ been run.
 | Critical release gate | 2 | Permanent refund safety and live-boundary evidence remain absent |
 | High release blocker | 1 | Reconciliation errors and unhealthy results do not pause new exposure |
 | Medium / operational | 6 | Response, custody, configuration, exposure-control, dependency or maintenance gap |
-| Low / hygiene | 3 | Documentation and dead-code cleanup |
+| Low / hygiene | 2 | Documentation and dead-code cleanup |
 
 ### Release gates
 
@@ -402,7 +402,11 @@ to `python-dotenv==1.2.2` and `requests==2.33.0` rather than performing a broad 
 
 ### E-012 — Dashboard bearer token may appear in URLs
 
-The dashboard accepts `token` from the query string (`src/dashboard.py:444-447`). Query credentials can leak through history, logs and referrers. Prefer the Authorization header and reject query-token authentication when bound beyond loopback.
+**Status: remediated locally; verify the proxy configuration before deployment.** The dashboard
+accepts `DASHBOARD_TOKEN` only through `Authorization: Bearer <token>` and no longer reads or
+propagates a query-string token. This prevents the credential from appearing in URLs, browser
+history, access logs and referrers. For any non-loopback bind, inject the header at a TLS reverse
+proxy; do not expose the dashboard directly.
 
 ---
 
@@ -537,7 +541,7 @@ hold-resolution, incident-response and key-rotation procedures.
 2. Compatibility-test `python-dotenv==1.2.2` and `requests==2.33.0`; update only after the
    Nexus/Solana suite and live matrix remain green.
 3. Remove dead configuration and unsafe dormant helpers or clearly isolate them.
-4. Remove query-string dashboard authentication for non-loopback binding.
+4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
 5. Fix remaining moved-document paths, add structured logging and refresh this evaluation
    against the final reviewed commit.
 

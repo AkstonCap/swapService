@@ -458,7 +458,7 @@ ssh -L 8787:127.0.0.1:8787 operator@your-host
 |----------|---------|-------|
 | `DASHBOARD_HOST` | `127.0.0.1` | Binding anything else **requires** `DASHBOARD_TOKEN`; the service refuses otherwise |
 | `DASHBOARD_PORT` | `8787` | |
-| `DASHBOARD_TOKEN` | unset | Bearer token (`Authorization: Bearer …`, or `?token=`) |
+| `DASHBOARD_TOKEN` | unset | Bearer token. Send it only as `Authorization: Bearer <token>` (for example, from a TLS reverse proxy); URL query tokens are rejected to prevent credential leakage. |
 
 **What it shows**
 - Backing ratio, vault USDC, circulating USDD, fees collected, 24h payouts against the cap
