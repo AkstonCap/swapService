@@ -387,7 +387,11 @@ evidence only; the target Nexus node and Solana devnet/testnet matrix remains a 
 
 ### E-010 — Stale/dead configuration and helper paths
 
-`DEBIT_VERIFY_GRACE_SEC` describes an automatic negative-lookup conclusion that no longer occurs. Legacy single-item lookup helpers and disabled fee-conversion code should be removed or clearly isolated so future changes do not accidentally reactivate unsafe behavior.
+**Partially remediated:** `DEBIT_VERIFY_GRACE_SEC` has been removed from runtime configuration
+and current operator/state-machine documentation. An ambiguous Nexus debit now remains held unless
+positive reference evidence is found; no expiring negative-lookup setting can imply that a bounded
+scan proved non-execution. Legacy single-item lookup helpers and disabled fee-conversion code should
+still be removed or clearly isolated so future changes do not accidentally reactivate unsafe behavior.
 
 ### E-011 — Documentation relocation and identity drift
 
@@ -554,12 +558,12 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 72 passed plus 10 subtests passed on the latest local verification |
+| `python -m pytest -q tests/test_critical_safety.py` | 73 passed plus 10 subtests passed on the latest local verification |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 80 passed, 10 subtests passed in a clean Python 3.11 virtual environment after the targeted dependency remediation |
+| Full `python -m pytest -q` | 81 passed, 10 subtests passed in a clean Python 3.11 virtual environment after the targeted dependency remediation |
 | CI workflow | Passed on dependency-remediation code head `f9e9406` — [run 33291622439](https://github.com/distordialabs-brutus/swapService/actions/runs/33291622439); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
 | `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |

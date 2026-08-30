@@ -62,7 +62,7 @@ stateDiagram-v2
 | 4 | **SolanaConfirmed** | Transaction confirmed on Solana (visible in explorer) | Not yet detected | 1-2 Solana slots (~0.4-0.8s) |
 | 5 | **ServiceDetected** | Waiting — deposit detected by service | `unprocessed_sigs` — `ready for processing` | Up to `POLL_INTERVAL` (default 10s) |
 | 6 | **ServiceValidating** | Waiting — service validating memo and Nexus account | `unprocessed_sigs` — being processed | Seconds |
-| 7 | **USDDMinting** | Waiting — USDD debit issued. If the node's response is unclear the row sits in `debit in flight` / `debit unverified` while the service checks the chain by reference; it is never refunded on an unclear answer | `unprocessed_sigs` — `debit in flight` → `debit unverified` → `debited, awaiting confirmation` | Nexus block time (~50s), up to `DEBIT_VERIFY_GRACE_SEC` if unclear |
+| 7 | **USDDMinting** | Waiting — USDD debit issued. If the node's response is unclear the row sits in `debit in flight` / `debit unverified` while the service checks the chain by reference; a negative, failed or incomplete lookup never authorizes an automatic retry or refund | `unprocessed_sigs` — `debit in flight` → `debit unverified` → `debited, awaiting confirmation` | Nexus block time (~50s); ambiguous outcomes remain held until positive reference evidence or manual resolution |
 | 8 | **USDDDelivered** | USDD received in Nexus account | `processed_sigs` — `debit_confirmed` | Terminal |
 | 9 | **RefundInitiated** | Waiting for refund | `unprocessed_sigs` — `to be refunded` | Up to `ACTION_RETRY_COOLDOWN_SEC` |
 | 10 | **RefundReceived** | USDC returned to original Solana token account (minus flat fee) | `refunded_sigs` — `refund_confirmed` | Terminal |

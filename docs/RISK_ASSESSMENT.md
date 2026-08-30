@@ -159,10 +159,12 @@ The purpose-built defence exists and is dead: `state_db.reserve_action()` / `rel
 > | on-chain lookup | action |
 > |---|---|
 > | reference found | record the txid, proceed — never refund |
-> | not found, inside grace (`DEBIT_VERIFY_GRACE_SEC`, 300 s) | leave alone |
-> | not found, past grace, attempts remain | provably never landed → safe retry with a **new** reference (also fixes PROC-1, the missing debit retry) |
-> | not found, past grace, attempts exhausted | refund |
+> | not found, failed or incomplete lookup | leave held; a bounded negative scan never proves non-execution |
 > | no reference recorded (pre-upgrade row) | quarantine for manual review — never guess |
+>
+> **Superseded safety correction:** the former grace-window retry/refund policy was removed.
+> Current code has no `DEBIT_VERIFY_GRACE_SEC`: only positive reference evidence resolves an
+> ambiguous debit automatically; all other outcomes remain held for manual resolution.
 >
 > All five branches verified by test.
 >

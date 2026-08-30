@@ -71,7 +71,6 @@ Legend:
 |-----|------|---------|-------|
 | SOLANA_DEPOSIT_COMMITMENT | string | finalized | Commitment for ingesting deposits and settling our own payouts. `confirmed` is not rooted and can be reorged after USDD is minted against it (permanently unbacked supply). Relax only deliberately. |
 | SOLANA_FINALIZED_ABOVE_UNITS | int | 0 | If the commitment above is relaxed, deposits ≥ this many USDC base units still require finalization. 0 disables the carve-out. |
-| DEBIT_VERIFY_GRACE_SEC | int | 300 | How long an ambiguous USDD debit is verified against the chain before concluding it never executed. |
 | SOLANA_RPC_TIMEOUT_SEC | int | 8 | Per RPC HTTP call. |
 | SOLANA_TX_FETCH_TIMEOUT_SEC | int | 12 | Individual tx signature fetch. |
 | SOLANA_POLL_TIME_BUDGET_SEC | int | 15 | Soft cap per Solana loop. |

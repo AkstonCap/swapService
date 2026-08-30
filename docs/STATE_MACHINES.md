@@ -199,7 +199,7 @@ alert is emitted.
 | Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **USDD→USDC only** | `process_unprocessed_txids()` P1 |
 | Debit-confirmation observation window | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD; a negative/incomplete lookup still holds for manual resolution | `check_unconfirmed_debits()` |
 | USDC-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
-| Ambiguous-debit observation grace | `DEBIT_VERIFY_GRACE_SEC` | 300s | USDC→USDD; no automatic retry/refund on a negative scan | `resolve_unverified_debits()` |
+| Ambiguous Nexus debit | N/A | held until positive reference evidence or manual resolution | USDC→USDD; a negative, failed or incomplete lookup never authorizes an automatic retry/refund | `resolve_unverified_debits()` |
 | Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | USDC→USDD | `_process_stale_deposits()` |
 
 **Retry:** `MAX_ACTION_ATTEMPTS` (3) attempts, with `ACTION_RETRY_COOLDOWN_SEC` (300s)

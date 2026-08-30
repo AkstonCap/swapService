@@ -67,6 +67,10 @@ from src import (  # noqa: E402
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    def test_ambiguous_nexus_debits_have_no_expiring_negative_lookup_window(self):
+        """An uncertain Nexus debit must hold for resolution, not age into a false negative."""
+        self.assertFalse(hasattr(config, "DEBIT_VERIFY_GRACE_SEC"))
+
     def test_invalid_production_mode_in_environment_fails_configuration_loading(self):
         """A typo must never silently downgrade a production process to development mode."""
         try:
