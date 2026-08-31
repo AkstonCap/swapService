@@ -1728,6 +1728,40 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["remote_txid"], "refund-tx")
         self.assertEqual(run.call_count, 1)
 
+    def test_submitted_nexus_transfer_intent_refuses_remote_txid_replacement(self):
+        """A persisted Nexus txid is immutable through final resolution."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-immutable-remote-txid",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="returned-txid"
+                )
+
+                with self.assertRaisesRegex(ValueError, "remote txid.*immutable"):
+                    state_db.update_nexus_transfer_intent(
+                        intent["id"], status="completed", remote_txid="replacement-txid", resolved=True
+                    )
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "submitted")
+        self.assertEqual(stored["remote_txid"], "returned-txid")
+
     def test_completed_nexus_transfer_intent_cannot_be_regressed_to_an_ambiguous_state(self):
         """Terminal chain evidence must not be overwritten by a later recovery path."""
         with tempfile.TemporaryDirectory() as tmpdir:

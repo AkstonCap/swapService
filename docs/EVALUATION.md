@@ -77,7 +77,9 @@ are retained and timeouts,
 interruptions, non-zero exits and unparsed output become `outcome_unknown`. Resolution only
 completes an intent after a positive on-chain debit whose unique reference, source account,
 destination account and exact base-unit amount all match the immutable intent. For an already
-submitted intent, the observed txid must also match the persisted txid. It never retries a debit.
+submitted intent, the observed txid must also match the persisted txid; the state transition
+rejects an attempt to replace the persisted txid, including from an incorrect local caller. It
+never retries a debit.
 
 Automatic refunds and quarantine moves remain disabled in the service loop. A separate
 `nexus_transfer_operator.py` workflow now requires a named operator, rationale, an audited

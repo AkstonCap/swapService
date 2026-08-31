@@ -818,7 +818,16 @@ def update_nexus_transfer_intent(
             raise ValueError(
                 f"cannot transition Nexus transfer intent from {current_status!r} to {status!r}"
             )
-        next_remote_txid = str(remote_txid or intent.get("remote_txid") or "").strip()
+        supplied_remote_txid = str(remote_txid or "").strip()
+        persisted_remote_txid = str(intent.get("remote_txid") or "").strip()
+        # Once the Nexus node returns a txid, it is part of the immutable identity of
+        # the sole permitted debit.  A later resolver must prove the same txid; it
+        # must not be able to replace it with another transaction that happens to
+        # share a reference or is passed by an incorrect caller.
+        if (persisted_remote_txid and supplied_remote_txid
+                and supplied_remote_txid != persisted_remote_txid):
+            raise ValueError("persisted Nexus remote txid is immutable")
+        next_remote_txid = supplied_remote_txid or persisted_remote_txid
         if status in {"submitted", "completed"} and not next_remote_txid:
             raise ValueError("submitted or completed Nexus transfer intent requires a remote txid")
         if resolved and status != "completed":
@@ -829,7 +838,7 @@ def update_nexus_transfer_intent(
                SET status = ?, remote_txid = COALESCE(?, remote_txid),
                    resolved_timestamp = CASE WHEN ? THEN ? ELSE resolved_timestamp END
                WHERE id = ?""",
-            (status, remote_txid, 1 if resolved else 0, now, intent_id),
+            (status, supplied_remote_txid or None, 1 if resolved else 0, now, intent_id),
         )
         conn.commit()
     except Exception:
