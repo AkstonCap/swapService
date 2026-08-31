@@ -760,6 +760,15 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
 DEBIT_UNVERIFIED_STATUSES = ("debit in flight", "debit unverified")
 
 
+def _nexus_destination_from_memo(memo: object) -> str | None:
+    """Return the immutable Nexus recipient encoded in a queued Solana deposit memo."""
+    prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
+    value = str(memo or "")
+    if not prefix or not value.lower().startswith(prefix.lower()):
+        return None
+    return value[len(prefix):].strip() or None
+
+
 def resolve_unverified_debits(limit: int = 200) -> int:
     """Resolve Nexus-side debits whose outcome is unknown, using the chain as the oracle.
 
@@ -775,8 +784,11 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     if not rows:
         return 0
 
-    # One lookup for the whole batch instead of one subprocess per row.
-    reference_lookup = find_nexus_debits_by_references(
+    # A reference is not sufficient proof of a mint.  It identifies a durable local
+    # intent, but the remote debit must also match the memo recipient and exact output
+    # fixed before the debit was submitted.  Otherwise a same-reference debit could
+    # attach an unrelated Nexus txid to this Solana deposit and later authorize a payout.
+    reference_lookup = find_nexus_transfer_debits_by_references(
         [r[7] for r in rows if r[7] is not None]
     )
 
@@ -793,19 +805,38 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 resolved += 1
                 continue
 
-            found_txid = reference_lookup.values.get(str(reference).strip())
-            if found_txid:
-                state_db.update_unprocessed_sig_txid(sig, found_txid)
-                state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
-                state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
-                _log("nexus_debit_resolution_confirmed", sig=sig, reference=reference,
-                     remote_txid=found_txid)
-                resolved += 1
+            destination = _nexus_destination_from_memo(memo)
+            expected_amount = state_db.get_unprocessed_sig_nexus_amount(sig)
+            if destination is None or expected_amount is None:
+                _log(
+                    "nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
+                    reference=reference,
+                    reason="missing_durable_debit_terms",
+                )
                 continue
 
-            _log("nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
-                 reference=reference, reason=reference_lookup.reason or "not_observed")
-            continue
+            candidates = [
+                evidence for evidence in reference_lookup.values.get(str(reference).strip(), [])
+                if evidence.to_address == destination
+                and evidence.amount_usdd_units == expected_amount
+            ]
+            matching_txids = {evidence.remote_txid for evidence in candidates}
+            if len(matching_txids) != 1:
+                _log(
+                    "nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
+                    reference=reference,
+                    reason=reference_lookup.reason or "no_unique_exact_debit_match",
+                    matching_txids=len(matching_txids),
+                )
+                continue
+
+            found_txid = matching_txids.pop()
+            state_db.update_unprocessed_sig_txid(sig, found_txid)
+            state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
+            state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
+            _log("nexus_debit_resolution_confirmed", sig=sig, reference=reference,
+                 remote_txid=found_txid)
+            resolved += 1
         except Exception as e:
             _log("nexus_debit_resolution_failed", level=logging.ERROR, sig=sig, error=str(e))
             continue

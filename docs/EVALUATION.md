@@ -225,6 +225,10 @@ A green result was not evidence of balance correctness.
 - Reconciliation uses only immutable completed/active evidence and exact integer base units.
   It never joins a completed row back to the transient queue, converts a token float with
   `int()`, or recomputes a historical issued output under mutable current fee settings.
+- An ambiguous Solana→Nexus debit is resolved only after one remote DEBIT matches the
+  persisted reference, memo-derived Nexus destination and exact integer Nexus output.
+  A same-reference debit with different terms remains held and cannot attach an unrelated
+  Nexus txid to the Solana deposit.
 - Active debit intents retain the exact Nexus output atomically with their unique reference
   before the CLI invocation. Reconciliation reads completed and active debit evidence in one
   SQLite snapshot, then consumes an exact active remote debit for a first-time recipient using
@@ -483,6 +487,9 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
    DEBITs without relying on unsafe multi-page live-offset scans.
+9. ✅ Resolve an ambiguous Solana→Nexus debit only when one remote DEBIT has its persisted
+   reference, memo-derived destination and exact immutable Nexus output; same-reference
+   term collisions remain held.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
