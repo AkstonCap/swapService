@@ -647,7 +647,7 @@ def get_transactions_confirmations(txids, limit: int = 200) -> BatchLookup:
                 # Only a positive txid/reference match is actionable automatically.
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as e:
-            print(f"Error batch-fetching confirmations: {e}")
+            _log("nexus_confirmation_lookup_failed", level=logging.ERROR, error=str(e))
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
@@ -675,15 +675,16 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         if not txid:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} has no txid; manual resolution required")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig,
+                 reason="missing_txid")
             continue
 
         confirmations = confirmation_lookup.values.get(str(txid))
         
         # A missing value is never proof that the debit did not execute.
         if confirmations is None:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} "
-                  f"lookup={confirmation_lookup.reason or 'not_observed'}")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason=confirmation_lookup.reason or "not_observed")
             continue
         
         # Case 2: Transaction exists but not enough confirmations yet
@@ -697,10 +698,12 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         # reference: another worker may have advanced it while this transaction waited.
         reference = state_db.get_unprocessed_sig_reference(sig)
         if reference is None:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has no persisted reference")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="missing_reference")
             continue
         if isinstance(amount_usdc_units, bool) or not isinstance(amount_usdc_units, int):
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has non-integer Solana units")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="non_integer_solana_units")
             continue
 
         # Archive the immutable output fixed before the debit. Recomputing fees here
@@ -708,7 +711,8 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         # with the already-submitted Nexus debit.
         nexus_out_base = state_db.get_unprocessed_sig_nexus_amount(sig)
         if nexus_out_base is None:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has no persisted Nexus output")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="missing_nexus_output")
             continue
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
         nexus_destination = None
@@ -734,7 +738,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
                     amount_usdd_units=None
                 )
         except Exception as e:
-            print(f"[FEE_TRACKING] Error recording fee for sig={sig}: {e}")
+            _log("nexus_fee_record_failed", level=logging.ERROR, sig=sig, txid=txid, error=str(e))
         
         state_db.mark_processed_sig(
             sig, timestamp, int(amount_usdc_units or 0), txid, amount_nexus_debited,
@@ -784,7 +788,8 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 # Intent was never recorded (pre-upgrade row): fall back to the memo-scan-free
                 # safe option - leave for manual review rather than risk a double action.
                 state_db.update_unprocessed_sig_status(sig, "to be quarantined")
-                print(f"[DEBIT_RESOLVE] sig={sig} has no reference; quarantining for manual review")
+                _log("nexus_debit_resolution_quarantined", level=logging.WARNING, sig=sig,
+                     reason="missing_reference")
                 resolved += 1
                 continue
 
@@ -793,15 +798,16 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 state_db.update_unprocessed_sig_txid(sig, found_txid)
                 state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
                 state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
-                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} CONFIRMED on-chain txid={found_txid}")
+                _log("nexus_debit_resolution_confirmed", sig=sig, reference=reference,
+                     remote_txid=found_txid)
                 resolved += 1
                 continue
 
-            print(f"[DEBIT_RESOLVE_HOLD] sig={sig} ref={reference} "
-                  f"lookup={reference_lookup.reason or 'not_observed'}")
+            _log("nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
+                 reference=reference, reason=reference_lookup.reason or "not_observed")
             continue
         except Exception as e:
-            print(f"[DEBIT_RESOLVE] error for sig={sig}: {e}")
+            _log("nexus_debit_resolution_failed", level=logging.ERROR, sig=sig, error=str(e))
             continue
 
     return resolved
@@ -817,7 +823,7 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
     dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
     if not dest or not treas or int(amount_usdd_units or 0) <= 0 or not txid:
-        print("[quarantine_nexus_token] cannot prepare durable quarantine intent")
+        _log("nexus_quarantine_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
         intent = state_db.create_nexus_transfer_intent(
@@ -828,10 +834,10 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
             amount_usdd_units=int(amount_usdd_units),
         )
     except ValueError as exc:
-        print("[quarantine_nexus_token] intent conflict:", redact(str(exc)))
+        _log("nexus_quarantine_intent_conflict", level=logging.WARNING, error=redact(str(exc)))
         return False
-    print("[quarantine_nexus_token] prepared intent=%s reason=%s; manual authorization required" %
-          (intent["id"], redact(reason)))
+    _log("nexus_quarantine_intent_prepared", level=logging.WARNING, intent_id=intent["id"],
+         reason=redact(reason), automatic_execution=False)
     return False
 
 
@@ -849,7 +855,7 @@ def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> boo
     source_txid = _refund_source_txid(reason)
     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
     if not source_txid or not treas or not to_addr or int(amount_usdd_units or 0) <= 0:
-        print("[refund_nexus_token] cannot prepare durable refund intent; holding for review")
+        _log("nexus_refund_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
         intent = state_db.create_nexus_transfer_intent(
@@ -860,9 +866,10 @@ def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> boo
             amount_usdd_units=int(amount_usdd_units),
         )
     except ValueError as exc:
-        print("[refund_nexus_token] intent conflict:", redact(str(exc)))
+        _log("nexus_refund_intent_conflict", level=logging.WARNING, error=redact(str(exc)))
         return False
-    print("[refund_nexus_token] prepared intent=%s; automatic execution disabled" % intent["id"])
+    _log("nexus_refund_intent_prepared", level=logging.WARNING, intent_id=intent["id"],
+         automatic_execution=False)
     return False
 
 
@@ -872,7 +879,7 @@ def transfer_nexus_between_accounts(from_addr: str, to_addr: str, amount_usdd_un
     Callers must first create an immutable ``nexus_transfer_intents`` row and then use
     ``execute_nexus_transfer_intent``. This function deliberately cannot issue a debit.
     """
-    print("Nexus transfer blocked: durable transfer intent required")
+    _log("nexus_transfer_blocked", level=logging.WARNING, reason="durable_intent_required")
     return False
 
 def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, reference: int | str) -> tuple[bool, str | None]:
@@ -1072,10 +1079,11 @@ def find_nexus_mint_debits_since(
                 cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
             )
         except Exception as exc:
-            print("Nexus: mint-history lookup exception:", redact(str(exc)))
+            _log("nexus_mint_history_lookup_failed", level=logging.ERROR, error=redact(str(exc)))
             return BatchLookup(found, False, "exception")
         if code != 0:
-            print("Nexus: mint-history lookup error:", redact(err or cli_out))
+            _log("nexus_mint_history_lookup_failed", level=logging.ERROR,
+                 error=redact(err or cli_out), reason="cli_error")
             return BatchLookup(found, False, "cli_error")
 
         data = _parse_json_lenient(cli_out)
@@ -1182,7 +1190,8 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
                 cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
             )
             if code != 0:
-                print("Nexus: transfer-debit lookup error:", redact(err or cli_out))
+                _log("nexus_transfer_debit_lookup_failed", level=logging.ERROR,
+                     error=redact(err or cli_out), reason="cli_error")
                 return BatchLookup(out, False, "cli_error")
             data = _parse_json_lenient(cli_out)
             if isinstance(data, dict) and data.get("error"):
@@ -1219,7 +1228,7 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
             if len(txs) < page_size:
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as exc:
-            print("Nexus: transfer-debit lookup exception:", redact(str(exc)))
+            _log("nexus_transfer_debit_lookup_failed", level=logging.ERROR, error=redact(str(exc)))
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
@@ -1249,7 +1258,8 @@ def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup
                 cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
             )
             if code != 0:
-                print("Nexus: batch debit-by-reference lookup error:", err or cli_out)
+                _log("nexus_debit_reference_lookup_failed", level=logging.ERROR,
+                     error=redact(err or cli_out), reason="cli_error")
                 return BatchLookup(out, False, "cli_error")
             data = _parse_json_lenient(cli_out)
             if isinstance(data, dict) and data.get("error"):
@@ -1281,7 +1291,7 @@ def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup
                 # Only a positive txid/reference match is actionable automatically.
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as e:
-            print("Nexus: batch debit-by-reference lookup exception:", e)
+            _log("nexus_debit_reference_lookup_failed", level=logging.ERROR, error=redact(str(e)))
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
@@ -1300,7 +1310,7 @@ def get_circulating_nexus_supply() -> int:
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus Nexus token supply error:", redact(err or out))
+            _log("nexus_token_supply_lookup_failed", level=logging.ERROR, error=redact(err or out))
             return 0
         data = _parse_json_lenient(out)
         # Accept either raw number or an object containing value/amount
@@ -1314,7 +1324,7 @@ def get_circulating_nexus_supply() -> int:
         units = int(dec)
         return units
     except Exception as e:
-        print("Nexus Nexus token supply exception:", e)
+        _log("nexus_token_supply_lookup_failed", level=logging.ERROR, error=redact(str(e)))
         return 0
 
 
@@ -1489,12 +1499,12 @@ def publish_service_record(status: str = "online", last_poll: int | None = None,
     try:
         code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
         if code != 0:
-            print("Nexus: service record update error:", redact(err or out))
+            _log("nexus_service_record_update_failed", level=logging.ERROR, error=redact(err or out))
             return False
         data = _parse_json_lenient(out)
         return bool(isinstance(data, dict) and data.get("success"))
     except Exception as e:
-        print("Nexus: service record update exception:", redact(str(e)))
+        _log("nexus_service_record_update_failed", level=logging.ERROR, error=redact(str(e)))
         return False
 
 
@@ -1539,7 +1549,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: update heartbeat asset error:", redact(err or out))
+            _log("nexus_heartbeat_update_failed", level=logging.ERROR, error=redact(err or out))
             return False
         data = _parse_json_lenient(out)
         if isinstance(data, dict) and data.get("success"):
@@ -1553,7 +1563,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
         else:
             return False
     except Exception as e:
-        print("Error updating heartbeat asset:", e)
+        _log("nexus_heartbeat_update_failed", level=logging.ERROR, error=redact(str(e)))
         return False
     
 
@@ -1615,15 +1625,16 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: get heartbeat asset error:", redact(err or out))
+            _log("nexus_heartbeat_lookup_failed", level=logging.ERROR, error=redact(err or out))
             return None
         data = _parse_json_lenient(out)
         if not isinstance(data, dict) or not data.get("address"):
-            print("Nexus: get heartbeat asset failed:", out)
+            _log("nexus_heartbeat_lookup_failed", level=logging.ERROR,
+                 error=redact(out), reason="invalid_response")
             return None
         return data
     except Exception as e:
-        print("Error getting heartbeat asset:", e)
+        _log("nexus_heartbeat_lookup_failed", level=logging.ERROR, error=redact(str(e)))
         return None
 
 
@@ -1661,7 +1672,8 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
         try:
             code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12))
             if code != 0:
-                print(f"Nexus: fetch deposits page {page} error:", err or out)
+                _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
+                     error=redact(err or out))
                 break
             
             txs = _parse_json_lenient(out)
@@ -1714,7 +1726,8 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
                 break  # No more pages
         
         except Exception as e:
-            print(f"Error fetching deposits page {page}:", e)
+            _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
+                 error=redact(str(e)))
             break
     
     return results
@@ -1727,7 +1740,7 @@ def get_last_reference() -> int | None:
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: get last reference error:", redact(err or out))
+            _log("nexus_reference_lookup_failed", level=logging.ERROR, error=redact(err or out))
             return None
         data = _parse_json_lenient(out)
         txs = data if isinstance(data, list) else [data]
@@ -1749,5 +1762,5 @@ def get_last_reference() -> int | None:
                     continue
         return None
     except Exception as e:
-        print("Error getting last reference:", e)
+        _log("nexus_reference_lookup_failed", level=logging.ERROR, error=redact(str(e)))
         return None

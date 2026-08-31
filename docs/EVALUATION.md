@@ -553,16 +553,18 @@ hold-resolution, incident-response and key-rotation procedures.
    DEX execution/rebalancer helpers and the direct local mint helper are absent from runtime;
    the regression contract prevents their reintroduction.
 4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
-5. **In progress:** structured JSON logging now covers operator alerts and Nexus/Solana
-   deposit lifecycle transitions, with field-level credential redaction. Both chain pollers now
-   emit stable ingestion/classification summaries and fail-closed enumeration failures (including
-   Nexus page and reason context) instead of console prose. The durable Nexus transfer-intent
-   client now emits redacted, machine-readable submission, ambiguous-outcome, hold and positive
-   resolution events keyed by immutable intent ID/reference and remote txid. The diagnostics are
-   best-effort and cannot interrupt durable state transitions, so operators can correlate a Nexus
-   debit with the related Solana payout path without reopening an ambiguous retry path. Migrate the
-   remaining lower-level Nexus and Solana client money-path output and refresh this evaluation
-   against the final reviewed commit.
+5. ✅ Structured JSON logging covers operator alerts and Nexus/Solana deposit lifecycle
+   transitions, with field-level credential redaction. Both chain pollers emit stable
+   ingestion/classification summaries and fail-closed enumeration failures (including Nexus page
+   and reason context) instead of console prose. The durable Nexus transfer-intent client emits
+   redacted, machine-readable submission, ambiguous-outcome, hold and positive-resolution events
+   keyed by immutable intent ID/reference and remote txid. All remaining direct console diagnostics
+   in the lower-level Nexus and Solana client money paths now emit stable structured events; an AST
+   regression rejects new `print()` calls in either client. Helius API-key values are also redacted
+   from structured messages. Diagnostics remain best-effort and cannot interrupt durable state
+   transitions, so operators can correlate a Nexus debit with the related Solana payout path
+   without reopening an ambiguous retry path. Refresh this evaluation against the final reviewed
+   commit before a production candidate is considered.
 
 ---
 
