@@ -1917,6 +1917,16 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertIsNone(stored["remote_txid"])
         self.assertEqual(run.call_count, 1)
 
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"must-not-run"}', ""))
+    def test_legacy_direct_account_debit_is_fail_closed(self, run):
+        """Only the durable, authorized intent workflow may issue a Nexus account debit."""
+        result = nexus_client.debit_account_with_txid(
+            "TREASURY", "sender", 1_000_000, "legacy-reference"
+        )
+
+        self.assertEqual(result, (False, None))
+        run.assert_not_called()
+
     @patch.object(nexus_client, "transfer_nexus_between_accounts", return_value=True)
     def test_legacy_refund_wrapper_only_prepares_durable_intent(self, raw_transfer):
         with tempfile.TemporaryDirectory() as tmpdir:

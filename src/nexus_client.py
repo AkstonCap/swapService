@@ -883,36 +883,16 @@ def transfer_nexus_between_accounts(from_addr: str, to_addr: str, amount_usdd_un
     return False
 
 def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, reference: int | str) -> tuple[bool, str | None]:
-    """Debit from a specific account (e.g., treasury) to recipient and parse txid.
-    Input amount is in internal base units; formatted as decimal token amount for Nexus CLI.
+    """Legacy direct-debit entrypoint retained only to fail closed.
+
+    A parsed response does not prove an account debit is safe to retry after a process
+    loss.  The durable intent ledger therefore owns the only permitted invocation path:
+    create a ``nexus_transfer_intents`` row, record the audited preparation,
+    authorization and execution request, then call ``execute_nexus_transfer_intent``.
     """
-    if not config.NEXUS_PIN:
-        return (False, None)
-    amount_str = _format_nexus_amount(int(amount_units))
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/debit/account",
-        f"from={from_addr}",
-        f"to={to_addr}",
-        f"amount={amount_str}",
-        f"reference={reference}",
-        f"pin={config.NEXUS_PIN}",
-    ]
-    # Generous, consistent timeout (see debit_nexus_token_with_txid): avoid killing an
-    # in-flight debit that may still commit on the node.
-    code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
-    if code != 0:
-        return (False, None)
-    txid = None
-    data = _parse_json_lenient(out)
-    if isinstance(data, dict):
-        txid = data.get("txid")
-    if not txid:
-        for line in (out or "").splitlines():
-            if "txid=" in line:
-                txid = line.split("txid=", 1)[1].strip().split()[0]
-                break
-    return (True, str(txid) if txid else None)
+    _log("NEXUS_TRANSFER_BLOCKED", level=logging.WARNING,
+         reason="durable_intent_required")
+    return (False, None)
 
 
 # --- Asset mapping for swaps (distordiaBridge) ---
