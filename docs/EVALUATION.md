@@ -368,10 +368,12 @@ multiuser session through the daemon's authenticated HTTPS API rather than invok
 `pin=` / `session=` arguments. `NEXUS_API_URL` must be a
 credential-free `https` base URL and `NEXUS_API_USER` / `NEXUS_API_PASSWORD` must be set; explicit
 production mode refuses startup before SQLite opens or either the Nexus/Solana poller starts when
-any transport control is absent. The form body carries the Nexus profile PIN and, when
-`multiuser=1`, session identifier; they are therefore absent from child-process argv and normal
-process listings. HTTP response bodies on transport errors are deliberately discarded so a broken
-node cannot reflect those fields into logs.
+any transport control is absent. When `NEXUS_MULTIUSER=true`, it also requires a non-empty
+`NEXUS_SESSION` at that same admission gate; otherwise every session-scoped Nexus
+`finance/*`/`assets/*` call would fail after the Solana-side poller starts. The form body carries
+the Nexus profile PIN and, when `multiuser=1`, session identifier; they are therefore absent from
+child-process argv and normal process listings. HTTP response bodies on transport errors are
+deliberately discarded so a broken node cannot reflect those fields into logs.
 
 The CLI fallback remains only for non-production local development. Operators must configure
 `apiauth=1`, `apissl=1`, `apisslrequired=1`, an HTTPS API port, certificate validation, and
@@ -565,7 +567,7 @@ unless reconciliation explicitly returns `healthy=True`.
 
 1. ✅ In explicit `SWAP_PRODUCTION_MODE`, require positive per-swap and daily payout caps and at least one configured alert route before startup.
 2. ✅ Require configured Solana and Nexus quarantine destinations before production startup; test at least one alert channel operationally.
-3. ✅ Refuse production mode when mandatory controls are absent.
+3. ✅ Refuse production mode when mandatory controls are absent, including the required `NEXUS_SESSION` when `NEXUS_MULTIUSER=true`.
 4. Complete the operator hold-resolution workflow with evidence, authorization and audit.
 5. Document incident response, recovery and key rotation; rehearse them before launch.
 

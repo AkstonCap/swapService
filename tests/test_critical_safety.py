@@ -259,6 +259,32 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(main.alerts, "critical")
+    def test_production_controls_require_multiuser_session(self, critical):
+        """A multiuser Nexus node cannot admit a bridge without its session credential."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+            patch.object(config, "NEXUS_MULTIUSER", True),
+            patch.object(config, "NEXUS_SESSION", ""),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=["NEXUS_SESSION (required when NEXUS_MULTIUSER=true)"],
+        )
+
+    @patch.object(main.alerts, "critical")
     def test_production_controls_require_both_quarantine_destinations(self, critical):
         """A live bridge cannot strand either chain's failed-payout funds in its vault."""
         with (

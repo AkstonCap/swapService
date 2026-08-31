@@ -113,6 +113,13 @@ def validate_production_controls() -> bool:
     # equivalent HTTPS POST transport, which keeps these spending credentials out of
     # process listings while preserving Nexus' Basic API authentication boundary.
     missing.extend(nexus_api_transport_errors())
+    # A multiuser Nexus node rejects every session-scoped finance/assets call without
+    # the session returned by sessions/create/local. Treat that as a production
+    # admission failure rather than discovering it only after SQLite is opened and a
+    # poller has begun processing Solana-side deposits.
+    if (getattr(config, "NEXUS_MULTIUSER", False)
+            and not str(getattr(config, "NEXUS_SESSION", "") or "").strip()):
+        missing.append("NEXUS_SESSION (required when NEXUS_MULTIUSER=true)")
 
     if not missing:
         return True
