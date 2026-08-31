@@ -10,7 +10,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import call, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1661,6 +1663,23 @@ class CriticalSafetyTests(unittest.TestCase):
             incomplete_reasons=["balance reconciliation returned no result"],
             account_errors=[],
         )
+
+    def test_nexus_transfer_intent_rejects_non_integer_base_units(self):
+        """A durable Nexus debit intent must never truncate an inexact money value."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                for invalid_units in (True, 1.9, Decimal("1"), "1000000"):
+                    with self.subTest(invalid_units=repr(invalid_units)):
+                        with self.assertRaisesRegex(ValueError, "exact positive integer"):
+                            state_db.create_nexus_transfer_intent(
+                                kind="refund",
+                                source_txid=f"credit-invalid-{repr(invalid_units)}",
+                                from_address="TREASURY",
+                                to_address="sender",
+                                amount_usdd_units=cast(int, invalid_units),
+                            )
 
     def test_nexus_transfer_intent_is_durable_and_reuses_its_unique_reference(self):
         """A refund/quarantine transfer is uniquely identified before the CLI can run."""

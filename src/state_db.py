@@ -487,9 +487,14 @@ def create_nexus_transfer_intent(
     source_txid = str(source_txid or "").strip()
     from_address = str(from_address or "").strip()
     to_address = str(to_address or "").strip()
-    units = int(amount_usdd_units)
-    if not kind or not source_txid or not from_address or not to_address or units <= 0:
-        raise ValueError("Nexus transfer intent requires kind, source, addresses and positive units")
+    # This is the durable boundary before a Nexus account debit.  Integer base
+    # units must already have been calculated upstream; coercing floats, Decimal
+    # values, booleans or strings here could silently authorize a different debit.
+    if type(amount_usdd_units) is not int or amount_usdd_units <= 0:
+        raise ValueError("Nexus transfer intent requires exact positive integer units")
+    units = amount_usdd_units
+    if not kind or not source_txid or not from_address or not to_address:
+        raise ValueError("Nexus transfer intent requires kind, source and addresses")
 
     intent_id = _nexus_transfer_intent_id(source_txid)
     reference = _nexus_transfer_reference(intent_id)
