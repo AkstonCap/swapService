@@ -34,8 +34,9 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command exists and is green locally.
 
 Those controls are valuable. They do not make the service production-ready.
-Debit resolution treats multiple matching contracts in one transaction as one candidate, and
-confirmation-count polling terminalizes a submitted mint txid without reading back and matching
+Debit resolution now preserves full `(txid, contract_id)` identities and holds when more than one
+contract matches a persisted reference, source, destination and exact amount. Confirmation-count
+polling still terminalizes a submitted mint txid without reading back and matching
 its actual contract terms. Remote reconciliation intentionally fails closed beyond one page, so
 it cannot clear the exposure pause once history outgrows that bounded view. Production admission
 also omits the required multiuser session prerequisite. Automatic Nexus refunds remain disabled
@@ -47,7 +48,7 @@ live-chain acceptance matrix has not been run.
 | Severity | Count | Meaning |
 |---|---:|---|
 | Critical release gate | 0 | No uncontained Critical checkpoint-advance defect remains locally |
-| High release blocker | 3 | Contract multiplicity, txid-only terminalization, and bounded remote-history availability |
+| High release blocker | 2 | Submitted-mint txid-only terminalization and bounded remote-history availability |
 | Medium / operational | 4 | Exact-unit boundary, session admission, logging isolation and live acceptance gaps |
 | Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
 
@@ -496,9 +497,10 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
    DEBITs without relying on unsafe multi-page live-offset scans.
-9. ✅ Resolve an ambiguous Solana→Nexus debit only when one remote DEBIT has its persisted
-   reference, memo-derived destination and exact immutable Nexus output; same-reference
-   term collisions remain held.
+9. ✅ Resolve an ambiguous Solana→Nexus debit only when **exactly one** remote DEBIT contract
+   has its persisted reference, token-supply source, memo-derived destination and exact immutable
+   Nexus output. The resolver preserves `(txid, contract_id)` identities, so two otherwise identical
+   matching contracts in one transaction remain held; same-reference term collisions also remain held.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return

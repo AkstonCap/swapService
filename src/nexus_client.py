@@ -412,9 +412,14 @@ class TransferExecution:
 
 @dataclass(frozen=True)
 class TransferDebitEvidence:
-    """A fully specified on-chain debit observed for a persisted transfer intent."""
+    """A fully specified on-chain debit observed for a persisted transfer intent.
+
+    A Nexus transaction may contain multiple DEBIT contracts. ``remote_txid`` alone is
+    therefore not a sufficient identity for an idempotent transfer resolution.
+    """
 
     remote_txid: str
+    contract_id: int
     from_address: str
     to_address: str
     amount_usdd_units: int
@@ -557,18 +562,19 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
             and (intent["status"] != "submitted"
                  or evidence.remote_txid == str(intent.get("remote_txid") or ""))
         ]
-        matching_txids = {evidence.remote_txid for evidence in candidates}
-        if len(matching_txids) != 1:
+        # Count complete contract identities, never only transaction ids: one Nexus
+        # transaction can contain multiple DEBIT contracts with the same terms.
+        if len(candidates) != 1:
             _log(
                 "NEXUS_TRANSFER_HELD",
                 level=logging.WARNING,
                 intent_id=intent["id"],
                 reference=reference,
-                reason=lookup.reason or "no_exact_debit_match",
-                matching_txids=len(matching_txids),
+                reason=lookup.reason or "no_unique_exact_debit_contract",
+                matching_contracts=len(candidates),
             )
             continue
-        remote_txid = matching_txids.pop()
+        remote_txid = candidates[0].remote_txid
         state_db.update_nexus_transfer_intent(
             intent["id"], status="completed", remote_txid=remote_txid, resolved=True
         )
@@ -817,20 +823,22 @@ def resolve_unverified_debits(limit: int = 200) -> int:
 
             candidates = [
                 evidence for evidence in reference_lookup.values.get(str(reference).strip(), [])
-                if evidence.to_address == destination
+                if evidence.from_address == str(config.NEXUS_TOKEN_NAME)
+                and evidence.to_address == destination
                 and evidence.amount_usdd_units == expected_amount
             ]
-            matching_txids = {evidence.remote_txid for evidence in candidates}
-            if len(matching_txids) != 1:
+            # A single transaction can have multiple matching contracts. Treat that as
+            # an ambiguous mint until an operator resolves it; its txid is not identity.
+            if len(candidates) != 1:
                 _log(
                     "nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
                     reference=reference,
-                    reason=reference_lookup.reason or "no_unique_exact_debit_match",
-                    matching_txids=len(matching_txids),
+                    reason=reference_lookup.reason or "no_unique_exact_debit_contract",
+                    matching_contracts=len(candidates),
                 )
                 continue
 
-            found_txid = matching_txids.pop()
+            found_txid = candidates[0].remote_txid
             state_db.update_unprocessed_sig_txid(sig, found_txid)
             state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
             state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
@@ -1181,6 +1189,7 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
     """
     wanted = {str(reference).strip() for reference in references if reference is not None}
     out: dict[str, list[TransferDebitEvidence]] = {}
+    seen_contracts: dict[tuple[str, str, int], TransferDebitEvidence] = {}
     if not wanted:
         return BatchLookup(out, True)
 
@@ -1189,7 +1198,7 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
     for page in range(max_pages):
         cmd = [
             config.NEXUS_CLI,
-            "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
+            "finance/transactions/token/txid,timestamp,contracts.id,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
             f"name={config.NEXUS_TOKEN_NAME}",
             "sort=timestamp",
             "order=desc",
@@ -1227,15 +1236,27 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
                     amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
                     from_address = contract.get("from")
                     to_address = contract.get("to")
+                    contract_id = contract.get("id")
+                    if isinstance(contract_id, bool) or not isinstance(contract_id, int):
+                        return BatchLookup(out, False, "invalid_contract_id")
                     if (amount_usdd_units is None or from_address is None or to_address is None or
                             not str(from_address).strip() or not str(to_address).strip()):
                         continue
-                    out.setdefault(key, []).append(TransferDebitEvidence(
+                    evidence = TransferDebitEvidence(
                         remote_txid=str(tx["txid"]),
+                        contract_id=contract_id,
                         from_address=str(from_address).strip(),
                         to_address=str(to_address).strip(),
                         amount_usdd_units=amount_usdd_units,
-                    ))
+                    )
+                    identity = (key, evidence.remote_txid, evidence.contract_id)
+                    previous = seen_contracts.get(identity)
+                    if previous is not None:
+                        if previous != evidence:
+                            return BatchLookup(out, False, "conflicting_contract_identity")
+                        continue
+                    seen_contracts[identity] = evidence
+                    out.setdefault(key, []).append(evidence)
             if len(txs) < page_size:
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as exc:

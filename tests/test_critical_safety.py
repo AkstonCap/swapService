@@ -514,6 +514,38 @@ class CriticalSafetyTests(unittest.TestCase):
                 self.assertIsNone(row[6])
                 self.assertTrue(state_db.is_reserved(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
 
+    def test_unverified_debit_resolution_holds_two_exact_contracts_in_one_transaction(self):
+        """One txid with two matching contracts is ambiguous, not one completed mint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "deposit-sig", 1_000, "nexus:intended-recipient", "sender",
+                    2_000_000, "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent("deposit-sig", 77, 1_898_000)
+                state_db.update_unprocessed_sig_status("deposit-sig", "debit unverified")
+                self.assertTrue(state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
+                response = [{
+                    "txid": "ambiguous-debit",
+                    "contracts": [
+                        {"id": 0, "OP": "DEBIT", "reference": 77,
+                         "from": config.NEXUS_TOKEN_NAME, "to": "intended-recipient",
+                         "amount": "1.898"},
+                        {"id": 1, "OP": "DEBIT", "reference": 77,
+                         "from": config.NEXUS_TOKEN_NAME, "to": "intended-recipient",
+                         "amount": "1.898"},
+                    ],
+                }]
+                with patch.object(nexus_client, "_run", return_value=(0, json.dumps(response), "")):
+                    resolved = nexus_client.resolve_unverified_debits()
+                row = state_db.get_unprocessed_sigs()[0]
+
+        self.assertEqual(resolved, 0)
+        self.assertEqual(row[5], "debit unverified")
+        self.assertIsNone(row[6])
+
     @patch.object(nexus_client, "_run", return_value=(1, "", "node down"))
     def test_failed_receival_asset_lookup_is_incomplete(self, _run):
         lookup = nexus_client.find_asset_receival_account_by_txid_and_owner(
@@ -1846,7 +1878,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 unresolved = nexus_client.resolve_nexus_transfer_intents()
                 find_by_reference.return_value = nexus_client.BatchLookup(
                     {intent["reference"]: [nexus_client.TransferDebitEvidence(
-                        remote_txid="chain-txid", from_address="TREASURY",
+                        remote_txid="chain-txid", contract_id=0, from_address="TREASURY",
                         to_address="QUARANTINE", amount_usdd_units=2_000_000,
                     )]},
                     True,
@@ -1861,6 +1893,46 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(stored["remote_txid"], "chain-txid")
         self.assertEqual(run.call_count, 1)
+
+    def test_transfer_resolution_holds_two_exact_contracts_in_one_transaction(self):
+        """A pair of exact contracts sharing a txid must never complete one transfer intent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-ambiguous-contracts",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(intent["id"], status="outcome_unknown")
+                response = [{
+                    "txid": "ambiguous-transfer",
+                    "contracts": [
+                        {"id": 0, "OP": "DEBIT", "reference": intent["reference"],
+                         "from": "TREASURY", "to": "sender", "amount": "1.0"},
+                        {"id": 1, "OP": "DEBIT", "reference": intent["reference"],
+                         "from": "TREASURY", "to": "sender", "amount": "1.0"},
+                    ],
+                }]
+                with patch.object(nexus_client, "_run", return_value=(0, json.dumps(response), "")):
+                    resolved = nexus_client.resolve_nexus_transfer_intents()
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        assert stored is not None
+        self.assertEqual(resolved, 0)
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
 
     @patch("builtins.print")
     @patch.object(nexus_client, "_run", return_value=(1, "", "Nexus API request failed"))
