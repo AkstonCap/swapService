@@ -56,7 +56,7 @@ _stub("dotenv", load_dotenv=lambda *a, **k: None)
 os.environ.update({
     "SOLANA_RPC_URL": "http://x", "VAULT_KEYPAIR": "/k", "VAULT_USDC_ACCOUNT": "V",
     "USDC_MINT": "M", "SOL_MINT": "S", "NEXUS_PIN": "p",
-    "NEXUS_USDD_TREASURY_ACCOUNT": "T", "SOL_MAIN_ACCOUNT": "O",
+    "NEXUS_USDD_TREASURY_ACCOUNT": "T", "NEXUS_TOKEN_REGISTER_ADDRESS": "TOKEN_REGISTER", "SOL_MAIN_ACCOUNT": "O",
     "NEXUS_CLI_PATH": "/bin/false",
 })
 
@@ -99,14 +99,15 @@ EXPECTED_SCHEMA = {
     "nexus_transfer_audit_events": ["id", "intent_id", "action", "actor", "rationale",
                                     "evidence", "timestamp"],
     "nexus_transfer_intents": ["id", "kind", "source_txid", "from_address", "to_address",
-                               "amount_usdd_units", "reference", "status", "remote_txid",
+                               "amount_usdd_units", "reference", "status", "remote_txid", "contract_id",
                                "created_timestamp", "last_attempt_timestamp", "resolved_timestamp"],
     "payouts": ["id", "kind", "amount_usdc_units", "reference", "timestamp"],
     # These append-only fields are intentionally introduced by the E-004 durable
     # reconciliation migration. Existing rows retain their original columns and are
     # treated as incomplete evidence until a separately verified backfill exists.
     "processed_sigs": ["sig", "timestamp", "amount_usdc_units", "txid", "amount_usdd",
-                       "amount_usdd_units", "nexus_destination", "memo", "status", "reference"],
+                       "amount_usdd_units", "nexus_destination", "memo", "status", "reference",
+                       "contract_id"],
     "processed_txids": ["txid", "timestamp", "amount_usdd", "amount_usdd_units", "from_address", "to_address",
                         "owner", "sig", "status"],
     "quarantined_sigs": ["sig", "timestamp", "from_address", "amount_usdc_units", "memo",

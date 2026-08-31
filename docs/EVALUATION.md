@@ -34,25 +34,24 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command exists and is green locally.
 
 Those controls are valuable. They do not make the service production-ready.
-Debit lookup now carries `(txid, contract_id)` inside returned evidence and detects multiple
-contracts when they are present in the same mocked response. It does **not** prove global uniqueness:
-consumers act on one candidate even when the bounded lookup explicitly reports incomplete. The
-parser also models DEBIT `from`/`to` as flat strings and compares the source with the configured token
-name, while current LLL-TAO emits address objects and identifies the source by register address.
-Confirmation polling therefore attempts exact read-back but has not implemented the target response
-contract, and terminal records still discard `contract_id`. Remote reconciliation intentionally fails
-closed beyond one page, so it cannot clear the exposure pause once history outgrows that bounded
-view. Production admission also omits the required multiuser session prerequisite. Automatic Nexus
-refunds remain disabled while the durable intent protocol awaits crash-boundary and target-node
-evidence. The standing live-chain acceptance matrix has not been run. See
+Debit lookup requires an explicitly complete range before a unique candidate can terminalize. It
+normalizes current LLL-TAO nested DEBIT endpoint objects and compares their immutable `address`
+values to the configured token-register address rather than to the display token name. Terminal
+transfer and mint records retain both `txid` and `contract_id`. These local controls remain
+fail-closed: a missing/mismatched configured register address or unstable remote range holds the
+record. Remote reconciliation intentionally fails closed beyond one page, so it cannot clear the
+exposure pause once history outgrows that bounded view. Production admission also omits the
+required multiuser session prerequisite. Automatic Nexus refunds remain disabled while the durable
+intent protocol awaits crash-boundary and target-node evidence. The standing live-chain acceptance
+matrix has not been run. See
 `DEVELOPMENT_REVIEW_2026-08-31_1616.md`.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
-| Critical release gate | 1 | Incomplete bounded reference evidence is treated as proof of global contract uniqueness |
-| High release blocker | 3 | Target endpoint-schema/source mismatch, discarded contract identity and bounded remote-history availability |
+| Critical release gate | 0 | — |
+| High release blocker | 1 | Bounded remote-history availability / stable-range evidence |
 | Medium / operational | 3 | Session admission, logging isolation and live acceptance gaps |
 | Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
 
@@ -63,7 +62,7 @@ evidence. The standing live-chain acceptance matrix has not been run. See
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED locally** — explicit failures, malformed responses, truncation and empty successful Nexus pages hold; target-node stable-range/pagination evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **FAIL release gate** — bounded scans do not prove uniqueness, target endpoint objects/source addresses are not parsed, and terminal rows omit `contract_id` |
+| Durable completed-state data supports reconciliation | **CONTAINED locally** — only complete lookup evidence with normalized immutable endpoint addresses can terminalize, and terminal records retain `(txid, contract_id)`; target-node stable-range evidence remains required |
 | One composable automated test command | **PASS locally** — 99 tests plus 14 subtests on `368b064` |
 | CI enforces tests and static checks | **PASS on reviewed head** — GitHub Actions run 33400416736 succeeded for `368b064`; live acceptance and independent safety gates remain open |
 | Live devnet/testnet matrix | **NOT RUN** |

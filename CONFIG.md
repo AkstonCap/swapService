@@ -26,7 +26,8 @@ Legend:
 | SOLANA_VAULT_ACCOUNT | pubkey |  | Vault SPL token account (ATA) for that mint. Alias: `VAULT_USDC_ACCOUNT`. |
 | SOLANA_TOKEN_SYMBOL | str | USDC | Display ticker; published in the registration record. |
 | SOLANA_TOKEN_DECIMALS | int | 6 | Alias: `USDC_DECIMALS`. |
-| NEXUS_TOKEN_NAME | str | USDD | The Nexus token minted/debited. Used in `finance/debit/token from=<token>`. |
+| NEXUS_TOKEN_NAME | str | USDD | Display name passed to `finance/debit/token from=<token>`. |
+| NEXUS_TOKEN_REGISTER_ADDRESS | str |  | Immutable address returned by trusted `finance/get/token`; required for terminal DEBIT read-back. Absent/mismatched values hold rather than finalize. |
 | NEXUS_TOKEN_DECIMALS | int | 6 | Alias: `USDD_DECIMALS`. |
 | DEPOSIT_MEMO_PREFIX | str | `nexus:` | Memo prefix depositors use to name their Nexus destination. |
 | SERVICE_PROVIDER | str |  | Operator name/domain, published on-chain. |

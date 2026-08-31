@@ -60,6 +60,7 @@ os.environ.setdefault("USDC_MINT", "MINT")
 os.environ.setdefault("SOL_MINT", "SOL")
 os.environ.setdefault("NEXUS_PIN", "1234")
 os.environ.setdefault("NEXUS_USDD_TREASURY_ACCOUNT", "TREASURY")
+os.environ.setdefault("NEXUS_TOKEN_REGISTER_ADDRESS", "TOKEN-REGISTER")
 os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
@@ -503,7 +504,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 response = [{
                     "txid": "unrelated-debit",
                     "contracts": [{
-                        "OP": "DEBIT", "reference": 77, "from": config.NEXUS_TOKEN_NAME,
+                        "OP": "DEBIT", "reference": 77, "from": config.NEXUS_TOKEN_REGISTER_ADDRESS,
                         "to": "wrong-recipient", "amount": "1.898",
                     }],
                 }]
@@ -533,10 +534,10 @@ class CriticalSafetyTests(unittest.TestCase):
                     "txid": "ambiguous-debit",
                     "contracts": [
                         {"id": 0, "OP": "DEBIT", "reference": 77,
-                         "from": config.NEXUS_TOKEN_NAME, "to": "intended-recipient",
+                         "from": config.NEXUS_TOKEN_REGISTER_ADDRESS, "to": "intended-recipient",
                          "amount": "1.898"},
                         {"id": 1, "OP": "DEBIT", "reference": 77,
-                         "from": config.NEXUS_TOKEN_NAME, "to": "intended-recipient",
+                         "from": config.NEXUS_TOKEN_REGISTER_ADDRESS, "to": "intended-recipient",
                          "amount": "1.898"},
                     ],
                 }]
@@ -977,7 +978,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 return_value=nexus_client.BatchLookup({"77": [
                     nexus_client.TransferDebitEvidence(
                         remote_txid="unrelated-confirmed-tx", contract_id=0,
-                        from_address=config.NEXUS_TOKEN_NAME,
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS,
                         to_address="wrong-recipient", amount_usdd_units=1_898_000,
                     )
                 ]}, True),
@@ -1007,7 +1008,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 return_value=nexus_client.BatchLookup({"77": [
                     nexus_client.TransferDebitEvidence(
                         remote_txid="mint-tx", contract_id=0,
-                        from_address=config.NEXUS_TOKEN_NAME, to_address="recipient",
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                         amount_usdd_units=nexus_client.get_nexus_send_amount_units(2_000_000),
                     )
                 ]}, True),
@@ -1895,7 +1896,8 @@ class CriticalSafetyTests(unittest.TestCase):
                     intent["id"], status="submitted", remote_txid="chain-tx"
                 )
                 state_db.update_nexus_transfer_intent(
-                    intent["id"], status="completed", remote_txid="chain-tx", resolved=True
+                    intent["id"], status="completed", remote_txid="chain-tx",
+                    contract_id=0, resolved=True
                 )
 
                 with self.assertRaises(ValueError):
@@ -1951,7 +1953,66 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(resolved, 1)
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(stored["remote_txid"], "chain-txid")
+        self.assertEqual(stored["contract_id"], 0)
         self.assertEqual(run.call_count, 1)
+
+    def test_transfer_resolution_holds_single_candidate_from_incomplete_lookup(self):
+        """One observed DEBIT cannot prove global uniqueness from a bounded scan."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "find_nexus_transfer_debits_by_references"
+            ) as lookup:
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-incomplete-lookup",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(intent["id"], status="outcome_unknown")
+                lookup.return_value = nexus_client.BatchLookup({intent["reference"]: [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="observed-only-tx", contract_id=0,
+                        from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                    )
+                ]}, False, "pagination_truncated")
+
+                self.assertEqual(nexus_client.resolve_nexus_transfer_intents(), 0)
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
+
+    def test_transfer_debit_lookup_parses_nested_nexus_endpoints(self):
+        """Current LLL-TAO contract filters return endpoint objects, not flat strings."""
+        response = json.dumps([{
+            "txid": "nested-endpoints-tx",
+            "contracts": [{
+                "id": 7, "OP": "DEBIT", "reference": "bridge-xfer:nested",
+                "from": {"address": "TREASURY-REGISTER"},
+                "to": {"address": "RECIPIENT-REGISTER"},
+                "amount": "1.000000",
+            }],
+        }])
+        with patch.object(nexus_client, "_run", return_value=(0, response, "")):
+            lookup = nexus_client.find_nexus_transfer_debits_by_references(
+                ["bridge-xfer:nested"]
+            )
+
+        evidence = lookup.values["bridge-xfer:nested"][0]
+        self.assertEqual(evidence.from_address, "TREASURY-REGISTER")
+        self.assertEqual(evidence.to_address, "RECIPIENT-REGISTER")
+        self.assertEqual(evidence.contract_id, 7)
 
     def test_transfer_resolution_holds_two_exact_contracts_in_one_transaction(self):
         """A pair of exact contracts sharing a txid must never complete one transfer intent."""
@@ -2190,7 +2251,8 @@ class CriticalSafetyTests(unittest.TestCase):
                 )
                 executed = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 state_db.update_nexus_transfer_intent(
-                    intent["id"], status="completed", remote_txid="refund-tx", resolved=True
+                    intent["id"], status="completed", remote_txid="refund-tx",
+                    contract_id=0, resolved=True
                 )
                 self.assertFalse(state_db.finalize_nexus_transfer_disposition(
                     intent["id"], actor="alice", rationale="wrong txid rejected", expected_remote_txid="wrong"

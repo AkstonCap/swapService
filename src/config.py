@@ -126,6 +126,10 @@ NEXUS_API_URL = os.getenv("NEXUS_API_URL", "").strip().rstrip("/")
 NEXUS_API_USER = os.getenv("NEXUS_API_USER", "")
 NEXUS_API_PASSWORD = os.getenv("NEXUS_API_PASSWORD", "")
 NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
+# Immutable register identity of NEXUS_TOKEN_NAME, resolved from a trusted Nexus
+# node during deployment and recorded explicitly rather than inferred from the
+# mutable/display token label.
+NEXUS_TOKEN_REGISTER_ADDRESS = os.getenv("NEXUS_TOKEN_REGISTER_ADDRESS", "").strip()
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
 NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
 NEXUS_TREASURY_ACCOUNT = NEXUS_USDD_TREASURY_ACCOUNT  # generic alias

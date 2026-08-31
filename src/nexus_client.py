@@ -453,6 +453,23 @@ def _parse_exact_nexus_units(value: object) -> int | None:
         return None
 
 
+def _parse_nexus_contract_address(value: object) -> str | None:
+    """Return the immutable register address from an LLL-TAO contract endpoint.
+
+    Current token-history responses encode ``from``/``to`` as objects containing an
+    ``address`` field. Accept legacy flat strings for historical records, but never
+    stringify arbitrary mappings because that would turn a representation mismatch
+    into a false contract match.
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        address = value.get("address")
+        if isinstance(address, str):
+            return address.strip() or None
+    return None
+
+
 def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
     """Execute one prepared intent and persist its outcome before returning.
 
@@ -552,6 +569,17 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
         [intent["reference"] for intent in intents]
     )
     resolved = 0
+    # A single observed candidate from a bounded/failed scan does not prove there are
+    # no competing contracts outside that scan. Completion is permitted only when the
+    # lookup explicitly establishes completeness for every requested reference.
+    if not lookup.complete:
+        _log(
+            "NEXUS_TRANSFER_LOOKUP_HELD",
+            level=logging.WARNING,
+            reason=lookup.reason or "incomplete_debit_lookup",
+            intent_count=len(intents),
+        )
+        return 0
     for intent in intents:
         reference = str(intent["reference"]).strip()
         candidates = [
@@ -574,9 +602,11 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
                 matching_contracts=len(candidates),
             )
             continue
-        remote_txid = candidates[0].remote_txid
+        evidence = candidates[0]
+        remote_txid = evidence.remote_txid
         state_db.update_nexus_transfer_intent(
-            intent["id"], status="completed", remote_txid=remote_txid, resolved=True
+            intent["id"], status="completed", remote_txid=remote_txid,
+            contract_id=evidence.contract_id, resolved=True
         )
         _log(
             "NEXUS_TRANSFER_RESOLVED",
@@ -743,10 +773,17 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
                  reason="missing_or_invalid_nexus_destination")
             continue
 
+        # A bounded or failed history scan cannot establish global uniqueness, even
+        # when it returns one exact-looking contract. Hold terminalization until the
+        # lookup explicitly proves the relevant reference range is complete.
+        if not debit_lookup.complete:
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reference=reference, reason=debit_lookup.reason or "incomplete_debit_lookup")
+            continue
         exact_contracts = [
             evidence for evidence in debit_lookup.values.get(str(reference).strip(), [])
             if evidence.remote_txid == str(txid)
-            and evidence.from_address == str(config.NEXUS_TOKEN_NAME)
+            and evidence.from_address == str(config.NEXUS_TOKEN_REGISTER_ADDRESS)
             and evidence.to_address == nexus_destination
             and evidence.amount_usdd_units == nexus_out_base
         ]
@@ -787,6 +824,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             amount_usdd_units=nexus_out_base,
             nexus_destination=nexus_destination,
             memo=memo,
+            contract_id=exact_contracts[0].contract_id,
         )
         state_db.remove_unprocessed_sig(sig)
         processed_count += 1
@@ -858,7 +896,7 @@ def resolve_unverified_debits(limit: int = 200) -> int:
 
             candidates = [
                 evidence for evidence in reference_lookup.values.get(str(reference).strip(), [])
-                if evidence.from_address == str(config.NEXUS_TOKEN_NAME)
+                if evidence.from_address == str(config.NEXUS_TOKEN_REGISTER_ADDRESS)
                 and evidence.to_address == destination
                 and evidence.amount_usdd_units == expected_amount
             ]
@@ -1172,15 +1210,12 @@ def find_nexus_mint_debits_since(
                     return BatchLookup(found, False, "invalid_contract")
                 if str(contract.get("OP") or "").upper() != "DEBIT":
                     continue
-                source = contract.get("from")
-                destination = contract.get("to")
+                source = _parse_nexus_contract_address(contract.get("from"))
+                destination = _parse_nexus_contract_address(contract.get("to"))
                 # A DEBIT without complete endpoints cannot be classified as a token
                 # mint versus an account transfer, so fail closed rather than skip it.
-                if (source is None or not str(source).strip() or
-                        destination is None or not str(destination).strip()):
+                if source is None or destination is None:
                     return BatchLookup(found, False, "invalid_debit_endpoints")
-                source = str(source).strip()
-                destination = str(destination).strip()
                 reference = contract.get("reference")
                 amount_units = _parse_exact_nexus_units(contract.get("amount"))
                 if reference is None or not str(reference).strip() or amount_units is None:
@@ -1269,19 +1304,18 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
                     if key not in wanted:
                         continue
                     amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
-                    from_address = contract.get("from")
-                    to_address = contract.get("to")
+                    from_address = _parse_nexus_contract_address(contract.get("from"))
+                    to_address = _parse_nexus_contract_address(contract.get("to"))
                     contract_id = contract.get("id")
                     if isinstance(contract_id, bool) or not isinstance(contract_id, int):
                         return BatchLookup(out, False, "invalid_contract_id")
-                    if (amount_usdd_units is None or from_address is None or to_address is None or
-                            not str(from_address).strip() or not str(to_address).strip()):
+                    if amount_usdd_units is None or from_address is None or to_address is None:
                         continue
                     evidence = TransferDebitEvidence(
                         remote_txid=str(tx["txid"]),
                         contract_id=contract_id,
-                        from_address=str(from_address).strip(),
-                        to_address=str(to_address).strip(),
+                        from_address=from_address,
+                        to_address=to_address,
                         amount_usdd_units=amount_usdd_units,
                     )
                     identity = (key, evidence.remote_txid, evidence.contract_id)
