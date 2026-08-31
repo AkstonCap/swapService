@@ -98,10 +98,11 @@ held source row. Each authorization, requested execution and disposition is appe
 startup, any persisted `executing` intent is demoted to the explicit `outcome_unknown` hold
 before scans run, so a crash after the durable claim cannot consume its authorization again.
 
-**Independent follow-up limit (2026-08-31 16:16):** the resolver still accepts one candidate from
-an explicitly incomplete bounded lookup, parses target endpoint objects as flat strings, compares a
-register-address field to a token-name label, and drops `contract_id` from terminal state. The
-operator protocol must remain disabled until those exact-evidence defects and the live matrix close.
+**Independent follow-up remediation (2026-08-31):** every resolver now holds when its bounded
+reference lookup is incomplete, normalizes Nexus `from`/`to` endpoint objects to immutable register
+addresses, compares the configured token register address rather than a display name, and persists
+`contract_id` with terminal state. These are local fail-closed repairs; target-node query/pagination
+semantics and the live matrix remain required before enabling the operator protocol.
 
 Focused fault injection and target-node evidence are still required; the transfer primitive remains
 fail closed outside the durable-intent workflow.
@@ -510,11 +511,11 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
    DEBITs without relying on unsafe multi-page live-offset scans.
-9. ⛔ Resolve an ambiguous Solana→Nexus debit and terminalize a submitted confirmation only
-   from authoritative exact DEBIT evidence. The current resolver distinguishes two matching
-   contracts present in one mocked response, but acts on one candidate from an incomplete bounded
-   lookup, does not parse the target endpoint-address objects, compares the source with a name
-   label, and omits `contract_id` from terminal state.
+9. ✅ Resolve or terminalize a Solana→Nexus debit only from one exact DEBIT contract: every
+   bounded/incomplete reference lookup holds, endpoint objects are normalized to immutable register
+   addresses, the source is compared with the configured token register address, and terminal state
+   retains `contract_id`. Target-node pagination and transaction-response semantics remain Batch 4
+   release evidence.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
@@ -523,17 +524,17 @@ active first-time recipients are scanned and keep the result unhealthy without a
 a later fee-configuration change or a concurrent completion transition; both consumers refuse green
 unless `healthy is True`; and every unhealthy or exceptional reconciliation result pauses new
 Solana↔Nexus exposure while already-owed refunds and quarantines continue in paused mode. **Batch
-remains partial:** exact target endpoint parsing, global uniqueness, durable contract identity and
-target single-page boundary/order semantics are unproven.
+remains partial:** target-node global-uniqueness, single-page boundary/order and transaction-response
+semantics are unproven; local code holds whenever those properties cannot be established.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
 1. ✅ Persist intent, destination, exact units and a deterministic unique reference before every eligible transfer.
 2. ✅ Allow exactly one CLI execution from an atomically claimed intent and persist a parsed Nexus txid.
 3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
-4. ⛔ Resolve only authoritative positive contract identity to completed; the current bounded
-   reference lookup cannot prove uniqueness and terminal state drops `contract_id`. It still never
-   retries a debit from the resolver.
+4. ✅ Resolve only one exact positive contract identity to completed; incomplete bounded lookups
+   hold, and terminal state retains `contract_id`. The resolver still never retries a debit.
+   Target-node proof that the lookup can establish a complete stable range remains Batch 4 evidence.
 5. ✅ Persist and retain all in-flight intents across restart.
 6. ✅ Provide an operator-only prepare → reference-confirm → authorize → execute-once →
    resolve → remote-txid-confirmed finalization workflow with an append-only attribution log;

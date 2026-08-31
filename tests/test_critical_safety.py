@@ -549,6 +549,40 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(row[5], "debit unverified")
         self.assertIsNone(row[6])
 
+    def test_unverified_debit_resolution_holds_single_candidate_from_incomplete_lookup(self):
+        """A bounded reference scan cannot prove a lone observed mint is unique."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "find_nexus_transfer_debits_by_references"
+            ) as lookup:
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "deposit-sig", 1_000, "nexus:intended-recipient", "sender",
+                    2_000_000, "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent("deposit-sig", 77, 1_898_000)
+                state_db.update_unprocessed_sig_status("deposit-sig", "debit unverified")
+                self.assertTrue(state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
+                lookup.return_value = nexus_client.BatchLookup({"77": [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="observed-only-tx", contract_id=0,
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS,
+                        to_address="intended-recipient", amount_usdd_units=1_898_000,
+                    )
+                ]}, False, "pagination_truncated")
+
+                resolved = nexus_client.resolve_unverified_debits()
+                row = state_db.get_unprocessed_sigs()[0]
+                reservation_retained = state_db.is_reserved(
+                    state_db.DEBIT_RESERVATION_KIND, "deposit-sig"
+                )
+
+        self.assertEqual(resolved, 0)
+        self.assertEqual(row[5], "debit unverified")
+        self.assertIsNone(row[6])
+        self.assertTrue(reservation_retained)
+
     @patch.object(nexus_client, "_run", return_value=(1, "", "node down"))
     def test_failed_receival_asset_lookup_is_incomplete(self, _run):
         lookup = nexus_client.find_asset_receival_account_by_txid_and_owner(

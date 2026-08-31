@@ -871,6 +871,20 @@ def resolve_unverified_debits(limit: int = 200) -> int:
         [r[7] for r in rows if r[7] is not None]
     )
 
+    # A reference scan that is bounded, malformed, failed, or otherwise incomplete
+    # cannot prove global uniqueness.  In particular, one exact-looking contract in
+    # the observed window does not exclude a second matching contract outside it.
+    # Leave every ambiguous debit held rather than attaching a remote txid that could
+    # later authorize an unrelated terminal mint.
+    if not reference_lookup.complete:
+        _log(
+            "nexus_debit_resolution_held",
+            level=logging.WARNING,
+            reason=reference_lookup.reason or "incomplete_debit_lookup",
+            pending_count=len(rows),
+        )
+        return 0
+
     resolved = 0
 
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid, reference in rows:
