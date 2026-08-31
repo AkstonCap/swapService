@@ -34,22 +34,26 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command exists and is green locally.
 
 Those controls are valuable. They do not make the service production-ready.
-Debit resolution now preserves full `(txid, contract_id)` identities and holds when more than one
-contract matches a persisted reference, source, destination and exact amount. Confirmation polling
-now reads back the submitted mint transaction's uniquely matching DEBIT contract before it archives
-local state. Remote reconciliation intentionally fails closed beyond one page, so it cannot clear the
-exposure pause once history outgrows that bounded view. Production admission also omits the required
-multiuser session prerequisite. Automatic Nexus refunds remain disabled while the durable intent
-protocol awaits crash-boundary and target-node evidence. The standing live-chain acceptance matrix
-has not been run.
+Debit lookup now carries `(txid, contract_id)` inside returned evidence and detects multiple
+contracts when they are present in the same mocked response. It does **not** prove global uniqueness:
+consumers act on one candidate even when the bounded lookup explicitly reports incomplete. The
+parser also models DEBIT `from`/`to` as flat strings and compares the source with the configured token
+name, while current LLL-TAO emits address objects and identifies the source by register address.
+Confirmation polling therefore attempts exact read-back but has not implemented the target response
+contract, and terminal records still discard `contract_id`. Remote reconciliation intentionally fails
+closed beyond one page, so it cannot clear the exposure pause once history outgrows that bounded
+view. Production admission also omits the required multiuser session prerequisite. Automatic Nexus
+refunds remain disabled while the durable intent protocol awaits crash-boundary and target-node
+evidence. The standing live-chain acceptance matrix has not been run. See
+`DEVELOPMENT_REVIEW_2026-08-31_1616.md`.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
-| Critical release gate | 0 | No uncontained Critical checkpoint-advance defect remains locally |
-| High release blocker | 1 | Bounded remote-history availability |
-| Medium / operational | 4 | Exact-unit boundary, session admission, logging isolation and live acceptance gaps |
+| Critical release gate | 1 | Incomplete bounded reference evidence is treated as proof of global contract uniqueness |
+| High release blocker | 3 | Target endpoint-schema/source mismatch, discarded contract identity and bounded remote-history availability |
+| Medium / operational | 3 | Session admission, logging isolation and live acceptance gaps |
 | Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
 
 ### Release gates
@@ -59,9 +63,9 @@ has not been run.
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED locally** — explicit failures, malformed responses, truncation and empty successful Nexus pages hold; target-node stable-range/pagination evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — local confirmation and reconciliation require unique exact contract evidence; target-node pagination/boundary semantics remain unproven |
-| One composable automated test command | **PASS locally** — 98 tests plus 10 subtests on the current repair tree; exact-tree CI and independent review remain required |
-| CI enforces tests and static checks | **Historical exact-head evidence only** — current range was verified locally; deployment still requires exact-tree CI and independent review after repairs |
+| Durable completed-state data supports reconciliation | **FAIL release gate** — bounded scans do not prove uniqueness, target endpoint objects/source addresses are not parsed, and terminal rows omit `contract_id` |
+| One composable automated test command | **PASS locally** — 99 tests plus 14 subtests on `368b064` |
+| CI enforces tests and static checks | **PASS on reviewed head** — GitHub Actions run 33400416736 succeeded for `368b064`; live acceptance and independent safety gates remain open |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -94,6 +98,12 @@ a one-time execution request and a final exact remote-txid confirmation before i
 held source row. Each authorization, requested execution and disposition is append-only/auditable. At
 startup, any persisted `executing` intent is demoted to the explicit `outcome_unknown` hold
 before scans run, so a crash after the durable claim cannot consume its authorization again.
+
+**Independent follow-up limit (2026-08-31 16:16):** the resolver still accepts one candidate from
+an explicitly incomplete bounded lookup, parses target endpoint objects as flat strings, compares a
+register-address field to a token-name label, and drops `contract_id` from terminal state. The
+operator protocol must remain disabled until those exact-evidence defects and the live matrix close.
+
 Focused fault injection and target-node evidence are still required; the transfer primitive remains
 fail closed outside the durable-intent workflow.
 
@@ -501,11 +511,11 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
    DEBITs without relying on unsafe multi-page live-offset scans.
-9. ✅ Resolve an ambiguous Solana→Nexus debit and terminalize a submitted confirmation only
-   when **exactly one** remote DEBIT contract has its persisted reference, token-supply source,
-   memo-derived destination and exact immutable Nexus output. The resolver preserves
-   `(txid, contract_id)` identities, so two otherwise identical matching contracts in one
-   transaction remain held; same-reference term collisions also remain held.
+9. ⛔ Resolve an ambiguous Solana→Nexus debit and terminalize a submitted confirmation only
+   from authoritative exact DEBIT evidence. The current resolver distinguishes two matching
+   contracts present in one mocked response, but acts on one candidate from an incomplete bounded
+   lookup, does not parse the target endpoint-address objects, compares the source with a name
+   label, and omits `contract_id` from terminal state.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
@@ -514,14 +524,17 @@ active first-time recipients are scanned and keep the result unhealthy without a
 a later fee-configuration change or a concurrent completion transition; both consumers refuse green
 unless `healthy is True`; and every unhealthy or exceptional reconciliation result pauses new
 Solana↔Nexus exposure while already-owed refunds and quarantines continue in paused mode. **Batch
-remains partial:** target single-page boundary/order semantics are unproven.
+remains partial:** exact target endpoint parsing, global uniqueness, durable contract identity and
+target single-page boundary/order semantics are unproven.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
 1. ✅ Persist intent, destination, exact units and a deterministic unique reference before every eligible transfer.
 2. ✅ Allow exactly one CLI execution from an atomically claimed intent and persist a parsed Nexus txid.
 3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
-4. ✅ Resolve a positive reference match to completed; never retry a debit from the resolver.
+4. ⛔ Resolve only authoritative positive contract identity to completed; the current bounded
+   reference lookup cannot prove uniqueness and terminal state drops `contract_id`. It still never
+   retries a debit from the resolver.
 5. ✅ Persist and retain all in-flight intents across restart.
 6. ✅ Provide an operator-only prepare → reference-confirm → authorize → execute-once →
    resolve → remote-txid-confirmed finalization workflow with an append-only attribution log;
@@ -600,13 +613,13 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 73 passed plus 10 subtests passed on the latest local verification |
+| `python -m pytest -q tests/test_critical_safety.py` | 88 passed plus 14 subtests passed on `368b064` |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 98 passed, 10 subtests passed locally on the current repair tree (Python 3.11); CI remains required for the exact deployment candidate |
-| CI workflow | Passed on dependency-remediation code head `f9e9406` — [run 33291622439](https://github.com/distordialabs-brutus/swapService/actions/runs/33291622439); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
+| Full `python -m pytest -q` | 99 passed, 14 subtests passed locally on `368b064` (Python 3.11) |
+| CI workflow | Passed on reviewed head `368b064` — [run 33400416736](https://github.com/distordialabs-brutus/swapService/actions/runs/33400416736) |
 | `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |

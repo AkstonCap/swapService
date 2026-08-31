@@ -41,6 +41,14 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > multiple contracts in one txid; confirmation-count polling does not read back
 > the submitted mint's full contract terms; and remote reconciliation cannot
 > prove more than one page. See `DEVELOPMENT_REVIEW_2026-08-31.md`.
+>
+> **Follow-up review (2026-08-31 16:16, `368b064`):** empty enumeration now
+> holds, returned evidence preserves contract ids, and confirmation polling
+> attempts full-term read-back. The implementation still treats one candidate
+> from an incomplete bounded lookup as globally unique, does not normalize the
+> target API's nested endpoint-address objects, compares a register address to
+> the token-name label, and omits contract id from terminal durable state.
+> Production remains hard-blocked; see `DEVELOPMENT_REVIEW_2026-08-31_1616.md`.
 
 ---
 
@@ -58,11 +66,11 @@ flowchart TD
     DebitInFlight -->|CLI returned a txid| DebitedAwaiting["debited, awaiting confirmation"]
     DebitInFlight -->|"exception / timeout / unparsable body"| DebitUnverified["debit unverified"]
 
-    DebitUnverified -->|reference FOUND on-chain| DebitedAwaiting
+    DebitUnverified -->|"one returned exact contract (bounded uniqueness unproven)"| DebitedAwaiting
     DebitUnverified -->|"lookup negative, failed, or incomplete"| DebitUnverified
     DebitUnverified -->|no reference recorded| ToBeQuarantined["to be quarantined"]
 
-    DebitedAwaiting -->|">= min confirmations"| Processed["debit_confirmed ✓"]
+    DebitedAwaiting -->|">= min confirmations + one returned same-tx exact contract"| Processed["debit_confirmed ✓"]
     DebitedAwaiting -->|"missing / failed confirmation evidence"| DebitedAwaiting
 
     ToBeRefunded -->|"net ≤ 0"| ProcessedAsFees
@@ -86,7 +94,7 @@ flowchart TD
 | **ReadyForProcessing** | Awaiting validation + debit | `unprocessed_sigs` | `"ready for processing"` |
 | **DebitInFlight** | Reference persisted, Nexus debit issued, outcome not yet known | `unprocessed_sigs` | `"debit in flight"` |
 | **DebitUnverified** | Debit outcome **ambiguous** — resolved against the chain, never guessed | `unprocessed_sigs` | `"debit unverified"` |
-| **DebitedAwaiting** | A submitted txid is stored; awaiting confirmation count. Current code does not yet read back and match that txid's full DEBIT contract terms before terminalization. Missing or failed evidence remains held. | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
+| **DebitedAwaiting** | A submitted txid is stored; confirmation now triggers DEBIT-term read-back. The target API endpoint objects are not normalized correctly and `contract_id` is not persisted, so this is a held release gate rather than verified exact terminalization. Missing or failed evidence remains held. | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
 | **Processed** | Debit fully confirmed | `processed_sigs` | `"debit_confirmed"` |
 | **ProcessedAsFees** | Amount after fees ≤ 0 | `processed_sigs` | `"processed, amount after fees <= 0"` |
 | **ToBeRefunded** | Validation failed or amount exceeds the configured cap; ambiguity alone never refunds | `unprocessed_sigs` | `"to be refunded"` |
