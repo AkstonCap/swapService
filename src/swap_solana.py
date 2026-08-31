@@ -6,8 +6,12 @@ _LOG = structured_logging.get_logger("swapService.solana")
 
 
 def _log(event: str, **fields):
-    """Record Solana deposit lifecycle transitions as structured bridge events."""
-    structured_logging.emit(_LOG, logging.INFO, event, **fields)
+    """Best-effort Solana lifecycle diagnostics that cannot stop custody processing."""
+    try:
+        structured_logging.emit(_LOG, logging.INFO, event, **fields)
+    except Exception:
+        # A logging outage must never interrupt durable state transitions or poller work.
+        pass
 
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:

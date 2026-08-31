@@ -131,6 +131,14 @@ class CriticalSafetyTests(unittest.TestCase):
         ):
             self.assertIn(call(event, count=count), log.call_args_list)
 
+    def test_poller_lifecycle_logging_failure_cannot_abort_either_chain_poller(self):
+        """Observability outages must not turn Nexus or Solana custody work into a stopped poller."""
+        for poller in (swap_nexus, swap_solana):
+            with patch.object(
+                poller.structured_logging, "emit", side_effect=RuntimeError("logger failed")
+            ):
+                poller._log("TEST_LIFECYCLE_EVENT", chain="test")
+
     def test_operator_alerts_use_structured_events_not_terminal_prose(self):
         """Critical Nexus/Solana custody events must be parseable by incident tooling."""
         with patch.object(alerts.structured_logging, "emit") as emit:

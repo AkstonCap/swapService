@@ -35,8 +35,12 @@ _NEXUS_ALLOWED_STATUSES = {
 
 
 def _log(kind: str, **fields):
-    """Record Nexus deposit lifecycle transitions as structured bridge events."""
-    structured_logging.emit(_LOG, logging.INFO, kind, **fields)
+    """Best-effort Nexus lifecycle diagnostics that cannot stop custody processing."""
+    try:
+        structured_logging.emit(_LOG, logging.INFO, kind, **fields)
+    except Exception:
+        # A logging outage must never interrupt durable state transitions or poller work.
+        pass
 
 
 def _parse_decimal_amount(val) -> Decimal:
