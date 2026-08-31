@@ -603,10 +603,13 @@ hold-resolution, incident-response and key-rotation procedures.
    transitions, so operators can correlate a Nexus debit with the related Solana payout path
    without reopening an ambiguous retry path. The Nexus and Solana poller lifecycle wrappers also
    isolate structured-logging failures, so a JSON logging outage cannot stop custody processing or
-   turn a durable Nexus/Solana outcome into a retryable state. This is local fail-closed behavior;
-   target-node and Solana devnet/testnet acceptance evidence remains required before deployment.
-   Refresh this evaluation against the final reviewed commit before a production candidate is
-   considered.
+   turn a durable Nexus/Solana outcome into a retryable state. Nexus deposit enumeration now uses
+   the same `nexus_client._run()` transport wrapper as other Nexus reads: it retains the
+   fail-closed timeout/error result handling while routing production reads through the configured
+   credential-safe HTTPS POST transport and leaving `register/*` session-free. This is local
+   fail-closed behavior; target-node and Solana devnet/testnet acceptance evidence remains required
+   before deployment. Refresh this evaluation against the final reviewed commit before a production
+   candidate is considered.
 
 ---
 

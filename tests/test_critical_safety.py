@@ -11,7 +11,6 @@ import sys
 import tempfile
 import unittest
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import cast
 from unittest.mock import call, patch
 
@@ -865,10 +864,7 @@ class CriticalSafetyTests(unittest.TestCase):
         update_status.assert_not_called()
 
     @patch.object(swap_nexus.config, "USE_NEXUS_WHERE_FILTER_USDD", True, create=True)
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout="[]", stderr=""),
-    )
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
     def test_nexus_poller_never_uses_heuristic_server_side_amount_filter(self, run):
         """A Nexus scan must be complete even when the legacy flag is enabled."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -880,6 +876,27 @@ class CriticalSafetyTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertFalse(any(str(argument).startswith("where=") for argument in command))
 
+    @patch.object(nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
+    def test_nexus_poller_enumeration_uses_common_transport_wrapper(self, run, _heartbeat):
+        """Deposit enumeration must share the Nexus transport's timeout/error semantics."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], config.NEXUS_CLI)
+        self.assertTrue(command[1].startswith("register/transactions/finance:token/"))
+        self.assertIn("limit=100", command)
+        self.assertIn("offset=0", command)
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            config.NEXUS_CLI_TIMEOUT_SEC,
+        )
+
     @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
     def test_recovery_enumeration_never_uses_heuristic_server_side_amount_filter(self, run):
         """Recovery must never skip credits through an unverified nested WHERE clause."""
@@ -889,7 +906,7 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertFalse(any(str(argument).startswith("where=") for argument in command))
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch("subprocess.run", side_effect=TimeoutError("node timeout"))
+    @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timeout"))
     def test_nexus_enumeration_failure_holds_waterline(self, _run, propose_waterline):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
@@ -900,7 +917,7 @@ class CriticalSafetyTests(unittest.TestCase):
         propose_waterline.assert_not_called()
 
     @patch.object(swap_nexus.nexus_client, "get_heartbeat_asset", return_value=None)
-    @patch("subprocess.run", side_effect=TimeoutError("node timeout"))
+    @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timeout"))
     def test_nexus_poller_enumeration_error_is_structured_event(self, _run, _heartbeat):
         """A Nexus enumeration failure must be machine-readable and keep its page context."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -922,10 +939,7 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout="[]", stderr=""),
-    )
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
     def test_empty_successful_nexus_enumeration_holds_waterline(
         self, _run, propose_waterline
     ):
@@ -939,10 +953,7 @@ class CriticalSafetyTests(unittest.TestCase):
         propose_waterline.assert_not_called()
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout='{"unexpected": true}', stderr=""),
-    )
+    @patch.object(nexus_client, "_run", return_value=(0, '{"unexpected": true}', ""))
     def test_malformed_nexus_enumeration_response_holds_waterline(
         self, _run, propose_waterline
     ):
@@ -955,17 +966,14 @@ class CriticalSafetyTests(unittest.TestCase):
         propose_waterline.assert_not_called()
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps([{
-                "txid": "credit-tx",
-                "timestamp": 1_000,
-                "contracts": [{"OP": "CREDIT", "from": "sender", "to": "TREASURY"}],
-            }]),
-            stderr="",
-        ),
+    @patch.object(
+        nexus_client,
+        "_run",
+        return_value=(0, json.dumps([{
+            "txid": "credit-tx",
+            "timestamp": 1_000,
+            "contracts": [{"OP": "CREDIT", "from": "sender", "to": "TREASURY"}],
+        }]), ""),
     )
     def test_malformed_credit_contract_holds_waterline(self, _run, propose_waterline):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1019,13 +1027,11 @@ class CriticalSafetyTests(unittest.TestCase):
             {"txid": f"tx-{index}", "timestamp": 1_000 + index, "contracts": []}
             for index in range(100)
         ]
-        completed = SimpleNamespace(
-            returncode=0, stdout=json.dumps(transactions), stderr=""
-        )
+        poll_output = json.dumps(transactions)
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
-            with patch.object(state_db, "DB_PATH", db_path), patch(
-                "subprocess.run", return_value=completed
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "_run", return_value=(0, poll_output, "")
             ):
                 state_db.init_db()
                 swap_nexus.poll_nexus_deposits()

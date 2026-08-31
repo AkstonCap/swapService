@@ -536,8 +536,6 @@ def poll_nexus_deposits():
     - Fetch recent Nexus transactions 
     - Queue new credits >= threshold to unprocessed_txids database table
     """
-    import subprocess
-
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
     # Build base command. Use register/transactions/finance:token to get both debits and credits.
     base_cmd = [config.NEXUS_CLI]
@@ -593,22 +591,20 @@ def poll_nexus_deposits():
         for page in range(max_pages):
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
-                res = subprocess.run(
-                    nexus_client.apply_session(cmd),
-                    capture_output=True,
-                    text=True,
+                code, stdout, stderr = nexus_client._run(
+                    cmd,
                     timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12),
                 )
             except Exception as e:
                 _log("NEXUS_ENUMERATION_FAILED", page=page, reason="exception", error=str(e))
                 enumeration_complete = False
                 break
-            if res.returncode != 0:
-                err = (res.stderr or res.stdout or "").strip()
+            if code != 0:
+                err = (stderr or stdout or "").strip()
                 _log("NEXUS_ENUMERATION_FAILED", page=page, reason="cli_error", error=err)
                 enumeration_complete = False
                 break
-            txs = nexus_client._parse_json_lenient(res.stdout)
+            txs = nexus_client._parse_json_lenient(stdout)
             if isinstance(txs, dict) and txs.get("error"):
                 _log("NEXUS_ENUMERATION_FAILED", page=page, reason="api_error", error=str(txs.get("error")))
                 enumeration_complete = False
