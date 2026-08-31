@@ -851,12 +851,10 @@ def poll_nexus_deposits():
                     wl = max(0, min_page_ts - safety)
                     state_db.propose_nexus_waterline(int(wl))
                 else:
-                    # No unprocessed txids and no page data: advance waterline to current time minus buffer
-                    # This prevents unnecessary re-scanning of old transactions
-                    current_ts = int(time.time())
-                    waterline_ts = max(0, current_ts - safety)
-                    state_db.propose_nexus_waterline(waterline_ts)
-                    _log("NEXUS_WATERLINE_ADVANCED", new_ts=waterline_ts, reason="no_unprocessed_txids")
+                    # A live Nexus node can return an empty successful page without proving
+                    # that the requested history is complete or snapshot-stable. Advancing to
+                    # now from that response could hide an unpersisted treasury credit forever.
+                    _log("NEXUS_WATERLINE_HOLD", reason="empty_enumeration_unproven")
         except Exception:
             pass
     except Exception as e:

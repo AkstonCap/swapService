@@ -18,7 +18,7 @@ The repair work through the evaluated head materially improved the bridge:
 - unresolved Solana deposits are deducted from backing and spendable surplus;
 - backing and circulating-supply errors fail closed;
 - non-idempotent automatic surplus actions are disabled;
-- incomplete or malformed Nexus enumeration holds the waterline;
+- incomplete, malformed, truncated and empty Nexus enumeration holds the waterline;
 - the processing pass never proposes a Nexus checkpoint;
 - every unsafe automatic Nexus refund path now holds and alerts for operator review;
 - the heuristic Nexus server-side amount filter has been removed from normal and recovery scans;
@@ -34,22 +34,19 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command exists and is green locally.
 
 Those controls are valuable. They do not make the service production-ready.
-Empty “successful” Nexus deposit enumeration can still advance the checkpoint
-without proving a stable range. Debit resolution treats multiple matching
-contracts in one transaction as one candidate, and confirmation-count polling
-terminalizes a submitted mint txid without reading back and matching its actual
-contract terms. Remote reconciliation intentionally fails closed beyond one page,
-so it cannot clear the exposure pause once history outgrows that bounded view.
-Production admission also omits the required multiuser session prerequisite.
-Automatic Nexus refunds remain disabled while the durable intent protocol awaits
-crash-boundary and target-node evidence. The standing live-chain acceptance matrix
-has not been run.
+Debit resolution treats multiple matching contracts in one transaction as one candidate, and
+confirmation-count polling terminalizes a submitted mint txid without reading back and matching
+its actual contract terms. Remote reconciliation intentionally fails closed beyond one page, so
+it cannot clear the exposure pause once history outgrows that bounded view. Production admission
+also omits the required multiuser session prerequisite. Automatic Nexus refunds remain disabled
+while the durable intent protocol awaits crash-boundary and target-node evidence. The standing
+live-chain acceptance matrix has not been run.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
-| Critical release gate | 1 | Empty successful Nexus enumeration can advance past unpersisted credits |
+| Critical release gate | 0 | No uncontained Critical checkpoint-advance defect remains locally |
 | High release blocker | 3 | Contract multiplicity, txid-only terminalization, and bounded remote-history availability |
 | Medium / operational | 4 | Exact-unit boundary, session admission, logging isolation and live acceptance gaps |
 | Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
@@ -59,7 +56,7 @@ has not been run.
 | Gate | Status |
 |---|---|
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
-| No checkpoint advances from incomplete/lossy enumeration | **FAIL** — explicit failures/truncation hold, but an empty “successful” Nexus page still advances to `now - safety` |
+| No checkpoint advances from incomplete/lossy enumeration | **CONTAINED locally** — explicit failures, malformed responses, truncation and empty successful Nexus pages hold; target-node stable-range/pagination evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
 | Durable completed-state data supports reconciliation | **PARTIAL** — exposure pause is closed locally, but multiple contracts can collapse to one txid and confirmed txids are not read back for exact terms |
 | One composable automated test command | **PASS** — 94 tests plus 10 subtests on `cc175cb` |
@@ -146,11 +143,13 @@ Disable automatic Nexus refunds. Hold affected rows for operator review and aler
 **Severity:** Critical deployment blocker
 **Priority:** P0 — remove before any live-fund run
 
-**Current status:** **contained, target-node evidence outstanding.** The setting and both
+**Current status:** **contained locally; target-node evidence outstanding.** The setting and both
 heuristic `where=contracts.amount...` construction paths have been removed. Normal polling
 and recovery now enumerate without a server-side amount predicate and apply dust/minimum
-policy locally. Regression tests assert that no `where=` argument is sent even when a legacy
-flag is injected into the test configuration.
+policy locally. An empty successful poll response now holds rather than proposing `now - safety`,
+because it cannot independently prove a complete, snapshot-stable range. Regression tests assert
+that no `where=` argument is sent even when a legacy flag is injected into the test configuration
+and that an empty page cannot advance the waterline.
 
 The remaining release gate is external: the target Nexus build must demonstrate complete,
 stable enumeration and pagination under the standing live-node matrix before a waterline is
@@ -165,7 +164,7 @@ trusted with real funds.
 
 - A target-node test creates credits below dust, between dust/minimum, and above minimum; every expected credit is returned by enumeration.
 - Unsupported/malformed query behavior produces an explicit incomplete scan and holds the waterline.
-- Empty results can advance only after an unfiltered, validated scan.
+- Empty results hold locally unless a future target-node integration proves an independently stable, complete range.
 - Pagination, processing caps and concurrent new transactions cannot move the checkpoint past an unpersisted credit.
 
 ---

@@ -821,6 +821,23 @@ class CriticalSafetyTests(unittest.TestCase):
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
     @patch(
         "subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    def test_empty_successful_nexus_enumeration_holds_waterline(
+        self, _run, propose_waterline
+    ):
+        """An empty page cannot prove that the live Nexus history is complete."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        propose_waterline.assert_not_called()
+
+    @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
+    @patch(
+        "subprocess.run",
         return_value=SimpleNamespace(returncode=0, stdout='{"unexpected": true}', stderr=""),
     )
     def test_malformed_nexus_enumeration_response_holds_waterline(
