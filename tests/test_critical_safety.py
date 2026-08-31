@@ -961,6 +961,36 @@ class CriticalSafetyTests(unittest.TestCase):
 
         propose_waterline.assert_not_called()
 
+    def test_confirmed_txid_with_wrong_debit_terms_remains_held(self):
+        """Confirmation count alone must not archive an unrelated Nexus debit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client,
+                "get_transactions_confirmations",
+                return_value=nexus_client.BatchLookup({"unrelated-confirmed-tx": 10}, True),
+            ), patch.object(
+                nexus_client,
+                "find_nexus_transfer_debits_by_references",
+                return_value=nexus_client.BatchLookup({"77": [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="unrelated-confirmed-tx", contract_id=0,
+                        from_address=config.NEXUS_TOKEN_NAME,
+                        to_address="wrong-recipient", amount_usdd_units=1_898_000,
+                    )
+                ]}, True),
+            ):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "mint-sig", 100, "nexus:recipient", "sender", 2_000_000,
+                    "debited, awaiting confirmation", "unrelated-confirmed-tx",
+                )
+                state_db.set_unprocessed_sig_debit_intent("mint-sig", 77, 1_898_000)
+
+                self.assertEqual(nexus_client.check_unconfirmed_debits(10, 8), 0)
+                self.assertTrue(state_db.is_unprocessed_sig("mint-sig"))
+                self.assertFalse(state_db.is_processed_sig("mint-sig"))
+
     def test_confirmed_mint_archives_its_own_persisted_reference(self):
         """A concurrent later debit must not replace this mint's on-chain identity."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -969,6 +999,16 @@ class CriticalSafetyTests(unittest.TestCase):
                 nexus_client,
                 "get_transactions_confirmations",
                 return_value=nexus_client.BatchLookup({"mint-tx": 10}, True),
+            ), patch.object(
+                nexus_client,
+                "find_nexus_transfer_debits_by_references",
+                return_value=nexus_client.BatchLookup({"77": [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="mint-tx", contract_id=0,
+                        from_address=config.NEXUS_TOKEN_NAME, to_address="recipient",
+                        amount_usdd_units=nexus_client.get_nexus_send_amount_units(2_000_000),
+                    )
+                ]}, True),
             ):
                 state_db.init_db()
                 state_db.add_unprocessed_sig(

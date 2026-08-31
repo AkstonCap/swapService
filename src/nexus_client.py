@@ -678,6 +678,22 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     # One bounded lookup for the whole batch instead of an unbounded fetch per row.
     confirmation_lookup = get_transactions_confirmations([row[6] for row in sigs if row[6]])
 
+    # A confirmation count proves only that the supplied transaction exists.  Before a
+    # local mint is terminalized, read back its uniquely referenced DEBIT contract and
+    # compare every immutable term.  A positive exact match is actionable even if the
+    # bounded reference scan cannot prove history absence; any non-match remains held.
+    confirmed_references = []
+    for sig, _timestamp, _memo, _from_address, _amount_usdc_units, _status, txid in sigs:
+        confirmations = confirmation_lookup.values.get(str(txid)) if txid else None
+        if confirmations is not None and confirmations >= min_confirmations:
+            reference = state_db.get_unprocessed_sig_reference(sig)
+            if reference is not None:
+                confirmed_references.append(reference)
+    debit_lookup = (
+        find_nexus_transfer_debits_by_references(confirmed_references)
+        if confirmed_references else BatchLookup({}, True)
+    )
+
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         if not txid:
@@ -699,9 +715,9 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             # Wait for more confirmations - do not timeout a partially confirmed transaction.
             continue
         
-        # Case 3: Transaction is confirmed. Its persisted per-deposit reference is part
-        # of the immutable on-chain identity. Never substitute the latest global
-        # reference: another worker may have advanced it while this transaction waited.
+        # Case 3: a confirmed transaction still needs exact contract read-back.  Its
+        # persisted per-deposit reference is part of the immutable on-chain identity;
+        # never substitute the latest global reference while this debit waited.
         reference = state_db.get_unprocessed_sig_reference(sig)
         if reference is None:
             _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
@@ -716,15 +732,34 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
         # after an operator configuration change would make the local record disagree
         # with the already-submitted Nexus debit.
         nexus_out_base = state_db.get_unprocessed_sig_nexus_amount(sig)
-        if nexus_out_base is None:
+        if (isinstance(nexus_out_base, bool) or not isinstance(nexus_out_base, int)
+                or nexus_out_base <= 0):
             _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
-                 reason="missing_nexus_output")
+                 reason="missing_or_invalid_nexus_output")
             continue
+        nexus_destination = _nexus_destination_from_memo(memo)
+        if nexus_destination is None:
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="missing_or_invalid_nexus_destination")
+            continue
+
+        exact_contracts = [
+            evidence for evidence in debit_lookup.values.get(str(reference).strip(), [])
+            if evidence.remote_txid == str(txid)
+            and evidence.from_address == str(config.NEXUS_TOKEN_NAME)
+            and evidence.to_address == nexus_destination
+            and evidence.amount_usdd_units == nexus_out_base
+        ]
+        if len(exact_contracts) != 1:
+            _log(
+                "nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                reference=reference,
+                reason=debit_lookup.reason or "no_unique_exact_debit_contract",
+                matching_contracts=len(exact_contracts),
+            )
+            continue
+
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
-        nexus_destination = None
-        prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
-        if memo and str(memo).lower().startswith(prefix.lower()):
-            nexus_destination = str(memo)[len(prefix):].strip() or None
 
         # Bug #10 fix: Track fees when debit is confirmed.
         # The fee is what the deposit gave up: deposit in, minus what was credited out.

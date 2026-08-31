@@ -35,20 +35,20 @@ The repair work through the evaluated head materially improved the bridge:
 
 Those controls are valuable. They do not make the service production-ready.
 Debit resolution now preserves full `(txid, contract_id)` identities and holds when more than one
-contract matches a persisted reference, source, destination and exact amount. Confirmation-count
-polling still terminalizes a submitted mint txid without reading back and matching
-its actual contract terms. Remote reconciliation intentionally fails closed beyond one page, so
-it cannot clear the exposure pause once history outgrows that bounded view. Production admission
-also omits the required multiuser session prerequisite. Automatic Nexus refunds remain disabled
-while the durable intent protocol awaits crash-boundary and target-node evidence. The standing
-live-chain acceptance matrix has not been run.
+contract matches a persisted reference, source, destination and exact amount. Confirmation polling
+now reads back the submitted mint transaction's uniquely matching DEBIT contract before it archives
+local state. Remote reconciliation intentionally fails closed beyond one page, so it cannot clear the
+exposure pause once history outgrows that bounded view. Production admission also omits the required
+multiuser session prerequisite. Automatic Nexus refunds remain disabled while the durable intent
+protocol awaits crash-boundary and target-node evidence. The standing live-chain acceptance matrix
+has not been run.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
 | Critical release gate | 0 | No uncontained Critical checkpoint-advance defect remains locally |
-| High release blocker | 2 | Submitted-mint txid-only terminalization and bounded remote-history availability |
+| High release blocker | 1 | Bounded remote-history availability |
 | Medium / operational | 4 | Exact-unit boundary, session admission, logging isolation and live acceptance gaps |
 | Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
 
@@ -59,8 +59,8 @@ live-chain acceptance matrix has not been run.
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
 | No checkpoint advances from incomplete/lossy enumeration | **CONTAINED locally** — explicit failures, malformed responses, truncation and empty successful Nexus pages hold; target-node stable-range/pagination evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — exposure pause is closed locally, but multiple contracts can collapse to one txid and confirmed txids are not read back for exact terms |
-| One composable automated test command | **PASS** — 94 tests plus 10 subtests on `cc175cb` |
+| Durable completed-state data supports reconciliation | **PARTIAL** — local confirmation and reconciliation require unique exact contract evidence; target-node pagination/boundary semantics remain unproven |
+| One composable automated test command | **PASS locally** — 98 tests plus 10 subtests on the current repair tree; exact-tree CI and independent review remain required |
 | CI enforces tests and static checks | **Historical exact-head evidence only** — current range was verified locally; deployment still requires exact-tree CI and independent review after repairs |
 | Live devnet/testnet matrix | **NOT RUN** |
 
@@ -235,9 +235,13 @@ A green result was not evidence of balance correctness.
 - Reconciliation uses only immutable completed/active evidence and exact integer base units.
   It never joins a completed row back to the transient queue, converts a token float with
   `int()`, or recomputes a historical issued output under mutable current fee settings.
-- An ambiguous Solana→Nexus debit is resolved only after one remote DEBIT matches the
-  persisted reference, memo-derived Nexus destination and exact integer Nexus output.
-  A same-reference debit with different terms remains held and cannot attach an unrelated
+- A confirmation count never terminalizes a submitted Solana→Nexus mint by itself. The service
+  reads back the submitted txid's DEBIT contract and archives the mint only when exactly one
+  contract matches its persisted reference, token-supply source, memo-derived destination and
+  immutable integer Nexus output. Mismatched, missing or duplicate candidates remain held.
+- An ambiguous Solana→Nexus debit is likewise resolved only after one remote DEBIT matches the
+  persisted reference, token-supply source, memo-derived Nexus destination and exact integer
+  Nexus output. A same-reference term collision remains held and cannot attach an unrelated
   Nexus txid to the Solana deposit.
 - Active debit intents retain the exact Nexus output atomically with their unique reference
   before the CLI invocation. Reconciliation reads completed and active debit evidence in one
@@ -497,10 +501,11 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
    DEBITs without relying on unsafe multi-page live-offset scans.
-9. ✅ Resolve an ambiguous Solana→Nexus debit only when **exactly one** remote DEBIT contract
-   has its persisted reference, token-supply source, memo-derived destination and exact immutable
-   Nexus output. The resolver preserves `(txid, contract_id)` identities, so two otherwise identical
-   matching contracts in one transaction remain held; same-reference term collisions also remain held.
+9. ✅ Resolve an ambiguous Solana→Nexus debit and terminalize a submitted confirmation only
+   when **exactly one** remote DEBIT contract has its persisted reference, token-supply source,
+   memo-derived destination and exact immutable Nexus output. The resolver preserves
+   `(txid, contract_id)` identities, so two otherwise identical matching contracts in one
+   transaction remain held; same-reference term collisions also remain held.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
@@ -600,7 +605,7 @@ hold-resolution, incident-response and key-rotation procedures.
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 81 passed, 10 subtests passed in a clean Python 3.11 virtual environment after the targeted dependency remediation |
+| Full `python -m pytest -q` | 98 passed, 10 subtests passed locally on the current repair tree (Python 3.11); CI remains required for the exact deployment candidate |
 | CI workflow | Passed on dependency-remediation code head `f9e9406` — [run 33291622439](https://github.com/distordialabs-brutus/swapService/actions/runs/33291622439); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
 | `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
