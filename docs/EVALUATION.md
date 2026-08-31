@@ -1,10 +1,10 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Date:** 2026-08-29
-**Evaluated code:** `5d92ec0513b8f9be8d6033ecef84f6923cea612a`
+**Date:** 2026-08-31
+**Evaluated code:** `cc175cb595ebe7d1fedd8173020e2a133627906a`
 **Status:** Current issue register and repair priority for `swapService`
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-29.md`](DEVELOPMENT_REVIEW_2026-08-29.md); the 2026-08-28 review and earlier containment review remain historical evidence.
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-31.md`](DEVELOPMENT_REVIEW_2026-08-31.md); earlier reviews remain historical evidence.
 
 ## 1. Executive verdict
 
@@ -26,36 +26,44 @@ The repair work through the evaluated head materially improved the bridge:
 - startup no longer reports a returned unhealthy reconciliation as green;
 - interrupted claimed Nexus transfers restart as durable `outcome_unknown` holds;
 - explicit production mode requires positive per-swap/daily caps and an alert route;
-- one composable pytest command and an exact-head green GitHub Actions gate exist.
+- reconciliation errors and unhealthy results latch an exposure pause until an explicit healthy read-back;
+- invalid production-mode text is rejected and admission refusal exits non-zero;
+- submitted Nexus transfer txids cannot be replaced;
+- unsafe dormant Nexus DEX, automatic fee-conversion and direct account-debit paths are removed;
+- Nexus/Solana money-path diagnostics are structured and secret-redacted;
+- one composable pytest command exists and is green locally.
 
-Those controls are valuable and verified locally and in CI. They do not make the service
-production-ready. Automatic Nexus refunds remain disabled while the durable intent protocol
-awaits crash-boundary and target-node evidence. Reconciliation now requires exact remote Nexus
-token-history identity and amount evidence, includes active recipients independently, and fails
-closed rather than traversing unsafe live-offset pages. Exceptions or unhealthy results still do
-not latch a pause on new exposure; the exact valid first-time-recipient case and target one-page
-ordering/boundary semantics remain unproven. The standing live-chain acceptance matrix has not
-been run.
+Those controls are valuable. They do not make the service production-ready.
+Empty “successful” Nexus deposit enumeration can still advance the checkpoint
+without proving a stable range. Debit resolution treats multiple matching
+contracts in one transaction as one candidate, and confirmation-count polling
+terminalizes a submitted mint txid without reading back and matching its actual
+contract terms. Remote reconciliation intentionally fails closed beyond one page,
+so it cannot clear the exposure pause once history outgrows that bounded view.
+Production admission also omits the required multiuser session prerequisite.
+Automatic Nexus refunds remain disabled while the durable intent protocol awaits
+crash-boundary and target-node evidence. The standing live-chain acceptance matrix
+has not been run.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
-| Critical release gate | 2 | Permanent refund safety and live-boundary evidence remain absent |
-| High release blocker | 1 | Reconciliation errors and unhealthy results do not pause new exposure |
-| Medium / operational | 6 | Response, custody, configuration, exposure-control, dependency or maintenance gap |
-| Low / hygiene | 2 | Documentation and dead-code cleanup |
+| Critical release gate | 1 | Empty successful Nexus enumeration can advance past unpersisted credits |
+| High release blocker | 3 | Contract multiplicity, txid-only terminalization, and bounded remote-history availability |
+| Medium / operational | 4 | Exact-unit boundary, session admission, logging isolation and live acceptance gaps |
+| Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
 
 ### Release gates
 
 | Gate | Status |
 |---|---|
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
-| No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
+| No checkpoint advances from incomplete/lossy enumeration | **FAIL** — explicit failures/truncation hold, but an empty “successful” Nexus page still advances to `now - safety` |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — local and remote evidence fail closed, but unhealthy results do not pause exposure and target-node boundary semantics remain unproven |
-| One composable automated test command | **PASS** — 62 tests plus 4 subtests on `5d92ec0` |
-| CI enforces tests and static checks | **ENFORCED and green** — run [`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) passed on reconciliation evidence head `de4ae8c` (with implementation `5d92ec0` as its parent) |
+| Durable completed-state data supports reconciliation | **PARTIAL** — exposure pause is closed locally, but multiple contracts can collapse to one txid and confirmed txids are not read back for exact terms |
+| One composable automated test command | **PASS** — 94 tests plus 10 subtests on `cc175cb` |
+| CI enforces tests and static checks | **Historical exact-head evidence only** — current range was verified locally; deployment still requires exact-tree CI and independent review after repairs |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---

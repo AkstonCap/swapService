@@ -42,6 +42,15 @@
 > development mode. A valid production admission-control rejection returns non-zero from
 > the service entrypoint. The historical review above retains the finding as evidence; see
 > [`EVALUATION.md`](EVALUATION.md) for the current remediation status.
+>
+> **Weekly review update (2026-08-31, `cc175cb`):** reconciliation pause,
+> strict production-mode parsing, non-zero admission refusal and submitted-txid
+> immutability are closed locally. Deployment remains hard-blocked. Empty
+> successful Nexus enumeration still advances the checkpoint; multiple exact
+> contracts in one txid collapse to one debit; a confirmed mint txid is not read
+> back for full contract terms; one-page reconciliation cannot scale; and the
+> target-chain crash/pagination/finality matrix remains unrun. See
+> [`DEVELOPMENT_REVIEW_2026-08-31.md`](DEVELOPMENT_REVIEW_2026-08-31.md).
 
 **Method:** Static review of the money paths, state machine, polling loop, recovery logic, helper tooling, configuration, and documentation, plus targeted reasoning about Solana/Nexus finality and SQLite semantics. Arithmetic and SQL claims were executed in isolation to confirm them. **No live run was possible** — the runtime dependencies (`solana`, `solders`, `python-dotenv`) and RPC/Nexus access are unavailable in this environment.
 

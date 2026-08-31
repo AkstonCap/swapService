@@ -32,6 +32,15 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > and refuses multi-page ambiguity, but its exact valid new-recipient case and
 > target-node one-page boundary/order semantics remain unproven. See
 > `DEVELOPMENT_REVIEW_2026-08-29.md`.
+>
+> **Weekly review update (2026-08-31, `cc175cb`):** reconciliation now
+> latches an exposure pause until an explicit healthy read-back; malformed
+> production mode and zero-exit admission are fixed; and submitted transfer
+> txids are immutable. Production remains hard-blocked. Empty successful Nexus
+> enumeration can still advance the waterline; exact debit resolution collapses
+> multiple contracts in one txid; confirmation-count polling does not read back
+> the submitted mint's full contract terms; and remote reconciliation cannot
+> prove more than one page. See `DEVELOPMENT_REVIEW_2026-08-31.md`.
 
 ---
 
@@ -54,7 +63,7 @@ flowchart TD
     DebitUnverified -->|no reference recorded| ToBeQuarantined["to be quarantined"]
 
     DebitedAwaiting -->|">= min confirmations"| Processed["debit_confirmed ✓"]
-    DebitedAwaiting -->|"tx NEVER appeared and age > SOLANA_CONFIRM_TIMEOUT_SEC"| ToBeRefunded
+    DebitedAwaiting -->|"missing / failed confirmation evidence"| DebitedAwaiting
 
     ToBeRefunded -->|"net ≤ 0"| ProcessedAsFees
     ToBeRefunded -->|"no/invalid sender address"| ToBeQuarantined
@@ -77,7 +86,7 @@ flowchart TD
 | **ReadyForProcessing** | Awaiting validation + debit | `unprocessed_sigs` | `"ready for processing"` |
 | **DebitInFlight** | Reference persisted, Nexus debit issued, outcome not yet known | `unprocessed_sigs` | `"debit in flight"` |
 | **DebitUnverified** | Debit outcome **ambiguous** — resolved against the chain, never guessed | `unprocessed_sigs` | `"debit unverified"` |
-| **DebitedAwaiting** | Debit confirmed to exist; awaiting confirmations | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
+| **DebitedAwaiting** | A submitted txid is stored; awaiting confirmation count. Current code does not yet read back and match that txid's full DEBIT contract terms before terminalization. Missing or failed evidence remains held. | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
 | **Processed** | Debit fully confirmed | `processed_sigs` | `"debit_confirmed"` |
 | **ProcessedAsFees** | Amount after fees ≤ 0 | `processed_sigs` | `"processed, amount after fees <= 0"` |
 | **ToBeRefunded** | Validation failed or amount exceeds the configured cap; ambiguity alone never refunds | `unprocessed_sigs` | `"to be refunded"` |
