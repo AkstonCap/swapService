@@ -216,7 +216,9 @@ METRICS_INTERVAL_SEC = int(os.getenv("METRICS_INTERVAL_SEC", "30"))
 REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
 STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
 SOLANA_CONFIRM_TIMEOUT_SEC = int(_first_env("SOLANA_CONFIRM_TIMEOUT_SEC",
-                                            "USDC_CONFIRM_TIMEOUT_SEC", default="600"))  # 10 minutes default for Nexus->Solana confirmations
+                                             "USDC_CONFIRM_TIMEOUT_SEC", default="600"))  # 10 minutes default for Nexus->Solana confirmations
+# A direct ledger txid read remains non-terminal until this many Nexus confirmations.
+NEXUS_TRANSFER_MIN_CONFIRMATIONS = int(os.getenv("NEXUS_TRANSFER_MIN_CONFIRMATIONS", "10"))
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")

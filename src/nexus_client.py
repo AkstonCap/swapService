@@ -593,6 +593,12 @@ def get_nexus_transfer_debits_by_txid(txid: str) -> "BatchLookup":
     tx = data.get("result") if isinstance(data, dict) and "result" in data else data
     if not isinstance(tx, dict) or str(tx.get("txid") or "") != expected_txid:
         return BatchLookup({}, False, "invalid_transaction")
+    confirmations = tx.get("confirmations")
+    minimum_confirmations = getattr(config, "NEXUS_TRANSFER_MIN_CONFIRMATIONS", 10)
+    if (isinstance(confirmations, bool) or not isinstance(confirmations, int)
+            or isinstance(minimum_confirmations, bool) or not isinstance(minimum_confirmations, int)
+            or confirmations < minimum_confirmations):
+        return BatchLookup({}, False, "insufficient_confirmations")
     contracts = tx.get("contracts")
     if not isinstance(contracts, list):
         return BatchLookup({}, False, "invalid_contracts")

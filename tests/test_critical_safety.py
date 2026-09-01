@@ -1195,11 +1195,12 @@ class CriticalSafetyTests(unittest.TestCase):
                     amount_usdd_units=nexus_units,
                     nexus_destination="recipient",
                     memo="nexus:recipient",
+                    contract_id=0,
                 )
                 self.assertFalse(state_db.is_unprocessed_sig("mint-sig"))
                 remote = nexus_client.NexusMintDebitEvidence(
                     remote_txid="mint-tx", timestamp=100, confirmations=10,
-                    from_address="TOKEN", to_address="recipient", amount_usdd_units=nexus_units,
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient", amount_usdd_units=nexus_units,
                     reference="77", contract_id=0,
                 )
 
@@ -1211,6 +1212,22 @@ class CriticalSafetyTests(unittest.TestCase):
                 self.assertTrue(healthy["healthy"])
                 self.assertEqual(healthy["checked_addresses"], 1)
                 self.assertEqual(healthy["total_surplus_nexus_units"], 0)
+
+                # A chain response that shares the txid/reference/destination/amount but
+                # carries the wrong immutable source and contract index must make the
+                # reconciliation unhealthy rather than manufacture a green result.
+                wrong_remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="mint-tx", timestamp=100, confirmations=10,
+                    from_address="WRONG-SOURCE", to_address="recipient",
+                    amount_usdd_units=nexus_units, reference="77", contract_id=9,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [wrong_remote]}, True),
+                ):
+                    wrong_terms = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+                self.assertFalse(wrong_terms["healthy"])
+                self.assertTrue(any("no unique exact" in reason for reason in wrong_terms["incomplete_reasons"]))
 
                 # A second treasury debit to the same recipient is observable as a
                 # positive exact-base-unit discrepancy rather than a false green.
@@ -1239,12 +1256,12 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "mint-sig", 100, solana_units, "mint-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=nexus_units,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 remote = [
                     nexus_client.NexusMintDebitEvidence(
                         remote_txid=txid, timestamp=timestamp, confirmations=10,
-                        from_address="TOKEN", to_address="recipient",
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                         amount_usdd_units=nexus_units,
                         reference="77", contract_id=0,
                     )
@@ -1252,7 +1269,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 ]
                 remote.append(nexus_client.NexusMintDebitEvidence(
                     remote_txid="duplicate-tx", timestamp=101, confirmations=10,
-                    from_address="TOKEN", to_address="attacker",
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="attacker",
                     amount_usdd_units=nexus_units, reference="88", contract_id=0,
                 ))
                 # Token history also carries account-to-account movements. A treasury
@@ -1285,7 +1302,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=nexus_units,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 with patch.object(
                     nexus_client, "find_nexus_mint_debits_since",
@@ -1422,11 +1439,11 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "completed-sig", 100, 2_000_000, "completed-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=issued_units,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 remote = nexus_client.NexusMintDebitEvidence(
                     remote_txid="completed-tx", timestamp=100, confirmations=10,
-                    from_address="TOKEN", to_address="recipient",
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                     amount_usdd_units=issued_units, reference="77", contract_id=0,
                 )
                 # The mutable current fee calculation is deliberately different from
@@ -1507,11 +1524,11 @@ class CriticalSafetyTests(unittest.TestCase):
                     state_db.mark_processed_sig(
                         sig, 100, 2_000_000, "shared-tx", 0.0,
                         "debit_confirmed", 77, amount_usdd_units=nexus_units,
-                        nexus_destination="recipient", memo="nexus:recipient",
+                        nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                     )
                 remote = nexus_client.NexusMintDebitEvidence(
                     remote_txid="shared-tx", timestamp=100, confirmations=10,
-                    from_address="TOKEN", to_address="recipient",
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                     amount_usdd_units=nexus_units, reference="77", contract_id=0,
                 )
                 with patch.object(
@@ -1629,7 +1646,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=1_898_000,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 conn = sqlite3.connect(db_path)
                 try:
@@ -2149,6 +2166,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 run.return_value = (0, json.dumps({
                     "result": {
                         "txid": "returned-txid",
+                        "confirmations": 10,
                         "contracts": [{
                             "id": 3, "OP": "DEBIT", "reference": intent["reference"],
                             "from": {"address": "TREASURY"},
@@ -2167,6 +2185,22 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0][1], "ledger/get/transaction")
         self.assertIn("txid=returned-txid", run.call_args.args[0])
+
+    def test_direct_transfer_readback_requires_final_confirmations(self):
+        """A returned txid must remain held until Nexus reports the configured depth."""
+        response = json.dumps({"result": {
+            "txid": "unfinal-tx", "confirmations": 0,
+            "contracts": [{
+                "id": 3, "OP": "DEBIT", "reference": "bridge-xfer:unfinal",
+                "from": {"address": "TREASURY"}, "to": {"address": "sender"},
+                "amount": "1.000000",
+            }],
+        }})
+        with patch.object(nexus_client, "_run", return_value=(0, response, "")):
+            lookup = nexus_client.get_nexus_transfer_debits_by_txid("unfinal-tx")
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "insufficient_confirmations")
 
     def test_submitted_transfer_holds_txid_readback_with_wrong_reference(self):
         """A matching endpoint/amount in the returned tx is insufficient without the intent reference."""
