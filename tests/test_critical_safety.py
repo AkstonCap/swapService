@@ -238,6 +238,32 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(main.alerts, "critical")
+    def test_production_controls_require_immutable_nexus_token_register(self, critical):
+        """A production bridge must not authorize Nexus debits by a display ticker alone."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+            patch.object(config, "NEXUS_MULTIUSER", False),
+            patch.object(config, "NEXUS_TOKEN_REGISTER_ADDRESS", ""),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=["NEXUS_TOKEN_REGISTER_ADDRESS"],
+        )
+
+    @patch.object(main.alerts, "critical")
     def test_production_controls_require_https_nexus_api_transport(self, critical):
         """A live bridge must not place Nexus credentials in a child-process argv."""
         with (
