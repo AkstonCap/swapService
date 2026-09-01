@@ -423,6 +423,9 @@ class TransferDebitEvidence:
     from_address: str
     to_address: str
     amount_usdd_units: int
+    # Direct txid read-back must compare the on-chain reference too. History callers
+    # retain a keyed lookup compatibility path for legacy fixture records.
+    reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -618,17 +621,22 @@ def get_nexus_transfer_debits_by_txid(txid: str) -> "BatchLookup":
             from_address=from_address,
             to_address=to_address,
             amount_usdd_units=amount_usdd_units,
+            reference=str(reference).strip(),
         ))
     return BatchLookup({expected_txid: evidence}, True)
 
 
-def _matching_transfer_debit_evidence(intent: dict, candidates: list[TransferDebitEvidence]) -> list[TransferDebitEvidence]:
+def _matching_transfer_debit_evidence(
+    intent: dict, candidates: list[TransferDebitEvidence], *, require_reference: bool = False
+) -> list[TransferDebitEvidence]:
     """Filter observed DEBITs against the immutable terms persisted before execution."""
+    expected_reference = str(intent["reference"]).strip()
     return [
         evidence for evidence in candidates
         if evidence.from_address == str(intent["from_address"])
         and evidence.to_address == str(intent["to_address"])
         and evidence.amount_usdd_units == int(intent["amount_usdd_units"])
+        and (not require_reference or evidence.reference == expected_reference)
         and (intent["status"] != "submitted"
              or evidence.remote_txid == str(intent.get("remote_txid") or ""))
     ]
@@ -675,7 +683,7 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
             )
             continue
         candidates = _matching_transfer_debit_evidence(
-            intent, lookup.values.get(remote_txid, [])
+            intent, lookup.values.get(remote_txid, []), require_reference=True
         )
         if len(candidates) != 1:
             _log(

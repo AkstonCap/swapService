@@ -2078,6 +2078,44 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][1], "ledger/get/transaction")
         self.assertIn("txid=returned-txid", run.call_args.args[0])
 
+    def test_submitted_transfer_holds_txid_readback_with_wrong_reference(self):
+        """A matching endpoint/amount in the returned tx is insufficient without the intent reference."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(nexus_client, "_run") as run:
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-wrong-reference", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="returned-txid"
+                )
+                run.return_value = (0, json.dumps({"result": {
+                    "txid": "returned-txid", "contracts": [{
+                        "id": 3, "OP": "DEBIT", "reference": "wrong-reference",
+                        "from": {"address": "TREASURY"}, "to": {"address": "sender"},
+                        "amount": "1.000000",
+                    }],
+                }}), "")
+
+                self.assertEqual(nexus_client.resolve_nexus_transfer_intents(), 0)
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "submitted")
+        self.assertIsNone(stored["contract_id"])
+
     def test_transfer_resolution_holds_single_candidate_from_incomplete_lookup(self):
         """One observed DEBIT cannot prove global uniqueness from a bounded scan."""
         with tempfile.TemporaryDirectory() as tmpdir:
