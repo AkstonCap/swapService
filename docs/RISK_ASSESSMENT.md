@@ -87,6 +87,26 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 > `getTransactionsForAddress`. Treat the correct claim as **"no known defects remain"**,
 > not "verified correct". See §9.
 
+> ### Current independent status (2026-09-01, reviewed `aa71066`)
+>
+> The composable suite and CI are now green, and recent changes close the previously
+> identified incomplete-range action, endpoint-object, token-register, contract-id,
+> multiuser-session, logging-isolation and production-transport gaps locally. This does
+> **not** clear production. Three high release gates remain:
+>
+> 1. completed-mint reconciliation ignores the persisted `contract_id` and does not
+>    require the configured Nexus token-register source, so legacy/incomplete terminal
+>    rows can still contribute to `healthy=True` without the new identity contract;
+> 2. direct Nexus transfer resolution marks an intent completed without checking the
+>    transaction's confirmation count, while reference-only unknown outcomes have no
+>    complete stable-range resolution path; and
+> 3. one-page/live-offset history semantics, equal timestamps, concurrent inserts,
+>    malformed target responses and both-chain finality have not passed the target-node
+>    matrix.
+>
+> No automated Nexus refund or quarantine transfer should be enabled, and no real funds
+> should be admitted, until `DEVELOPMENT_REVIEW_2026-09-01.md` exit criteria pass.
+
 | Tier | Theme | Count |
 |------|-------|-------|
 | 1 | Fund loss / unbacked mint (Critical) | 5 |

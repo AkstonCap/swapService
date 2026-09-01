@@ -49,6 +49,16 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > target API's nested endpoint-address objects, compares a register address to
 > the token-name label, and omits contract id from terminal durable state.
 > Production remains hard-blocked; see `DEVELOPMENT_REVIEW_2026-08-31_1616.md`.
+>
+> **Follow-up review (2026-09-01, `aa71066`):** incomplete reference scans
+> now hold, returned endpoint objects are normalized, submitted txids are read
+> directly, terminal rows retain `contract_id`, production requires the token
+> register and a multiuser session, and logging/common-transport gaps are locally
+> repaired. The direct transfer resolver nevertheless terminalizes a transaction
+> without checking confirmations; reference-only unknown outcomes have no complete
+> stable-range path; and completed-mint reconciliation does not consume the stored
+> contract id or require the configured token-register source. Production remains
+> hard-blocked; see `DEVELOPMENT_REVIEW_2026-09-01.md`.
 
 ---
 
@@ -66,8 +76,7 @@ flowchart TD
     DebitInFlight -->|CLI returned a txid| DebitedAwaiting["debited, awaiting confirmation"]
     DebitInFlight -->|"exception / timeout / unparsable body"| DebitUnverified["debit unverified"]
 
-    DebitUnverified -->|"one returned exact contract (bounded uniqueness unproven)"| DebitedAwaiting
-    DebitUnverified -->|"lookup negative, failed, or incomplete"| DebitUnverified
+    DebitUnverified -->|"reference-only scan is failed / bounded / not snapshot-stable"| DebitUnverified
     DebitUnverified -->|no reference recorded| ToBeQuarantined["to be quarantined"]
 
     DebitedAwaiting -->|">= min confirmations + one returned same-tx exact contract"| Processed["debit_confirmed ✓"]
@@ -94,8 +103,8 @@ flowchart TD
 | **ReadyForProcessing** | Awaiting validation + debit | `unprocessed_sigs` | `"ready for processing"` |
 | **DebitInFlight** | Reference persisted, Nexus debit issued, outcome not yet known | `unprocessed_sigs` | `"debit in flight"` |
 | **DebitUnverified** | Debit outcome **ambiguous** — resolved against the chain, never guessed | `unprocessed_sigs` | `"debit unverified"` |
-| **DebitedAwaiting** | A submitted txid is stored; confirmation now triggers DEBIT-term read-back. The target API endpoint objects are not normalized correctly and `contract_id` is not persisted, so this is a held release gate rather than verified exact terminalization. Missing or failed evidence remains held. | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
-| **Processed** | Debit fully confirmed | `processed_sigs` | `"debit_confirmed"` |
+| **DebitedAwaiting** | A submitted txid is stored. After the separate confirmation count reaches the threshold, direct txid read-back must match reference, configured token-register source, destination and exact units; endpoint objects are normalized and the selected contract id is retained. Missing or failed evidence remains held. Target-node response/finality behavior remains a release gate. | `unprocessed_sigs` | `"debited, awaiting confirmation"` |
+| **Processed** | One exact DEBIT contract passed the local confirmation/read-back checks; terminal evidence includes `txid` and `contract_id` | `processed_sigs` | `"debit_confirmed"` |
 | **ProcessedAsFees** | Amount after fees ≤ 0 | `processed_sigs` | `"processed, amount after fees <= 0"` |
 | **ToBeRefunded** | Validation failed or amount exceeds the configured cap; ambiguity alone never refunds | `unprocessed_sigs` | `"to be refunded"` |
 | **RefundSent** | USDC refund broadcast | `unprocessed_sigs` | `"refund sent, awaiting confirmation"` |
@@ -150,7 +159,9 @@ flowchart TD
 
     RefundHold -->|"operator prepares, confirms reference and authorizes"| IntentAuthorized["durable transfer intent authorized"]
     IntentAuthorized -->|"one CLI attempt"| IntentOutcome["submitted / outcome_unknown"]
-    IntentOutcome -->|"positive on-chain reference match + exact remote txid confirmation"| Disposition["refunded or quarantined ✓"]
+    IntentOutcome -->|"submitted txid: direct exact contract match<br/>(confirmation count not enforced)"| IntentCompleted["completed"]
+    IntentOutcome -->|"outcome_unknown: bounded reference scan"| IntentOutcome
+    IntentCompleted -->|"named operator confirms remote txid"| Disposition["refunded or quarantined ✓"]
 
     Collecting -->|legacy state| RefundHold
     RefundPending -->|legacy state| RefundHold
@@ -172,7 +183,8 @@ flowchart TD
 | **RefundPending** | Legacy refund state converted to a hold | `unprocessed_txids` | `"refund pending"` |
 | **RefundHold** | Refund/quarantine requires operator review; no automatic Nexus debit | `unprocessed_txids` | `"refund held for operator review"` |
 | **IntentAuthorized** | Operator has confirmed the immutable reference and authorized exactly one CLI debit | `nexus_transfer_intents` | `"authorized"` |
-| **IntentOutcome** | CLI result is submitted or unknown; resolver only accepts a positive on-chain reference match | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
+| **IntentOutcome** | CLI result is submitted or unknown. A submitted txid can resolve from one exact direct transaction contract; an `outcome_unknown` reference-only row remains held because the live-offset history scan cannot prove a complete range. | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
+| **IntentCompleted** | Exact txid/contract/reference/endpoints/units are stored, but current code does not require a confirmation count before this state. | `nexus_transfer_intents` | `"completed"` |
 | **Disposition** | A named operator confirms the exact remote txid, then the source moves to its terminal archive | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
 | **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
 
