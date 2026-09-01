@@ -11,7 +11,7 @@ REQUIRED_ENV = [
     ("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT"),
     ("SOLANA_TOKEN_MINT", "USDC_MINT"),
     ("NEXUS_PIN",),
-    ("NEXUS_USDD_TREASURY_ACCOUNT",),
+    ("NEXUS_TREASURY_ACCOUNT", "NEXUS_USDD_TREASURY_ACCOUNT"),
     ("SOL_MAIN_ACCOUNT",),
 ]
 for _names in REQUIRED_ENV:
@@ -28,7 +28,8 @@ for _names in REQUIRED_ENV:
 # are accepted, so existing .env files keep working.
 #
 #   Solana side : SOLANA_TOKEN_MINT + SOLANA_VAULT_ACCOUNT  (aliases: USDC_MINT, VAULT_USDC_ACCOUNT)
-#   Nexus  side : NEXUS_TOKEN_NAME  + NEXUS_USDD_TREASURY_ACCOUNT
+#   Nexus  side : NEXUS_TOKEN_NAME + NEXUS_TREASURY_ACCOUNT
+#                  (alias: NEXUS_USDD_TREASURY_ACCOUNT)
 #
 # Internal identifiers now say `solana` and `nexus` rather than naming the original pair.
 # Three categories deliberately keep the old spelling, because in each case the name is
@@ -52,11 +53,29 @@ def _first_env(*names, default=None):
             return v
     return default
 
+
+def _compat_env(canonical: str, legacy: str, *, default: str = "") -> str:
+    """Read a canonical setting or its legacy alias without silently choosing a pair.
+
+    A conflicting token identity, custody account, or precision can direct the Solana and
+    Nexus money paths at a pair other than the one an operator configured.  During the
+    compatibility window both spellings are accepted, but an explicit conflict is a
+    startup error rather than a precedence rule.
+    """
+    canonical_value = os.getenv(canonical)
+    legacy_value = os.getenv(legacy)
+    if canonical_value and legacy_value and canonical_value != legacy_value:
+        raise ValueError(
+            f"Conflicting {canonical}={canonical_value!r} and {legacy}={legacy_value!r}; "
+            "set only one spelling or make both values identical"
+        )
+    return canonical_value or legacy_value or default
+
 # Solana
 RPC_URL = os.getenv("SOLANA_RPC_URL")
 VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
-_vault_acct = _first_env("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT")
-_sol_mint = _first_env("SOLANA_TOKEN_MINT", "USDC_MINT")
+_vault_acct = _compat_env("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT")
+_sol_mint = _compat_env("SOLANA_TOKEN_MINT", "USDC_MINT")
 if not _vault_acct:
     raise ValueError("Required environment variable SOLANA_VAULT_ACCOUNT (or VAULT_USDC_ACCOUNT) is not set")
 if not _sol_mint:
@@ -72,8 +91,8 @@ SOLANA_TOKEN_SYMBOL = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
 SOL_MAIN_ACCOUNT = PublicKey.from_string(os.getenv("SOL_MAIN_ACCOUNT"))
 
 # Decimals for each side of the pair
-USDC_DECIMALS = int(_first_env("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS", default="6"))
-USDD_DECIMALS = int(_first_env("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", default="6"))
+USDC_DECIMALS = int(_compat_env("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS", default="6"))
+USDD_DECIMALS = int(_compat_env("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", default="6"))
 SOLANA_TOKEN_DECIMALS = USDC_DECIMALS
 NEXUS_TOKEN_DECIMALS = USDD_DECIMALS
 
@@ -131,7 +150,9 @@ NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
 # mutable/display token label.
 NEXUS_TOKEN_REGISTER_ADDRESS = os.getenv("NEXUS_TOKEN_REGISTER_ADDRESS", "").strip()
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
-NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
+NEXUS_USDD_TREASURY_ACCOUNT = _compat_env(
+    "NEXUS_TREASURY_ACCOUNT", "NEXUS_USDD_TREASURY_ACCOUNT"
+)
 NEXUS_TREASURY_ACCOUNT = NEXUS_USDD_TREASURY_ACCOUNT  # generic alias
 # Memo prefix a depositor puts on the Solana transfer to name their Nexus destination,
 # e.g. "nexus:8Cuy...". Configurable so an operator can namespace their bridge.
