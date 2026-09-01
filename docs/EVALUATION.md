@@ -101,8 +101,12 @@ before scans run, so a crash after the durable claim cannot consume its authoriz
 **Independent follow-up remediation (2026-08-31):** every resolver now holds when its bounded
 reference lookup is incomplete, normalizes Nexus `from`/`to` endpoint objects to immutable register
 addresses, compares the configured token register address rather than a display name, and persists
-`contract_id` with terminal state. These are local fail-closed repairs; target-node query/pagination
-semantics and the live matrix remain required before enabling the operator protocol.
+`contract_id` with terminal state. A transfer intent that already has the txid returned by its sole
+submitted debit resolves that exact transaction through `ledger/get/transaction`, requiring one
+contract that matches its persisted reference, endpoints and integer units; malformed/mismatched
+read-back remains held. Reference-only ambiguous outcomes still require complete stable-range
+evidence. These are local fail-closed repairs; target-node query/pagination semantics and the live
+matrix remain required before enabling the operator protocol.
 
 Focused fault injection and target-node evidence are still required; the transfer primitive remains
 fail closed outside the durable-intent workflow.

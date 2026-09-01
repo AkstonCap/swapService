@@ -2030,6 +2030,54 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["contract_id"], 0)
         self.assertEqual(run.call_count, 1)
 
+    def test_submitted_transfer_resolves_from_its_authoritative_txid_readback(self):
+        """A returned Nexus txid is resolved directly, not through bounded history pages."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "_run"
+            ) as run:
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-direct-txid", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="returned-txid"
+                )
+                run.return_value = (0, json.dumps({
+                    "result": {
+                        "txid": "returned-txid",
+                        "contracts": [{
+                            "id": 3, "OP": "DEBIT", "reference": intent["reference"],
+                            "from": {"address": "TREASURY"},
+                            "to": {"address": "sender"},
+                            "amount": "1.000000",
+                        }],
+                    },
+                }), "")
+
+                self.assertEqual(nexus_client.resolve_nexus_transfer_intents(), 1)
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(stored["remote_txid"], "returned-txid")
+        self.assertEqual(stored["contract_id"], 3)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], "ledger/get/transaction")
+        self.assertIn("txid=returned-txid", run.call_args.args[0])
+
     def test_transfer_resolution_holds_single_candidate_from_incomplete_lookup(self):
         """One observed DEBIT cannot prove global uniqueness from a bounded scan."""
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -558,17 +558,143 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
     return TransferExecution(True, "submitted", remote_txid)
 
 
+def get_nexus_transfer_debits_by_txid(txid: str) -> "BatchLookup":
+    """Read one returned Nexus transaction by its authoritative immutable identity.
+
+    A locally persisted txid is evidence returned by the sole allowed debit invocation.
+    Unlike a live offset-paginated token-history scan, ``ledger/get/transaction`` addresses
+    exactly that transaction, so it can safely establish whether that transaction contains
+    one matching DEBIT contract.  It does *not* make reference-only ambiguous outcomes
+    retryable; those remain held pending a target-proven stable-range query.
+    """
+    expected_txid = str(txid or "").strip()
+    if not expected_txid:
+        return BatchLookup({}, False, "invalid_txid")
+    cmd = [config.NEXUS_CLI, "ledger/get/transaction", f"txid={expected_txid}"]
+    try:
+        code, cli_out, err = _run(
+            cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
+        )
+    except Exception as exc:
+        _log("nexus_transfer_txid_lookup_failed", level=logging.ERROR, error=redact(str(exc)))
+        return BatchLookup({}, False, "exception")
+    if code != 0:
+        _log("nexus_transfer_txid_lookup_failed", level=logging.ERROR,
+             error=redact(err or cli_out), reason="cli_error")
+        return BatchLookup({}, False, "cli_error")
+    data = _parse_json_lenient(cli_out)
+    if isinstance(data, dict) and data.get("error"):
+        return BatchLookup({}, False, "api_error")
+    tx = data.get("result") if isinstance(data, dict) and "result" in data else data
+    if not isinstance(tx, dict) or str(tx.get("txid") or "") != expected_txid:
+        return BatchLookup({}, False, "invalid_transaction")
+    contracts = tx.get("contracts")
+    if not isinstance(contracts, list):
+        return BatchLookup({}, False, "invalid_contracts")
+
+    evidence: list[TransferDebitEvidence] = []
+    seen_contracts: set[int] = set()
+    for contract in contracts:
+        if not isinstance(contract, dict):
+            return BatchLookup({}, False, "invalid_contract")
+        if str(contract.get("OP") or "").upper() != "DEBIT":
+            continue
+        contract_id = contract.get("id")
+        if isinstance(contract_id, bool) or not isinstance(contract_id, int):
+            return BatchLookup({}, False, "invalid_contract_id")
+        if contract_id in seen_contracts:
+            return BatchLookup({}, False, "duplicate_contract_id")
+        seen_contracts.add(contract_id)
+        reference = contract.get("reference")
+        amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
+        from_address = _parse_nexus_contract_address(contract.get("from"))
+        to_address = _parse_nexus_contract_address(contract.get("to"))
+        if (reference is None or not str(reference).strip() or amount_usdd_units is None
+                or from_address is None or to_address is None):
+            return BatchLookup({}, False, "invalid_debit_evidence")
+        evidence.append(TransferDebitEvidence(
+            remote_txid=expected_txid,
+            contract_id=contract_id,
+            from_address=from_address,
+            to_address=to_address,
+            amount_usdd_units=amount_usdd_units,
+        ))
+    return BatchLookup({expected_txid: evidence}, True)
+
+
+def _matching_transfer_debit_evidence(intent: dict, candidates: list[TransferDebitEvidence]) -> list[TransferDebitEvidence]:
+    """Filter observed DEBITs against the immutable terms persisted before execution."""
+    return [
+        evidence for evidence in candidates
+        if evidence.from_address == str(intent["from_address"])
+        and evidence.to_address == str(intent["to_address"])
+        and evidence.amount_usdd_units == int(intent["amount_usdd_units"])
+        and (intent["status"] != "submitted"
+             or evidence.remote_txid == str(intent.get("remote_txid") or ""))
+    ]
+
+
+def _complete_nexus_transfer_intent(intent: dict, evidence: TransferDebitEvidence) -> None:
+    """Persist exact remote identity after one authoritative match."""
+    state_db.update_nexus_transfer_intent(
+        intent["id"], status="completed", remote_txid=evidence.remote_txid,
+        contract_id=evidence.contract_id, resolved=True
+    )
+    _log(
+        "NEXUS_TRANSFER_RESOLVED",
+        intent_id=intent["id"],
+        reference=str(intent["reference"]).strip(),
+        remote_txid=evidence.remote_txid,
+    )
+
+
 def resolve_nexus_transfer_intents(limit: int = 200) -> int:
-    """Complete only an exact observed debit; never re-debit an ambiguous intent."""
+    """Complete exact known-txid debits; hold every reference-only ambiguous outcome."""
     intents = state_db.get_nexus_transfer_intents_by_status(
         ("executing", "submitted", "outcome_unknown"), limit=limit
     )
     if not intents:
         return 0
-    lookup = find_nexus_transfer_debits_by_references(
-        [intent["reference"] for intent in intents]
-    )
     resolved = 0
+    reference_only: list[dict] = []
+
+    for intent in intents:
+        if intent["status"] != "submitted":
+            reference_only.append(intent)
+            continue
+        remote_txid = str(intent.get("remote_txid") or "").strip()
+        lookup = get_nexus_transfer_debits_by_txid(remote_txid)
+        if not lookup.complete:
+            _log(
+                "NEXUS_TRANSFER_HELD",
+                level=logging.WARNING,
+                intent_id=intent["id"],
+                reference=str(intent["reference"]).strip(),
+                reason=lookup.reason or "authoritative_txid_lookup_incomplete",
+                matching_contracts=0,
+            )
+            continue
+        candidates = _matching_transfer_debit_evidence(
+            intent, lookup.values.get(remote_txid, [])
+        )
+        if len(candidates) != 1:
+            _log(
+                "NEXUS_TRANSFER_HELD",
+                level=logging.WARNING,
+                intent_id=intent["id"],
+                reference=str(intent["reference"]).strip(),
+                reason="no_unique_exact_debit_contract",
+                matching_contracts=len(candidates),
+            )
+            continue
+        _complete_nexus_transfer_intent(intent, candidates[0])
+        resolved += 1
+
+    if not reference_only:
+        return resolved
+    lookup = find_nexus_transfer_debits_by_references(
+        [intent["reference"] for intent in reference_only]
+    )
     # A single observed candidate from a bounded/failed scan does not prove there are
     # no competing contracts outside that scan. Completion is permitted only when the
     # lookup explicitly establishes completeness for every requested reference.
@@ -577,19 +703,14 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
             "NEXUS_TRANSFER_LOOKUP_HELD",
             level=logging.WARNING,
             reason=lookup.reason or "incomplete_debit_lookup",
-            intent_count=len(intents),
+            intent_count=len(reference_only),
         )
-        return 0
-    for intent in intents:
+        return resolved
+    for intent in reference_only:
         reference = str(intent["reference"]).strip()
-        candidates = [
-            evidence for evidence in lookup.values.get(reference, [])
-            if evidence.from_address == str(intent["from_address"])
-            and evidence.to_address == str(intent["to_address"])
-            and evidence.amount_usdd_units == int(intent["amount_usdd_units"])
-            and (intent["status"] != "submitted"
-                 or evidence.remote_txid == str(intent.get("remote_txid") or ""))
-        ]
+        candidates = _matching_transfer_debit_evidence(
+            intent, lookup.values.get(reference, [])
+        )
         # Count complete contract identities, never only transaction ids: one Nexus
         # transaction can contain multiple DEBIT contracts with the same terms.
         if len(candidates) != 1:
@@ -602,18 +723,7 @@ def resolve_nexus_transfer_intents(limit: int = 200) -> int:
                 matching_contracts=len(candidates),
             )
             continue
-        evidence = candidates[0]
-        remote_txid = evidence.remote_txid
-        state_db.update_nexus_transfer_intent(
-            intent["id"], status="completed", remote_txid=remote_txid,
-            contract_id=evidence.contract_id, resolved=True
-        )
-        _log(
-            "NEXUS_TRANSFER_RESOLVED",
-            intent_id=intent["id"],
-            reference=reference,
-            remote_txid=remote_txid,
-        )
+        _complete_nexus_transfer_intent(intent, candidates[0])
         resolved += 1
     return resolved
 
