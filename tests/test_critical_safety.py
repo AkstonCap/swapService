@@ -1048,12 +1048,13 @@ class CriticalSafetyTests(unittest.TestCase):
                 return_value=nexus_client.BatchLookup({"unrelated-confirmed-tx": 10}, True),
             ), patch.object(
                 nexus_client,
-                "find_nexus_transfer_debits_by_references",
-                return_value=nexus_client.BatchLookup({"77": [
+                "get_nexus_transfer_debits_by_txid",
+                return_value=nexus_client.BatchLookup({"unrelated-confirmed-tx": [
                     nexus_client.TransferDebitEvidence(
                         remote_txid="unrelated-confirmed-tx", contract_id=0,
                         from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS,
                         to_address="wrong-recipient", amount_usdd_units=1_898_000,
+                        reference="77",
                     )
                 ]}, True),
             ):
@@ -1078,12 +1079,13 @@ class CriticalSafetyTests(unittest.TestCase):
                 return_value=nexus_client.BatchLookup({"mint-tx": 10}, True),
             ), patch.object(
                 nexus_client,
-                "find_nexus_transfer_debits_by_references",
-                return_value=nexus_client.BatchLookup({"77": [
+                "get_nexus_transfer_debits_by_txid",
+                return_value=nexus_client.BatchLookup({"mint-tx": [
                     nexus_client.TransferDebitEvidence(
                         remote_txid="mint-tx", contract_id=0,
                         from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                         amount_usdd_units=nexus_client.get_nexus_send_amount_units(2_000_000),
+                        reference="77",
                     )
                 ]}, True),
             ):

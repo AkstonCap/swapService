@@ -826,21 +826,17 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     # One bounded lookup for the whole batch instead of an unbounded fetch per row.
     confirmation_lookup = get_transactions_confirmations([row[6] for row in sigs if row[6]])
 
-    # A confirmation count proves only that the supplied transaction exists.  Before a
-    # local mint is terminalized, read back its uniquely referenced DEBIT contract and
-    # compare every immutable term.  A positive exact match is actionable even if the
-    # bounded reference scan cannot prove history absence; any non-match remains held.
-    confirmed_references = []
-    for sig, _timestamp, _memo, _from_address, _amount_usdc_units, _status, txid in sigs:
-        confirmations = confirmation_lookup.values.get(str(txid)) if txid else None
+    # A confirmation count proves only that the submitted transaction exists.  For a
+    # known txid, use the authoritative ledger lookup instead of a live offset-paginated
+    # reference-history scan: the latter cannot establish a stable global range and would
+    # leave a valid Solana→Nexus mint held forever.  Each returned DEBIT is still checked
+    # against the immutable reference, source register, destination and integer output.
+    debit_lookups: dict[str, BatchLookup] = {}
+    for _sig, _timestamp, _memo, _from_address, _amount_usdc_units, _status, txid in sigs:
+        txid_text = str(txid).strip() if txid else ""
+        confirmations = confirmation_lookup.values.get(txid_text) if txid_text else None
         if confirmations is not None and confirmations >= min_confirmations:
-            reference = state_db.get_unprocessed_sig_reference(sig)
-            if reference is not None:
-                confirmed_references.append(reference)
-    debit_lookup = (
-        find_nexus_transfer_debits_by_references(confirmed_references)
-        if confirmed_references else BatchLookup({}, True)
-    )
+            debit_lookups.setdefault(txid_text, get_nexus_transfer_debits_by_txid(txid_text))
 
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
@@ -871,6 +867,12 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
                  reason="missing_reference")
             continue
+        txid_text = str(txid).strip()
+        debit_lookup = debit_lookups.get(txid_text)
+        if debit_lookup is None:
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reference=reference, reason="missing_authoritative_txid_lookup")
+            continue
         if isinstance(amount_usdc_units, bool) or not isinstance(amount_usdc_units, int):
             _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
                  reason="non_integer_solana_units")
@@ -891,16 +893,16 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
                  reason="missing_or_invalid_nexus_destination")
             continue
 
-        # A bounded or failed history scan cannot establish global uniqueness, even
-        # when it returns one exact-looking contract. Hold terminalization until the
-        # lookup explicitly proves the relevant reference range is complete.
+        # The returned txid is an authoritative identity, but the transaction may still
+        # contain multiple DEBITs. Terminalize only one contract whose persisted reference,
+        # immutable token register source, memo destination and exact integer units all match.
         if not debit_lookup.complete:
             _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
-                 reference=reference, reason=debit_lookup.reason or "incomplete_debit_lookup")
+                 reference=reference, reason=debit_lookup.reason or "authoritative_txid_lookup_incomplete")
             continue
         exact_contracts = [
-            evidence for evidence in debit_lookup.values.get(str(reference).strip(), [])
-            if evidence.remote_txid == str(txid)
+            evidence for evidence in debit_lookup.values.get(txid_text, [])
+            if evidence.reference == str(reference).strip()
             and evidence.from_address == str(config.NEXUS_TOKEN_REGISTER_ADDRESS)
             and evidence.to_address == nexus_destination
             and evidence.amount_usdd_units == nexus_out_base
