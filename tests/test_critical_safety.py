@@ -1944,6 +1944,37 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["remote_txid"], "refund-tx")
         self.assertEqual(run.call_count, 1)
 
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":12345}', ""))
+    def test_nexus_transfer_intent_holds_non_string_returned_txid(self, run):
+        """A non-string Nexus response identity cannot authorize a submitted debit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-non-string-returned-txid",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+
+                outcome = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertTrue(outcome.executed)
+        self.assertEqual(outcome.status, "outcome_unknown")
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
+        run.assert_called_once()
+
     def test_submitted_nexus_transfer_intent_refuses_remote_txid_replacement(self):
         """A persisted Nexus txid is immutable through final resolution."""
         with tempfile.TemporaryDirectory() as tmpdir:

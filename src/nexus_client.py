@@ -535,9 +535,11 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
 
     data = _parse_json_lenient(out)
     remote_txid = data.get("txid") if isinstance(data, dict) else None
-    if not remote_txid:
-        # Text-only success is deliberately not treated as a safe retry.  The
-        # persisted reference is resolved against the chain in a later pass.
+    if not isinstance(remote_txid, str) or not remote_txid.strip():
+        # A non-string (or blank) JSON value is not an authoritative Nexus
+        # transaction identity. Treat it exactly like unparsed success: the
+        # sole debit may have reached the node, so hold and resolve the
+        # persisted reference later rather than inventing a string identity.
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
         _log(
             "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
@@ -548,7 +550,7 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
         )
         return TransferExecution(True, "outcome_unknown")
 
-    remote_txid = str(remote_txid)
+    remote_txid = remote_txid.strip()
     state_db.update_nexus_transfer_intent(
         intent_id, status="submitted", remote_txid=remote_txid
     )

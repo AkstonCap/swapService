@@ -539,7 +539,7 @@ semantics are unproven; local code holds whenever those properties cannot be est
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
 1. ✅ Persist intent, destination, exact units and a deterministic unique reference before every eligible transfer.
-2. ✅ Allow exactly one CLI execution from an atomically claimed intent and persist a parsed Nexus txid.
+2. ✅ Allow exactly one CLI/API execution from an atomically claimed intent and persist only a parsed, non-empty JSON-string Nexus txid.
 3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
 4. ✅ Resolve only one exact positive contract identity to completed; incomplete bounded lookups
    hold, and terminal state retains `contract_id`. The resolver still never retries a debit.
