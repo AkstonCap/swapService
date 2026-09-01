@@ -121,7 +121,10 @@ fail closed outside the durable-intent workflow.
 
 The direct transfer function is now a fail-closed legacy shim; only
 `execute_nexus_transfer_intent()` can form an account debit, and only from a prepared durable
-intent. Automatic callers still do not invoke it.
+intent. Automatic callers still do not invoke it. The legacy refund and quarantine preparation
+wrappers also reject anything other than a positive built-in integer base-unit value before
+creating an intent; they do not coerce a float, `Decimal`, boolean or string into a different
+Nexus debit amount.
 
 Before containment, four automatic refund paths called that boolean operation and retried it. A
 process crash or timeout after Nexus accepted the refund but before a local completion write

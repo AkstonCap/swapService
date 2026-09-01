@@ -1758,6 +1758,37 @@ class CriticalSafetyTests(unittest.TestCase):
                                 amount_usdd_units=cast(int, invalid_units),
                             )
 
+    def test_refund_wrapper_rejects_inexact_nexus_units_before_persisting_intent(self):
+        """Legacy refund entrypoints must not truncate a Nexus base-unit amount."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+
+                self.assertFalse(nexus_client.refund_nexus_token(
+                    "sender", cast(int, 1.9), "missing mapping txid: credit-fractional"
+                ))
+                self.assertEqual(
+                    state_db.get_nexus_transfer_intents_by_status(("prepared",)), []
+                )
+
+    def test_quarantine_wrapper_rejects_inexact_nexus_units_before_persisting_intent(self):
+        """Quarantine preparation shares the exact-base-unit custody boundary."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with (
+                patch.object(state_db, "DB_PATH", db_path),
+                patch.object(nexus_client.config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "QUARANTINE"),
+            ):
+                state_db.init_db()
+
+                self.assertFalse(nexus_client.quarantine_nexus_token(
+                    "credit-fractional", cast(int, 1.9), "manual review"
+                ))
+                self.assertEqual(
+                    state_db.get_nexus_transfer_intents_by_status(("prepared",)), []
+                )
+
     def test_nexus_transfer_intent_is_durable_and_reuses_its_unique_reference(self):
         """A refund/quarantine transfer is uniquely identified before the CLI can run."""
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1068,7 +1068,8 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
     """
     dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-    if not dest or not treas or int(amount_usdd_units or 0) <= 0 or not txid:
+    if (not dest or not treas or not txid or
+            type(amount_usdd_units) is not int or amount_usdd_units <= 0):
         _log("nexus_quarantine_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
@@ -1077,7 +1078,7 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
             source_txid=str(txid),
             from_address=str(treas),
             to_address=str(dest),
-            amount_usdd_units=int(amount_usdd_units),
+            amount_usdd_units=amount_usdd_units,
         )
     except ValueError as exc:
         _log("nexus_quarantine_intent_conflict", level=logging.WARNING, error=redact(str(exc)))
@@ -1100,7 +1101,11 @@ def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> boo
     """Prepare a refund intent and hold; automatic Nexus refunds remain disabled."""
     source_txid = _refund_source_txid(reason)
     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-    if not source_txid or not treas or not to_addr or int(amount_usdd_units or 0) <= 0:
+    # Preserve the exact integer amount all the way to the durable state boundary.
+    # Coercing here would silently turn e.g. 1.9 Nexus base units into a one-unit
+    # operator disposition despite create_nexus_transfer_intent correctly rejecting it.
+    if (not source_txid or not treas or not to_addr or
+            type(amount_usdd_units) is not int or amount_usdd_units <= 0):
         _log("nexus_refund_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
@@ -1109,7 +1114,7 @@ def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> boo
             source_txid=source_txid,
             from_address=str(treas),
             to_address=str(to_addr),
-            amount_usdd_units=int(amount_usdd_units),
+            amount_usdd_units=amount_usdd_units,
         )
     except ValueError as exc:
         _log("nexus_refund_intent_conflict", level=logging.WARNING, error=redact(str(exc)))
