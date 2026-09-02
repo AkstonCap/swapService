@@ -92,8 +92,10 @@ class CriticalSafetyTests(unittest.TestCase):
         ), patch.object(
             swap_solana.nexus_client, "resolve_unverified_debits", return_value=11
         ), patch.object(
-            swap_solana.nexus_client, "check_unconfirmed_debits", return_value=12
+            config, "NEXUS_TRANSFER_MIN_CONFIRMATIONS", 17
         ), patch.object(
+            swap_solana.nexus_client, "check_unconfirmed_debits", return_value=12
+        ) as check_unconfirmed, patch.object(
             swap_solana.nexus_client, "update_heartbeat_asset"
         ), patch.object(
             swap_solana.nexus_client, "publish_service_record"
@@ -106,6 +108,7 @@ class CriticalSafetyTests(unittest.TestCase):
         ), patch.object(swap_solana, "_log") as log:
             swap_solana.poll_solana_deposits()
 
+        check_unconfirmed.assert_called_once_with(17, 8.0)
         self.assertIn(
             call("SOLANA_DEPOSITS_INGESTED", count=2),
             log.call_args_list,
@@ -195,6 +198,18 @@ class CriticalSafetyTests(unittest.TestCase):
                     importlib.reload(config)
         finally:
             # Reload the normal test configuration after the intentional failed import.
+            importlib.reload(config)
+
+    def test_nexus_transfer_finality_policy_rejects_nonpositive_configuration(self):
+        """Zero/negative finality thresholds must never turn an unconfirmed debit terminal."""
+        try:
+            for invalid in ("0", "-1"):
+                with self.subTest(invalid=invalid), patch.dict(
+                    os.environ, {"NEXUS_TRANSFER_MIN_CONFIRMATIONS": invalid}
+                ):
+                    with self.assertRaisesRegex(ValueError, "NEXUS_TRANSFER_MIN_CONFIRMATIONS"):
+                        importlib.reload(config)
+        finally:
             importlib.reload(config)
 
     def test_production_mode_parser_accepts_only_documented_spellings(self):
@@ -1246,6 +1261,33 @@ class CriticalSafetyTests(unittest.TestCase):
                     "account": "recipient", "surplus_nexus_units": nexus_units,
                 }])
 
+    def test_completed_mint_with_zero_solana_input_cannot_reconcile_healthy(self):
+        """Positive Nexus output without a positive deposited Solana unit is never a valid mint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                nexus_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                state_db.mark_processed_sig(
+                    "zero-input-sig", 100, 0, "mint-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=nexus_units,
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
+                )
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="mint-tx", timestamp=100, confirmations=10,
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
+                    amount_usdd_units=nexus_units, reference="77", contract_id=0,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [remote]}, True),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertTrue(any("non-positive base-unit evidence" in reason
+                            for reason in result["incomplete_reasons"]))
+
     def test_reconciliation_detects_unrecorded_duplicate_in_remote_nexus_history(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
@@ -2201,6 +2243,24 @@ class CriticalSafetyTests(unittest.TestCase):
 
         self.assertFalse(lookup.complete)
         self.assertEqual(lookup.reason, "insufficient_confirmations")
+
+    def test_direct_transfer_readback_rejects_nonpositive_runtime_finality_policy(self):
+        """A corrupted runtime policy cannot downgrade direct transaction finality."""
+        response = json.dumps({"result": {
+            "txid": "runtime-policy-tx", "confirmations": 0,
+            "contracts": [{
+                "id": 3, "OP": "DEBIT", "reference": "bridge-xfer:policy",
+                "from": {"address": "TREASURY"}, "to": {"address": "sender"},
+                "amount": "1.000000",
+            }],
+        }})
+        with patch.object(config, "NEXUS_TRANSFER_MIN_CONFIRMATIONS", 0), patch.object(
+            nexus_client, "_run", return_value=(0, response, "")
+        ):
+            lookup = nexus_client.get_nexus_transfer_debits_by_txid("runtime-policy-tx")
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "invalid_finality_policy")
 
     def test_submitted_transfer_holds_txid_readback_with_wrong_reference(self):
         """A matching endpoint/amount in the returned tx is insufficient without the intent reference."""

@@ -172,7 +172,9 @@ def poll_solana_deposits(paused: bool = False):
         if resolved > 0:
             _log("NEXUS_DEBITS_RESOLVED", count=resolved)
 
-        confirmed_debits = nexus_client.check_unconfirmed_debits(10, 8.0)
+        confirmed_debits = nexus_client.check_unconfirmed_debits(
+            config.get_nexus_transfer_min_confirmations(), 8.0
+        )
         if confirmed_debits > 0:
             _log("NEXUS_DEBITS_CONFIRMED", count=confirmed_debits)
 

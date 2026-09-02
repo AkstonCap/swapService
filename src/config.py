@@ -218,7 +218,29 @@ STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86
 SOLANA_CONFIRM_TIMEOUT_SEC = int(_first_env("SOLANA_CONFIRM_TIMEOUT_SEC",
                                              "USDC_CONFIRM_TIMEOUT_SEC", default="600"))  # 10 minutes default for Nexus->Solana confirmations
 # A direct ledger txid read remains non-terminal until this many Nexus confirmations.
-NEXUS_TRANSFER_MIN_CONFIRMATIONS = int(os.getenv("NEXUS_TRANSFER_MIN_CONFIRMATIONS", "10"))
+def _positive_int_env(name: str, default: str) -> int:
+    """Read an integer safety threshold, refusing values that disable the control."""
+    raw = os.getenv(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def get_nexus_transfer_min_confirmations() -> int:
+    """Return the active Nexus finality policy, rejecting runtime corruption too."""
+    value = NEXUS_TRANSFER_MIN_CONFIRMATIONS
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("NEXUS_TRANSFER_MIN_CONFIRMATIONS must be a positive integer")
+    return value
+
+
+NEXUS_TRANSFER_MIN_CONFIRMATIONS = _positive_int_env(
+    "NEXUS_TRANSFER_MIN_CONFIRMATIONS", "10"
+)
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")

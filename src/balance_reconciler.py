@@ -81,7 +81,7 @@ def _validate_mint_row(row: Tuple) -> Tuple[str | None, str | None]:
         nexus_units = _exact_db_integer(nexus_units, f"completed mint {sig} Nexus units")
     except ValueError:
         return None, f"completed mint {sig} has non-integer base-unit evidence"
-    if solana_units < 0 or nexus_units <= 0:
+    if solana_units <= 0 or nexus_units <= 0:
         return None, f"completed mint {sig} has non-positive base-unit evidence"
     try:
         exact_contract_id = _exact_db_integer(contract_id, f"completed mint {sig} Nexus contract id")
@@ -396,7 +396,7 @@ def _reconcile_remote_mint_history(
             and evidence.to_address == str(destination)
             and evidence.amount_usdd_units == int(nexus_units)
             and evidence.reference == str(reference).strip()
-            and evidence.confirmations >= 10
+            and evidence.confirmations >= config.get_nexus_transfer_min_confirmations()
         ]
         if len(exact) != 1:
             incomplete.append(
