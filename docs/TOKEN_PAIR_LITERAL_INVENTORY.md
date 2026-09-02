@@ -42,13 +42,13 @@ Excluded surfaces are explicit:
 
 | Surface | Classification | Required Batch 7 treatment |
 |---|---|---|
-<!-- token-pair-inventory: .env.example:1,12,15,17,40,41,42,43,44,45,46,47,49,83,86,119,121,122,123,129,130,132,133,135,137,139,149,150,156,168,169,180,181,182,183,199,200 -->
+<!-- token-pair-inventory: .env.example:1,12,15,17,40,41,42,43,44,45,46,47,49,83,86,124,126,127,128,134,135,137,138,140,142,144,154,155,161,173,174,185,186,187,188,204,205 -->
 | `.env.example` | Migration alias + Public pair-specific example | Replace with canonical input names and documented alias-conflict policy only when validated configuration exists. |
 <!-- token-pair-inventory: .github/copilot-instructions.md:4,10,11,18,19,34,37,49,50,58,137,140,154,156,160,170,171,174,175,176,177,179,180,181,197,202 -->
 | `.github/copilot-instructions.md` | Public pair-specific example + Runtime semantics | Keep money-path and Nexus/Solana safety guidance synchronized with the validated canonical configuration. |
 <!-- token-pair-inventory: ASSET_STANDARD.md:5,10,41,42,59,60,96,97,133,141,144,145,161,255,305,306,333,377,378,379,380,381,389,390,396,402,413,414,415,416,417,465,467,469 -->
 | `ASSET_STANDARD.md` | Planned/schema example + Public pair-specific example | Keep v1 distinct from planned v2; Nexus `format=basic` fixes field sets, so never relabel an incomplete v1 asset as v2. |
-<!-- token-pair-inventory: CONFIG.md:16,17,19,25,26,27,28,29,31,40,41,52,53,54,55,65,72,73,82,84,93,94,96,97,98,101,117,118,119,123,124,136,155,160,161,175 -->
+<!-- token-pair-inventory: CONFIG.md:16,17,19,25,26,27,28,29,31,40,41,52,53,54,55,65,72,73,83,85,94,95,97,98,99,102,118,119,120,124,125,137,156,161,162,176 -->
 | `CONFIG.md` | Migration alias + Public pair-specific example | Derive operator configuration reference and terms from the canonical object after implementation. |
 <!-- token-pair-inventory: README.md:1,3,31,32,36,37,38,42,44,46,53,55,56,58,62,64,68,76,80,82,85,94,97,99,100,106,110,111,117,119,121,122,123,126,128,130,141,150,151,161,163,170,171,172,175,176,177,178,184,189,196,198,199,200,203,205,207,208,215,216,218,219,220,223,226,227,228,230,231,234,235,237,238,248,249,275,317,348,351,353 -->
 | `README.md` | Public pair-specific example | Current fixed deployment instructions stay truthful until selected-pair public terms are generated from validated configuration. |
@@ -60,7 +60,7 @@ Excluded surfaces are explicit:
 | `docs/EVALUATION.md` | Planned/schema example | Maintain as evaluated remediation evidence; change only with verified implementation evidence. |
 <!-- token-pair-inventory: docs/SECURITY.md:35,42,55,56,59,73,100 -->
 | `docs/SECURITY.md` | Public pair-specific example | Derive risk/control naming from the selected validated pair once behavior changes. |
-<!-- token-pair-inventory: docs/STATE_MACHINES.md:3,7,65,69,72,87,91,98,110,113,119,125,129,131,132,134,137,148,170,174,175,178,180,189,191,199,209,210,215,216,217,228,229,230,231,232,237,238,248,249,254,263,269,271,315,317,319,320,321,322,330,331,332,333,334,335,336,337,338,339,340,343,362,366 -->
+<!-- token-pair-inventory: docs/STATE_MACHINES.md:3,7,73,77,80,95,99,106,118,121,127,133,137,139,140,142,145,156,178,182,183,186,188,197,199,207,217,218,223,224,225,236,237,238,239,240,245,246,256,257,262,271,277,279,323,325,327,328,329,330,338,339,340,341,342,343,344,345,346,347,348,351,370,374 -->
 | `docs/STATE_MACHINES.md` | Public pair-specific example + Frozen compatibility state | Preserve current lifecycle terminology; migrate persisted names only with append-only database evidence. |
 <!-- token-pair-inventory: docs/SWAP_INITIATOR_STATE_MACHINES.md:7,9,13,15,16,25,26,27,28,31,34,41,44,47,50,51,60,65,66,68,71,75,77,78,80,87,88,89,90,91,95,97,99,100,101,107,108,114,120,121,122,123,124,128,130,134,136,139,140,154,162,164,173,174,176,179,182,183,192,199,200,202,203,206,210,211,212,213,218,225,226,227,228,229,238,245,248,251,272,274,277,279,280,282,292,293,294,295,296,298,302,304,312,313,314,316,318,320,341,342,348,349,351,354,355,357,359 -->
 | `docs/SWAP_INITIATOR_STATE_MACHINES.md` | Public pair-specific example | Keep user flows, thresholds and fees specific until generated selected-pair terms exist. |
