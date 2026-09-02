@@ -70,7 +70,7 @@ Excluded surfaces are explicit:
 | `quarantine_viewer.py` | Display metadata + Frozen compatibility state | Present canonical symbols while retaining existing state labels until migrated. |
 <!-- token-pair-inventory: src/balance_reconciler.py:156,158 -->
 | `src/balance_reconciler.py` | Runtime semantics | Reconciliation must consume canonical identities and scales, never a token ticker literal. |
-<!-- token-pair-inventory: src/config.py:11,12,14,26,30,32,38,77,78,80,82,83,84,86,87,90,94,95,96,97,103,132,137,147,153,154,156,165,166,168,179,219,263,264,265,266,278,280,281,283,285,294,298,299,301,303,314,315,317,322,325,326,328,333,341,352,383,384,385,386,389,390,399,402,404 -->
+<!-- token-pair-inventory: src/config.py:12,13,15,27,31,33,39,78,79,81,83,84,85,87,88,91,95,96,97,98,104,133,138,148,154,155,157,166,167,168,170,172,173,175,186,187,227,271,272,273,275,278,279,281,284,285,297,299,300,302,304,314,318,319,321,323,334,335,337,342,345,346,348,353,361,372,373,375,406,407,408,409,412,413,422,425,427 -->
 | `src/config.py` | Runtime semantics + Migration alias + Frozen compatibility state | Build one immutable `SwapPairConfig`; legacy aliases remain conflict-detecting inputs and database labels remain frozen absent migration. |
 <!-- token-pair-inventory: src/dashboard.py:43,44,45,46,460 -->
 | `src/dashboard.py` | Display metadata | Dashboard labels/fallbacks must consume canonical display symbols and never control custody or routing. |
