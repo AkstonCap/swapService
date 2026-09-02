@@ -3,13 +3,16 @@
 
 import importlib
 import json
+import logging
 import os
 import runpy
 import sqlite3
 import sys
 import tempfile
 import unittest
-from types import SimpleNamespace
+from dataclasses import replace
+from decimal import Decimal
+from typing import cast
 from unittest.mock import call, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +60,7 @@ os.environ.setdefault("USDC_MINT", "MINT")
 os.environ.setdefault("SOL_MINT", "SOL")
 os.environ.setdefault("NEXUS_PIN", "1234")
 os.environ.setdefault("NEXUS_USDD_TREASURY_ACCOUNT", "TREASURY")
+os.environ.setdefault("NEXUS_TOKEN_REGISTER_ADDRESS", "TOKEN-REGISTER")
 os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
@@ -67,6 +71,47 @@ from src import (  # noqa: E402
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    def test_canonical_fee_policy_controls_bidirectional_payout_math(self):
+        """Payout math must consume the immutable pair policy, not legacy aliases."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_nexus_units=250,
+                flat_to_solana_units=350,
+                basis_points=100,
+            ),
+        )
+
+        with patch.object(config, "SWAP_PAIR", pair):
+            self.assertEqual(
+                nexus_client.get_nexus_send_amount_units(10_000_000),
+                9_899_750,
+            )
+            self.assertEqual(
+                nexus_client.get_solana_send_amount_units(10_000_000),
+                9_899_650,
+            )
+
+    def test_service_record_terms_use_canonical_pair_fee_policy(self):
+        """Nexus heartbeat terms must advertise the same policy that pays Solana users."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_nexus_units=250,
+                flat_to_solana_units=350,
+                basis_points=100,
+            ),
+        )
+
+        with patch.object(config, "SWAP_PAIR", pair):
+            record = nexus_client.build_service_record(last_poll=1)
+
+        self.assertEqual(record["fee_flat_to_nexus"], "0.00025")
+        self.assertEqual(record["fee_flat_to_solana"], "0.00035")
+        self.assertEqual(record["fee_bps"], "100")
+
     def test_solana_poll_money_path_summaries_are_structured_events(self):
         """A Nexus→Solana payout operator must not have to parse console prose."""
         with patch.object(swap_solana.nexus_client, "get_heartbeat_asset", return_value={
@@ -89,8 +134,10 @@ class CriticalSafetyTests(unittest.TestCase):
         ), patch.object(
             swap_solana.nexus_client, "resolve_unverified_debits", return_value=11
         ), patch.object(
-            swap_solana.nexus_client, "check_unconfirmed_debits", return_value=12
+            config, "NEXUS_TRANSFER_MIN_CONFIRMATIONS", 17
         ), patch.object(
+            swap_solana.nexus_client, "check_unconfirmed_debits", return_value=12
+        ) as check_unconfirmed, patch.object(
             swap_solana.nexus_client, "update_heartbeat_asset"
         ), patch.object(
             swap_solana.nexus_client, "publish_service_record"
@@ -103,6 +150,7 @@ class CriticalSafetyTests(unittest.TestCase):
         ), patch.object(swap_solana, "_log") as log:
             swap_solana.poll_solana_deposits()
 
+        check_unconfirmed.assert_called_once_with(17, 8.0)
         self.assertIn(
             call("SOLANA_DEPOSITS_INGESTED", count=2),
             log.call_args_list,
@@ -126,6 +174,14 @@ class CriticalSafetyTests(unittest.TestCase):
             ("NEXUS_DEBITS_CONFIRMED", 12),
         ):
             self.assertIn(call(event, count=count), log.call_args_list)
+
+    def test_poller_lifecycle_logging_failure_cannot_abort_either_chain_poller(self):
+        """Observability outages must not turn Nexus or Solana custody work into a stopped poller."""
+        for poller in (swap_nexus, swap_solana):
+            with patch.object(
+                poller.structured_logging, "emit", side_effect=RuntimeError("logger failed")
+            ):
+                poller._log("TEST_LIFECYCLE_EVENT", chain="test")
 
     def test_operator_alerts_use_structured_events_not_terminal_prose(self):
         """Critical Nexus/Solana custody events must be parseable by incident tooling."""
@@ -186,6 +242,18 @@ class CriticalSafetyTests(unittest.TestCase):
             # Reload the normal test configuration after the intentional failed import.
             importlib.reload(config)
 
+    def test_nexus_transfer_finality_policy_rejects_nonpositive_configuration(self):
+        """Zero/negative finality thresholds must never turn an unconfirmed debit terminal."""
+        try:
+            for invalid in ("0", "-1"):
+                with self.subTest(invalid=invalid), patch.dict(
+                    os.environ, {"NEXUS_TRANSFER_MIN_CONFIRMATIONS": invalid}
+                ):
+                    with self.assertRaisesRegex(ValueError, "NEXUS_TRANSFER_MIN_CONFIRMATIONS"):
+                        importlib.reload(config)
+        finally:
+            importlib.reload(config)
+
     def test_production_mode_parser_accepts_only_documented_spellings(self):
         """The documented switch values stay explicit across Nexus/Solana deployments."""
         for value in ("1", "true", "yes", "on", " TrUe "):
@@ -227,6 +295,32 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(main.alerts, "critical")
+    def test_production_controls_require_immutable_nexus_token_register(self, critical):
+        """A production bridge must not authorize Nexus debits by a display ticker alone."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+            patch.object(config, "NEXUS_MULTIUSER", False),
+            patch.object(config, "NEXUS_TOKEN_REGISTER_ADDRESS", ""),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=["NEXUS_TOKEN_REGISTER_ADDRESS"],
+        )
+
+    @patch.object(main.alerts, "critical")
     def test_production_controls_require_https_nexus_api_transport(self, critical):
         """A live bridge must not place Nexus credentials in a child-process argv."""
         with (
@@ -252,6 +346,32 @@ class CriticalSafetyTests(unittest.TestCase):
                 "NEXUS_API_USER",
                 "NEXUS_API_PASSWORD",
             ],
+        )
+
+    @patch.object(main.alerts, "critical")
+    def test_production_controls_require_multiuser_session(self, critical):
+        """A multiuser Nexus node cannot admit a bridge without its session credential."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+            patch.object(config, "NEXUS_MULTIUSER", True),
+            patch.object(config, "NEXUS_SESSION", ""),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=["NEXUS_SESSION (required when NEXUS_MULTIUSER=true)"],
         )
 
     @patch.object(main.alerts, "critical")
@@ -483,6 +603,101 @@ class CriticalSafetyTests(unittest.TestCase):
 
         self.assertEqual(resolved, 0)
         update_status.assert_not_called()
+
+    def test_unverified_debit_resolution_rejects_reference_match_with_wrong_terms(self):
+        """A reference collision cannot attach an unrelated Nexus mint to a Solana deposit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "deposit-sig", 1_000, "nexus:intended-recipient", "sender",
+                    2_000_000, "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent("deposit-sig", 77, 1_898_000)
+                state_db.update_unprocessed_sig_status("deposit-sig", "debit unverified")
+                self.assertTrue(state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
+                response = [{
+                    "txid": "unrelated-debit",
+                    "contracts": [{
+                        "OP": "DEBIT", "reference": 77, "from": config.NEXUS_TOKEN_REGISTER_ADDRESS,
+                        "to": "wrong-recipient", "amount": "1.898",
+                    }],
+                }]
+                with patch.object(nexus_client, "_run", return_value=(0, json.dumps(response), "")):
+                    resolved = nexus_client.resolve_unverified_debits()
+                row = state_db.get_unprocessed_sigs()[0]
+
+                self.assertEqual(resolved, 0)
+                self.assertEqual(row[5], "debit unverified")
+                self.assertIsNone(row[6])
+                self.assertTrue(state_db.is_reserved(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
+
+    def test_unverified_debit_resolution_holds_two_exact_contracts_in_one_transaction(self):
+        """One txid with two matching contracts is ambiguous, not one completed mint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "deposit-sig", 1_000, "nexus:intended-recipient", "sender",
+                    2_000_000, "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent("deposit-sig", 77, 1_898_000)
+                state_db.update_unprocessed_sig_status("deposit-sig", "debit unverified")
+                self.assertTrue(state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
+                response = [{
+                    "txid": "ambiguous-debit",
+                    "contracts": [
+                        {"id": 0, "OP": "DEBIT", "reference": 77,
+                         "from": config.NEXUS_TOKEN_REGISTER_ADDRESS, "to": "intended-recipient",
+                         "amount": "1.898"},
+                        {"id": 1, "OP": "DEBIT", "reference": 77,
+                         "from": config.NEXUS_TOKEN_REGISTER_ADDRESS, "to": "intended-recipient",
+                         "amount": "1.898"},
+                    ],
+                }]
+                with patch.object(nexus_client, "_run", return_value=(0, json.dumps(response), "")):
+                    resolved = nexus_client.resolve_unverified_debits()
+                row = state_db.get_unprocessed_sigs()[0]
+
+        self.assertEqual(resolved, 0)
+        self.assertEqual(row[5], "debit unverified")
+        self.assertIsNone(row[6])
+
+    def test_unverified_debit_resolution_holds_single_candidate_from_incomplete_lookup(self):
+        """A bounded reference scan cannot prove a lone observed mint is unique."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "find_nexus_transfer_debits_by_references"
+            ) as lookup:
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "deposit-sig", 1_000, "nexus:intended-recipient", "sender",
+                    2_000_000, "debit in flight", None,
+                )
+                state_db.set_unprocessed_sig_debit_intent("deposit-sig", 77, 1_898_000)
+                state_db.update_unprocessed_sig_status("deposit-sig", "debit unverified")
+                self.assertTrue(state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, "deposit-sig"))
+                lookup.return_value = nexus_client.BatchLookup({"77": [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="observed-only-tx", contract_id=0,
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS,
+                        to_address="intended-recipient", amount_usdd_units=1_898_000,
+                    )
+                ]}, False, "pagination_truncated")
+
+                resolved = nexus_client.resolve_unverified_debits()
+                row = state_db.get_unprocessed_sigs()[0]
+                reservation_retained = state_db.is_reserved(
+                    state_db.DEBIT_RESERVATION_KIND, "deposit-sig"
+                )
+
+        self.assertEqual(resolved, 0)
+        self.assertEqual(row[5], "debit unverified")
+        self.assertIsNone(row[6])
+        self.assertTrue(reservation_retained)
 
     @patch.object(nexus_client, "_run", return_value=(1, "", "node down"))
     def test_failed_receival_asset_lookup_is_incomplete(self, _run):
@@ -732,10 +947,7 @@ class CriticalSafetyTests(unittest.TestCase):
         update_status.assert_not_called()
 
     @patch.object(swap_nexus.config, "USE_NEXUS_WHERE_FILTER_USDD", True, create=True)
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout="[]", stderr=""),
-    )
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
     def test_nexus_poller_never_uses_heuristic_server_side_amount_filter(self, run):
         """A Nexus scan must be complete even when the legacy flag is enabled."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -747,6 +959,27 @@ class CriticalSafetyTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertFalse(any(str(argument).startswith("where=") for argument in command))
 
+    @patch.object(nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
+    def test_nexus_poller_enumeration_uses_common_transport_wrapper(self, run, _heartbeat):
+        """Deposit enumeration must share the Nexus transport's timeout/error semantics."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], config.NEXUS_CLI)
+        self.assertTrue(command[1].startswith("register/transactions/finance:token/"))
+        self.assertIn("limit=100", command)
+        self.assertIn("offset=0", command)
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            config.NEXUS_CLI_TIMEOUT_SEC,
+        )
+
     @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
     def test_recovery_enumeration_never_uses_heuristic_server_side_amount_filter(self, run):
         """Recovery must never skip credits through an unverified nested WHERE clause."""
@@ -756,7 +989,7 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertFalse(any(str(argument).startswith("where=") for argument in command))
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch("subprocess.run", side_effect=TimeoutError("node timeout"))
+    @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timeout"))
     def test_nexus_enumeration_failure_holds_waterline(self, _run, propose_waterline):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
@@ -767,7 +1000,7 @@ class CriticalSafetyTests(unittest.TestCase):
         propose_waterline.assert_not_called()
 
     @patch.object(swap_nexus.nexus_client, "get_heartbeat_asset", return_value=None)
-    @patch("subprocess.run", side_effect=TimeoutError("node timeout"))
+    @patch.object(nexus_client, "_run", side_effect=TimeoutError("node timeout"))
     def test_nexus_poller_enumeration_error_is_structured_event(self, _run, _heartbeat):
         """A Nexus enumeration failure must be machine-readable and keep its page context."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -789,10 +1022,21 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout='{"unexpected": true}', stderr=""),
-    )
+    @patch.object(nexus_client, "_run", return_value=(0, "[]", ""))
+    def test_empty_successful_nexus_enumeration_holds_waterline(
+        self, _run, propose_waterline
+    ):
+        """An empty page cannot prove that the live Nexus history is complete."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+        propose_waterline.assert_not_called()
+
+    @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
+    @patch.object(nexus_client, "_run", return_value=(0, '{"unexpected": true}', ""))
     def test_malformed_nexus_enumeration_response_holds_waterline(
         self, _run, propose_waterline
     ):
@@ -805,17 +1049,14 @@ class CriticalSafetyTests(unittest.TestCase):
         propose_waterline.assert_not_called()
 
     @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
-    @patch(
-        "subprocess.run",
-        return_value=SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps([{
-                "txid": "credit-tx",
-                "timestamp": 1_000,
-                "contracts": [{"OP": "CREDIT", "from": "sender", "to": "TREASURY"}],
-            }]),
-            stderr="",
-        ),
+    @patch.object(
+        nexus_client,
+        "_run",
+        return_value=(0, json.dumps([{
+            "txid": "credit-tx",
+            "timestamp": 1_000,
+            "contracts": [{"OP": "CREDIT", "from": "sender", "to": "TREASURY"}],
+        }]), ""),
     )
     def test_malformed_credit_contract_holds_waterline(self, _run, propose_waterline):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -869,18 +1110,47 @@ class CriticalSafetyTests(unittest.TestCase):
             {"txid": f"tx-{index}", "timestamp": 1_000 + index, "contracts": []}
             for index in range(100)
         ]
-        completed = SimpleNamespace(
-            returncode=0, stdout=json.dumps(transactions), stderr=""
-        )
+        poll_output = json.dumps(transactions)
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
-            with patch.object(state_db, "DB_PATH", db_path), patch(
-                "subprocess.run", return_value=completed
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "_run", return_value=(0, poll_output, "")
             ):
                 state_db.init_db()
                 swap_nexus.poll_nexus_deposits()
 
         propose_waterline.assert_not_called()
+
+    def test_confirmed_txid_with_wrong_debit_terms_remains_held(self):
+        """Confirmation count alone must not archive an unrelated Nexus debit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client,
+                "get_transactions_confirmations",
+                return_value=nexus_client.BatchLookup({"unrelated-confirmed-tx": 10}, True),
+            ), patch.object(
+                nexus_client,
+                "get_nexus_transfer_debits_by_txid",
+                return_value=nexus_client.BatchLookup({"unrelated-confirmed-tx": [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="unrelated-confirmed-tx", contract_id=0,
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS,
+                        to_address="wrong-recipient", amount_usdd_units=1_898_000,
+                        reference="77",
+                    )
+                ]}, True),
+            ):
+                state_db.init_db()
+                state_db.add_unprocessed_sig(
+                    "mint-sig", 100, "nexus:recipient", "sender", 2_000_000,
+                    "debited, awaiting confirmation", "unrelated-confirmed-tx",
+                )
+                state_db.set_unprocessed_sig_debit_intent("mint-sig", 77, 1_898_000)
+
+                self.assertEqual(nexus_client.check_unconfirmed_debits(10, 8), 0)
+                self.assertTrue(state_db.is_unprocessed_sig("mint-sig"))
+                self.assertFalse(state_db.is_processed_sig("mint-sig"))
 
     def test_confirmed_mint_archives_its_own_persisted_reference(self):
         """A concurrent later debit must not replace this mint's on-chain identity."""
@@ -890,6 +1160,17 @@ class CriticalSafetyTests(unittest.TestCase):
                 nexus_client,
                 "get_transactions_confirmations",
                 return_value=nexus_client.BatchLookup({"mint-tx": 10}, True),
+            ), patch.object(
+                nexus_client,
+                "get_nexus_transfer_debits_by_txid",
+                return_value=nexus_client.BatchLookup({"mint-tx": [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="mint-tx", contract_id=0,
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
+                        amount_usdd_units=nexus_client.get_nexus_send_amount_units(2_000_000),
+                        reference="77",
+                    )
+                ]}, True),
             ):
                 state_db.init_db()
                 state_db.add_unprocessed_sig(
@@ -971,11 +1252,12 @@ class CriticalSafetyTests(unittest.TestCase):
                     amount_usdd_units=nexus_units,
                     nexus_destination="recipient",
                     memo="nexus:recipient",
+                    contract_id=0,
                 )
                 self.assertFalse(state_db.is_unprocessed_sig("mint-sig"))
                 remote = nexus_client.NexusMintDebitEvidence(
                     remote_txid="mint-tx", timestamp=100, confirmations=10,
-                    from_address="TOKEN", to_address="recipient", amount_usdd_units=nexus_units,
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient", amount_usdd_units=nexus_units,
                     reference="77", contract_id=0,
                 )
 
@@ -987,6 +1269,22 @@ class CriticalSafetyTests(unittest.TestCase):
                 self.assertTrue(healthy["healthy"])
                 self.assertEqual(healthy["checked_addresses"], 1)
                 self.assertEqual(healthy["total_surplus_nexus_units"], 0)
+
+                # A chain response that shares the txid/reference/destination/amount but
+                # carries the wrong immutable source and contract index must make the
+                # reconciliation unhealthy rather than manufacture a green result.
+                wrong_remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="mint-tx", timestamp=100, confirmations=10,
+                    from_address="WRONG-SOURCE", to_address="recipient",
+                    amount_usdd_units=nexus_units, reference="77", contract_id=9,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [wrong_remote]}, True),
+                ):
+                    wrong_terms = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+                self.assertFalse(wrong_terms["healthy"])
+                self.assertTrue(any("no unique exact" in reason for reason in wrong_terms["incomplete_reasons"]))
 
                 # A second treasury debit to the same recipient is observable as a
                 # positive exact-base-unit discrepancy rather than a false green.
@@ -1005,6 +1303,33 @@ class CriticalSafetyTests(unittest.TestCase):
                     "account": "recipient", "surplus_nexus_units": nexus_units,
                 }])
 
+    def test_completed_mint_with_zero_solana_input_cannot_reconcile_healthy(self):
+        """Positive Nexus output without a positive deposited Solana unit is never a valid mint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                nexus_units = nexus_client.get_nexus_send_amount_units(2_000_000)
+                state_db.mark_processed_sig(
+                    "zero-input-sig", 100, 0, "mint-tx", 0.0,
+                    "debit_confirmed", 77, amount_usdd_units=nexus_units,
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
+                )
+                remote = nexus_client.NexusMintDebitEvidence(
+                    remote_txid="mint-tx", timestamp=100, confirmations=10,
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
+                    amount_usdd_units=nexus_units, reference="77", contract_id=0,
+                )
+                with patch.object(
+                    nexus_client, "find_nexus_mint_debits_since",
+                    return_value=nexus_client.BatchLookup({"mint-tx": [remote]}, True),
+                ):
+                    result = balance_reconciler.run_balance_reconciliation(waterline_ts=0)
+
+        self.assertFalse(result["healthy"])
+        self.assertTrue(any("non-positive base-unit evidence" in reason
+                            for reason in result["incomplete_reasons"]))
+
     def test_reconciliation_detects_unrecorded_duplicate_in_remote_nexus_history(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
@@ -1015,12 +1340,12 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "mint-sig", 100, solana_units, "mint-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=nexus_units,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 remote = [
                     nexus_client.NexusMintDebitEvidence(
                         remote_txid=txid, timestamp=timestamp, confirmations=10,
-                        from_address="TOKEN", to_address="recipient",
+                        from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                         amount_usdd_units=nexus_units,
                         reference="77", contract_id=0,
                     )
@@ -1028,7 +1353,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 ]
                 remote.append(nexus_client.NexusMintDebitEvidence(
                     remote_txid="duplicate-tx", timestamp=101, confirmations=10,
-                    from_address="TOKEN", to_address="attacker",
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="attacker",
                     amount_usdd_units=nexus_units, reference="88", contract_id=0,
                 ))
                 # Token history also carries account-to-account movements. A treasury
@@ -1061,7 +1386,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=nexus_units,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 with patch.object(
                     nexus_client, "find_nexus_mint_debits_since",
@@ -1198,11 +1523,11 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "completed-sig", 100, 2_000_000, "completed-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=issued_units,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 remote = nexus_client.NexusMintDebitEvidence(
                     remote_txid="completed-tx", timestamp=100, confirmations=10,
-                    from_address="TOKEN", to_address="recipient",
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                     amount_usdd_units=issued_units, reference="77", contract_id=0,
                 )
                 # The mutable current fee calculation is deliberately different from
@@ -1283,11 +1608,11 @@ class CriticalSafetyTests(unittest.TestCase):
                     state_db.mark_processed_sig(
                         sig, 100, 2_000_000, "shared-tx", 0.0,
                         "debit_confirmed", 77, amount_usdd_units=nexus_units,
-                        nexus_destination="recipient", memo="nexus:recipient",
+                        nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                     )
                 remote = nexus_client.NexusMintDebitEvidence(
                     remote_txid="shared-tx", timestamp=100, confirmations=10,
-                    from_address="TOKEN", to_address="recipient",
+                    from_address=config.NEXUS_TOKEN_REGISTER_ADDRESS, to_address="recipient",
                     amount_usdd_units=nexus_units, reference="77", contract_id=0,
                 )
                 with patch.object(
@@ -1405,7 +1730,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 state_db.mark_processed_sig(
                     "mint-sig", 100, 2_000_000, "mint-tx", 0.0,
                     "debit_confirmed", 77, amount_usdd_units=1_898_000,
-                    nexus_destination="recipient", memo="nexus:recipient",
+                    nexus_destination="recipient", memo="nexus:recipient", contract_id=0,
                 )
                 conn = sqlite3.connect(db_path)
                 try:
@@ -1542,6 +1867,54 @@ class CriticalSafetyTests(unittest.TestCase):
             incomplete_reasons=["balance reconciliation returned no result"],
             account_errors=[],
         )
+
+    def test_nexus_transfer_intent_rejects_non_integer_base_units(self):
+        """A durable Nexus debit intent must never truncate an inexact money value."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                for invalid_units in (True, 1.9, Decimal("1"), "1000000"):
+                    with self.subTest(invalid_units=repr(invalid_units)):
+                        with self.assertRaisesRegex(ValueError, "exact positive integer"):
+                            state_db.create_nexus_transfer_intent(
+                                kind="refund",
+                                source_txid=f"credit-invalid-{repr(invalid_units)}",
+                                from_address="TREASURY",
+                                to_address="sender",
+                                amount_usdd_units=cast(int, invalid_units),
+                            )
+
+    def test_refund_wrapper_rejects_inexact_nexus_units_before_persisting_intent(self):
+        """Legacy refund entrypoints must not truncate a Nexus base-unit amount."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+
+                self.assertFalse(nexus_client.refund_nexus_token(
+                    "sender", cast(int, 1.9), "missing mapping txid: credit-fractional"
+                ))
+                self.assertEqual(
+                    state_db.get_nexus_transfer_intents_by_status(("prepared",)), []
+                )
+
+    def test_quarantine_wrapper_rejects_inexact_nexus_units_before_persisting_intent(self):
+        """Quarantine preparation shares the exact-base-unit custody boundary."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with (
+                patch.object(state_db, "DB_PATH", db_path),
+                patch.object(nexus_client.config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "QUARANTINE"),
+            ):
+                state_db.init_db()
+
+                self.assertFalse(nexus_client.quarantine_nexus_token(
+                    "credit-fractional", cast(int, 1.9), "manual review"
+                ))
+                self.assertEqual(
+                    state_db.get_nexus_transfer_intents_by_status(("prepared",)), []
+                )
 
     def test_nexus_transfer_intent_is_durable_and_reuses_its_unique_reference(self):
         """A refund/quarantine transfer is uniquely identified before the CLI can run."""
@@ -1698,6 +2071,71 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stored["remote_txid"], "refund-tx")
         self.assertEqual(run.call_count, 1)
 
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":12345}', ""))
+    def test_nexus_transfer_intent_holds_non_string_returned_txid(self, run):
+        """A non-string Nexus response identity cannot authorize a submitted debit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-non-string-returned-txid",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+
+                outcome = nexus_client.execute_nexus_transfer_intent(intent["id"])
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertTrue(outcome.executed)
+        self.assertEqual(outcome.status, "outcome_unknown")
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
+        run.assert_called_once()
+
+    def test_submitted_nexus_transfer_intent_refuses_remote_txid_replacement(self):
+        """A persisted Nexus txid is immutable through final resolution."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-immutable-remote-txid",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="returned-txid"
+                )
+
+                with self.assertRaisesRegex(ValueError, "remote txid.*immutable"):
+                    state_db.update_nexus_transfer_intent(
+                        intent["id"], status="completed", remote_txid="replacement-txid", resolved=True
+                    )
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "submitted")
+        self.assertEqual(stored["remote_txid"], "returned-txid")
+
     def test_completed_nexus_transfer_intent_cannot_be_regressed_to_an_ambiguous_state(self):
         """Terminal chain evidence must not be overwritten by a later recovery path."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1723,7 +2161,8 @@ class CriticalSafetyTests(unittest.TestCase):
                     intent["id"], status="submitted", remote_txid="chain-tx"
                 )
                 state_db.update_nexus_transfer_intent(
-                    intent["id"], status="completed", remote_txid="chain-tx", resolved=True
+                    intent["id"], status="completed", remote_txid="chain-tx",
+                    contract_id=0, resolved=True
                 )
 
                 with self.assertRaises(ValueError):
@@ -1765,7 +2204,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 unresolved = nexus_client.resolve_nexus_transfer_intents()
                 find_by_reference.return_value = nexus_client.BatchLookup(
                     {intent["reference"]: [nexus_client.TransferDebitEvidence(
-                        remote_txid="chain-txid", from_address="TREASURY",
+                        remote_txid="chain-txid", contract_id=0, from_address="TREASURY",
                         to_address="QUARANTINE", amount_usdd_units=2_000_000,
                     )]},
                     True,
@@ -1779,7 +2218,278 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(resolved, 1)
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(stored["remote_txid"], "chain-txid")
+        self.assertEqual(stored["contract_id"], 0)
         self.assertEqual(run.call_count, 1)
+
+    def test_submitted_transfer_resolves_from_its_authoritative_txid_readback(self):
+        """A returned Nexus txid is resolved directly, not through bounded history pages."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "_run"
+            ) as run:
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-direct-txid", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="returned-txid"
+                )
+                run.return_value = (0, json.dumps({
+                    "result": {
+                        "txid": "returned-txid",
+                        "confirmations": 10,
+                        "contracts": [{
+                            "id": 3, "OP": "DEBIT", "reference": intent["reference"],
+                            "from": {"address": "TREASURY"},
+                            "to": {"address": "sender"},
+                            "amount": "1.000000",
+                        }],
+                    },
+                }), "")
+
+                self.assertEqual(nexus_client.resolve_nexus_transfer_intents(), 1)
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(stored["remote_txid"], "returned-txid")
+        self.assertEqual(stored["contract_id"], 3)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], "ledger/get/transaction")
+        self.assertIn("txid=returned-txid", run.call_args.args[0])
+
+    def test_direct_transfer_readback_requires_final_confirmations(self):
+        """A returned txid must remain held until Nexus reports the configured depth."""
+        response = json.dumps({"result": {
+            "txid": "unfinal-tx", "confirmations": 0,
+            "contracts": [{
+                "id": 3, "OP": "DEBIT", "reference": "bridge-xfer:unfinal",
+                "from": {"address": "TREASURY"}, "to": {"address": "sender"},
+                "amount": "1.000000",
+            }],
+        }})
+        with patch.object(nexus_client, "_run", return_value=(0, response, "")):
+            lookup = nexus_client.get_nexus_transfer_debits_by_txid("unfinal-tx")
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "insufficient_confirmations")
+
+    def test_direct_transfer_readback_rejects_nonpositive_runtime_finality_policy(self):
+        """A corrupted runtime policy cannot downgrade direct transaction finality."""
+        response = json.dumps({"result": {
+            "txid": "runtime-policy-tx", "confirmations": 0,
+            "contracts": [{
+                "id": 3, "OP": "DEBIT", "reference": "bridge-xfer:policy",
+                "from": {"address": "TREASURY"}, "to": {"address": "sender"},
+                "amount": "1.000000",
+            }],
+        }})
+        with patch.object(config, "NEXUS_TRANSFER_MIN_CONFIRMATIONS", 0), patch.object(
+            nexus_client, "_run", return_value=(0, response, "")
+        ):
+            lookup = nexus_client.get_nexus_transfer_debits_by_txid("runtime-policy-tx")
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "invalid_finality_policy")
+
+    def test_submitted_transfer_holds_txid_readback_with_wrong_reference(self):
+        """A matching endpoint/amount in the returned tx is insufficient without the intent reference."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(nexus_client, "_run") as run:
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-wrong-reference", from_address="TREASURY",
+                    to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(
+                    intent["id"], status="submitted", remote_txid="returned-txid"
+                )
+                run.return_value = (0, json.dumps({"result": {
+                    "txid": "returned-txid", "contracts": [{
+                        "id": 3, "OP": "DEBIT", "reference": "wrong-reference",
+                        "from": {"address": "TREASURY"}, "to": {"address": "sender"},
+                        "amount": "1.000000",
+                    }],
+                }}), "")
+
+                self.assertEqual(nexus_client.resolve_nexus_transfer_intents(), 0)
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "submitted")
+        self.assertIsNone(stored["contract_id"])
+
+    def test_transfer_resolution_holds_single_candidate_from_incomplete_lookup(self):
+        """One observed DEBIT cannot prove global uniqueness from a bounded scan."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "find_nexus_transfer_debits_by_references"
+            ) as lookup:
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-incomplete-lookup",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(intent["id"], status="outcome_unknown")
+                lookup.return_value = nexus_client.BatchLookup({intent["reference"]: [
+                    nexus_client.TransferDebitEvidence(
+                        remote_txid="observed-only-tx", contract_id=0,
+                        from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                    )
+                ]}, False, "pagination_truncated")
+
+                self.assertEqual(nexus_client.resolve_nexus_transfer_intents(), 0)
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
+
+    def test_transfer_debit_lookup_parses_nested_nexus_endpoints(self):
+        """Current LLL-TAO contract filters return endpoint objects, not flat strings."""
+        response = json.dumps([{
+            "txid": "nested-endpoints-tx",
+            "contracts": [{
+                "id": 7, "OP": "DEBIT", "reference": "bridge-xfer:nested",
+                "from": {"address": "TREASURY-REGISTER"},
+                "to": {"address": "RECIPIENT-REGISTER"},
+                "amount": "1.000000",
+            }],
+        }])
+        with patch.object(nexus_client, "_run", return_value=(0, response, "")):
+            lookup = nexus_client.find_nexus_transfer_debits_by_references(
+                ["bridge-xfer:nested"]
+            )
+
+        evidence = lookup.values["bridge-xfer:nested"][0]
+        self.assertEqual(evidence.from_address, "TREASURY-REGISTER")
+        self.assertEqual(evidence.to_address, "RECIPIENT-REGISTER")
+        self.assertEqual(evidence.contract_id, 7)
+
+    def test_transfer_resolution_holds_two_exact_contracts_in_one_transaction(self):
+        """A pair of exact contracts sharing a txid must never complete one transfer intent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                intent = state_db.create_nexus_transfer_intent(
+                    kind="refund", source_txid="credit-ambiguous-contracts",
+                    from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
+                )
+                state_db.record_nexus_transfer_preparation(
+                    intent["id"], actor="test-operator", rationale="test preparation",
+                )
+                state_db.authorize_nexus_transfer_intent(
+                    intent["id"], actor="test-operator", rationale="test authorization",
+                    expected_reference=intent["reference"],
+                )
+                state_db.record_nexus_transfer_execution_request(
+                    intent["id"], actor="test-operator", rationale="test execution request",
+                )
+                state_db.claim_nexus_transfer_intent(intent["id"])
+                state_db.update_nexus_transfer_intent(intent["id"], status="outcome_unknown")
+                response = [{
+                    "txid": "ambiguous-transfer",
+                    "contracts": [
+                        {"id": 0, "OP": "DEBIT", "reference": intent["reference"],
+                         "from": "TREASURY", "to": "sender", "amount": "1.0"},
+                        {"id": 1, "OP": "DEBIT", "reference": intent["reference"],
+                         "from": "TREASURY", "to": "sender", "amount": "1.0"},
+                    ],
+                }]
+                with patch.object(nexus_client, "_run", return_value=(0, json.dumps(response), "")):
+                    resolved = nexus_client.resolve_nexus_transfer_intents()
+                stored = state_db.get_nexus_transfer_intent(intent["id"])
+
+        assert stored is not None
+        self.assertEqual(resolved, 0)
+        self.assertEqual(stored["status"], "outcome_unknown")
+        self.assertIsNone(stored["remote_txid"])
+
+    @patch("builtins.print")
+    @patch.object(nexus_client, "_run", return_value=(1, "", "Nexus API request failed"))
+    def test_ambiguous_nexus_transfer_client_never_uses_console_prose(self, _run, print_mock):
+        """A durable Nexus transfer hold must be emitted to structured logging, not print()."""
+        intent = {
+            "id": "intent-structured-log",
+            "from_address": "TREASURY",
+            "to_address": "QUARANTINE",
+            "amount_usdd_units": 2_000_000,
+            "reference": "bridge-xfer:intent-structured-log",
+        }
+        with patch.object(nexus_client.config, "NEXUS_PIN", "test-pin"), patch.object(
+            nexus_client.state_db, "claim_nexus_transfer_intent", return_value=intent
+        ), patch.object(nexus_client.state_db, "update_nexus_transfer_intent"), patch.object(
+            nexus_client, "_log"
+        ) as log:
+            result = nexus_client.execute_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(result.status, "outcome_unknown")
+        print_mock.assert_not_called()
+        log.assert_called_once_with(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id="intent-structured-log",
+            reference="bridge-xfer:intent-structured-log",
+            reason="cli_error",
+            error="Nexus API request failed",
+        )
+
+    @patch.object(nexus_client, "_run", return_value=(1, "", "Nexus API request failed"))
+    def test_nexus_transfer_outcome_is_persisted_when_structured_logging_fails(self, _run):
+        """An observability failure must never make an ambiguous Nexus debit retryable."""
+        intent = {
+            "id": "intent-log-failure",
+            "from_address": "TREASURY",
+            "to_address": "QUARANTINE",
+            "amount_usdd_units": 2_000_000,
+            "reference": "bridge-xfer:intent-log-failure",
+        }
+        with patch.object(nexus_client.config, "NEXUS_PIN", "test-pin"), patch.object(
+            nexus_client.state_db, "claim_nexus_transfer_intent", return_value=intent
+        ), patch.object(
+            nexus_client.state_db, "update_nexus_transfer_intent"
+        ) as update, patch.object(
+            nexus_client.structured_logging, "emit", side_effect=RuntimeError("logger failed")
+        ):
+            result = nexus_client.execute_nexus_transfer_intent(intent["id"])
+
+        self.assertEqual(result.status, "outcome_unknown")
+        update.assert_called_once_with(intent["id"], status="outcome_unknown")
 
     def test_restart_marks_interrupted_nexus_transfer_as_outcome_unknown_without_reexecution(self):
         """A crash after claiming an intent leaves an explicit hold, never a second debit."""
@@ -1865,6 +2575,16 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertIsNone(stored["remote_txid"])
         self.assertEqual(run.call_count, 1)
 
+    @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"must-not-run"}', ""))
+    def test_legacy_direct_account_debit_is_fail_closed(self, run):
+        """Only the durable, authorized intent workflow may issue a Nexus account debit."""
+        result = nexus_client.debit_account_with_txid(
+            "TREASURY", "sender", 1_000_000, "legacy-reference"
+        )
+
+        self.assertEqual(result, (False, None))
+        run.assert_not_called()
+
     @patch.object(nexus_client, "transfer_nexus_between_accounts", return_value=True)
     def test_legacy_refund_wrapper_only_prepares_durable_intent(self, raw_transfer):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1917,7 +2637,8 @@ class CriticalSafetyTests(unittest.TestCase):
                 )
                 executed = nexus_client.execute_nexus_transfer_intent(intent["id"])
                 state_db.update_nexus_transfer_intent(
-                    intent["id"], status="completed", remote_txid="refund-tx", resolved=True
+                    intent["id"], status="completed", remote_txid="refund-tx",
+                    contract_id=0, resolved=True
                 )
                 self.assertFalse(state_db.finalize_nexus_transfer_disposition(
                     intent["id"], actor="alice", rationale="wrong txid rejected", expected_remote_txid="wrong"

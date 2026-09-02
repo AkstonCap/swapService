@@ -35,8 +35,12 @@ _NEXUS_ALLOWED_STATUSES = {
 
 
 def _log(kind: str, **fields):
-    """Record Nexus deposit lifecycle transitions as structured bridge events."""
-    structured_logging.emit(_LOG, logging.INFO, kind, **fields)
+    """Best-effort Nexus lifecycle diagnostics that cannot stop custody processing."""
+    try:
+        structured_logging.emit(_LOG, logging.INFO, kind, **fields)
+    except Exception:
+        # A logging outage must never interrupt durable state transitions or poller work.
+        pass
 
 
 def _parse_decimal_amount(val) -> Decimal:
@@ -532,8 +536,6 @@ def poll_nexus_deposits():
     - Fetch recent Nexus transactions 
     - Queue new credits >= threshold to unprocessed_txids database table
     """
-    import subprocess
-
     treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
     # Build base command. Use register/transactions/finance:token to get both debits and credits.
     base_cmd = [config.NEXUS_CLI]
@@ -589,22 +591,20 @@ def poll_nexus_deposits():
         for page in range(max_pages):
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
-                res = subprocess.run(
-                    nexus_client.apply_session(cmd),
-                    capture_output=True,
-                    text=True,
+                code, stdout, stderr = nexus_client._run(
+                    cmd,
                     timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12),
                 )
             except Exception as e:
                 _log("NEXUS_ENUMERATION_FAILED", page=page, reason="exception", error=str(e))
                 enumeration_complete = False
                 break
-            if res.returncode != 0:
-                err = (res.stderr or res.stdout or "").strip()
+            if code != 0:
+                err = (stderr or stdout or "").strip()
                 _log("NEXUS_ENUMERATION_FAILED", page=page, reason="cli_error", error=err)
                 enumeration_complete = False
                 break
-            txs = nexus_client._parse_json_lenient(res.stdout)
+            txs = nexus_client._parse_json_lenient(stdout)
             if isinstance(txs, dict) and txs.get("error"):
                 _log("NEXUS_ENUMERATION_FAILED", page=page, reason="api_error", error=str(txs.get("error")))
                 enumeration_complete = False
@@ -851,12 +851,10 @@ def poll_nexus_deposits():
                     wl = max(0, min_page_ts - safety)
                     state_db.propose_nexus_waterline(int(wl))
                 else:
-                    # No unprocessed txids and no page data: advance waterline to current time minus buffer
-                    # This prevents unnecessary re-scanning of old transactions
-                    current_ts = int(time.time())
-                    waterline_ts = max(0, current_ts - safety)
-                    state_db.propose_nexus_waterline(waterline_ts)
-                    _log("NEXUS_WATERLINE_ADVANCED", new_ts=waterline_ts, reason="no_unprocessed_txids")
+                    # A live Nexus node can return an empty successful page without proving
+                    # that the requested history is complete or snapshot-stable. Advancing to
+                    # now from that response could hide an unpersisted treasury credit forever.
+                    _log("NEXUS_WATERLINE_HOLD", reason="empty_enumeration_unproven")
         except Exception:
             pass
     except Exception as e:

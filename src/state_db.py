@@ -98,7 +98,8 @@ def init_db():
             nexus_destination TEXT,
             memo TEXT,
             status TEXT,
-            reference INTEGER
+            reference INTEGER,
+            contract_id INTEGER
         )
     """)
     cursor.execute("""
@@ -245,6 +246,7 @@ def init_db():
             reference TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL,
             remote_txid TEXT,
+            contract_id INTEGER,
             created_timestamp INTEGER NOT NULL,
             last_attempt_timestamp INTEGER,
             resolved_timestamp INTEGER,
@@ -388,6 +390,11 @@ def init_db():
     if "amount_usdd_units" not in _usig_cols:
         cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN amount_usdd_units INTEGER")
 
+    cursor.execute("PRAGMA table_info(nexus_transfer_intents)")
+    _transfer_cols = {row[1] for row in cursor.fetchall()}
+    if "contract_id" not in _transfer_cols:
+        cursor.execute("ALTER TABLE nexus_transfer_intents ADD COLUMN contract_id INTEGER")
+
     # Completed Solana->Nexus mints must retain all evidence required for later
     # reconciliation.  The queue row is deliberately removed after confirmation, so
     # recovering its memo or destination by joining back to unprocessed_sigs makes a
@@ -398,6 +405,7 @@ def init_db():
         ("amount_usdd_units", "INTEGER"),
         ("nexus_destination", "TEXT"),
         ("memo", "TEXT"),
+        ("contract_id", "INTEGER"),
     ):
         if _column not in _psig_cols:
             cursor.execute(f"ALTER TABLE processed_sigs ADD COLUMN {_column} {_definition}")
@@ -421,7 +429,7 @@ def init_db():
 # persisted reference the only identifier used for post-crash resolution.
 _NEXUS_TRANSFER_COLUMNS = (
     "id", "kind", "source_txid", "from_address", "to_address",
-    "amount_usdd_units", "reference", "status", "remote_txid",
+    "amount_usdd_units", "reference", "status", "remote_txid", "contract_id",
     "created_timestamp", "last_attempt_timestamp", "resolved_timestamp",
 )
 _NEXUS_TRANSFER_AUDIT_COLUMNS = (
@@ -487,9 +495,14 @@ def create_nexus_transfer_intent(
     source_txid = str(source_txid or "").strip()
     from_address = str(from_address or "").strip()
     to_address = str(to_address or "").strip()
-    units = int(amount_usdd_units)
-    if not kind or not source_txid or not from_address or not to_address or units <= 0:
-        raise ValueError("Nexus transfer intent requires kind, source, addresses and positive units")
+    # This is the durable boundary before a Nexus account debit.  Integer base
+    # units must already have been calculated upstream; coercing floats, Decimal
+    # values, booleans or strings here could silently authorize a different debit.
+    if type(amount_usdd_units) is not int or amount_usdd_units <= 0:
+        raise ValueError("Nexus transfer intent requires exact positive integer units")
+    units = amount_usdd_units
+    if not kind or not source_txid or not from_address or not to_address:
+        raise ValueError("Nexus transfer intent requires kind, source and addresses")
 
     intent_id = _nexus_transfer_intent_id(source_txid)
     reference = _nexus_transfer_reference(intent_id)
@@ -792,6 +805,7 @@ def update_nexus_transfer_intent(
     *,
     status: str,
     remote_txid: str | None = None,
+    contract_id: int | None = None,
     resolved: bool = False,
 ) -> None:
     """Advance one execution intent without allowing ambiguous state regression.
@@ -818,18 +832,37 @@ def update_nexus_transfer_intent(
             raise ValueError(
                 f"cannot transition Nexus transfer intent from {current_status!r} to {status!r}"
             )
-        next_remote_txid = str(remote_txid or intent.get("remote_txid") or "").strip()
+        supplied_remote_txid = str(remote_txid or "").strip()
+        persisted_remote_txid = str(intent.get("remote_txid") or "").strip()
+        # Once the Nexus node returns a txid, it is part of the immutable identity of
+        # the sole permitted debit.  A later resolver must prove the same txid; it
+        # must not be able to replace it with another transaction that happens to
+        # share a reference or is passed by an incorrect caller.
+        if (persisted_remote_txid and supplied_remote_txid
+                and supplied_remote_txid != persisted_remote_txid):
+            raise ValueError("persisted Nexus remote txid is immutable")
+        next_remote_txid = supplied_remote_txid or persisted_remote_txid
+        if isinstance(contract_id, bool) or (contract_id is not None and not isinstance(contract_id, int)):
+            raise ValueError("Nexus transfer contract id must be an integer")
+        persisted_contract_id = intent.get("contract_id")
+        if (persisted_contract_id is not None and contract_id is not None
+                and int(contract_id) != int(persisted_contract_id)):
+            raise ValueError("persisted Nexus contract id is immutable")
+        next_contract_id = contract_id if contract_id is not None else persisted_contract_id
         if status in {"submitted", "completed"} and not next_remote_txid:
             raise ValueError("submitted or completed Nexus transfer intent requires a remote txid")
+        if status == "completed" and next_contract_id is None:
+            raise ValueError("completed Nexus transfer intent requires a contract id")
         if resolved and status != "completed":
             raise ValueError("only a completed Nexus transfer intent may be marked resolved")
         now = int(time.time())
         conn.execute(
             """UPDATE nexus_transfer_intents
                SET status = ?, remote_txid = COALESCE(?, remote_txid),
+                   contract_id = COALESCE(?, contract_id),
                    resolved_timestamp = CASE WHEN ? THEN ? ELSE resolved_timestamp END
                WHERE id = ?""",
-            (status, remote_txid, 1 if resolved else 0, now, intent_id),
+            (status, supplied_remote_txid or None, contract_id, 1 if resolved else 0, now, intent_id),
         )
         conn.commit()
     except Exception:
@@ -1178,6 +1211,7 @@ def mark_processed_sig(
     amount_usdd_units: int | None = None,
     nexus_destination: str | None = None,
     memo: str | None = None,
+    contract_id: int | None = None,
 ):
     """Insert/update a processed signature record.
 
@@ -1197,11 +1231,11 @@ def mark_processed_sig(
         """
         INSERT OR REPLACE INTO processed_sigs
         (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
-         nexus_destination, memo, status, reference)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         nexus_destination, memo, status, reference, contract_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
-         nexus_destination, memo, status, reference),
+         nexus_destination, memo, status, reference, contract_id),
     )
     conn.commit()
     conn.close()

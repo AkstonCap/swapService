@@ -43,7 +43,38 @@ check("legacy vault/mint accepted", str(cfg.SOLANA_VAULT_ACCOUNT)=="LEGACY_VAULT
 check("defaults to USDC/USDD", cfg.SOLANA_TOKEN_SYMBOL=="USDC" and cfg.NEXUS_TOKEN_NAME=="USDD")
 check("default memo prefix", cfg.DEPOSIT_MEMO_PREFIX=="nexus:")
 
-print("\n[2] A different pair: wBTC (Solana, 8dp) <-> BTCn (Nexus, 8dp)")
+print("\n[2] Conflicting canonical and legacy token-pair settings fail closed")
+conflicts = (
+    ("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT", "NEW_VAULT", "OLD_VAULT"),
+    ("SOLANA_TOKEN_MINT", "USDC_MINT", "NEW_MINT", "OLD_MINT"),
+    ("NEXUS_TREASURY_ACCOUNT", "NEXUS_USDD_TREASURY_ACCOUNT", "NEW_TREASURY", "OLD_TREASURY"),
+    ("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS", "8", "6"),
+    ("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", "8", "6"),
+)
+for canonical, legacy, canonical_value, legacy_value in conflicts:
+    env = {**BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
+           "NEXUS_TREASURY_ACCOUNT": "T", "NEXUS_USDD_TREASURY_ACCOUNT": "T"}
+    env[canonical] = canonical_value
+    env[legacy] = legacy_value
+    try:
+        load(env)
+    except ValueError as exc:
+        check(f"rejects conflicting {canonical}/{legacy}",
+              canonical in str(exc) and legacy in str(exc), str(exc))
+    else:
+        check(f"rejects conflicting {canonical}/{legacy}", False, "config loaded")
+
+cfg, _ = load({**BASE, "SOLANA_VAULT_ACCOUNT": "V", "VAULT_USDC_ACCOUNT": "V",
+               "SOLANA_TOKEN_MINT": "M", "USDC_MINT": "M",
+               "NEXUS_TREASURY_ACCOUNT": "T", "NEXUS_USDD_TREASURY_ACCOUNT": "T",
+               "SOLANA_TOKEN_DECIMALS": "8", "USDC_DECIMALS": "8",
+               "NEXUS_TOKEN_DECIMALS": "6", "USDD_DECIMALS": "6"})
+check("accepts equal canonical and legacy values",
+      str(cfg.SOLANA_VAULT_ACCOUNT) == "V" and str(cfg.SOLANA_TOKEN_MINT) == "M"
+      and cfg.NEXUS_TREASURY_ACCOUNT == "T" and cfg.SOLANA_TOKEN_DECIMALS == 8
+      and cfg.NEXUS_TOKEN_DECIMALS == 6)
+
+print("\n[3] A different pair: wBTC (Solana, 8dp) <-> BTCn (Nexus, 8dp)")
 cfg, nc = load({**BASE,
     "SOLANA_VAULT_ACCOUNT":"9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
     "SOLANA_TOKEN_MINT":"3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
@@ -75,7 +106,7 @@ check("record has provider + contact", rec["provider"]=="acme-bridge.io" and rec
 check("record fits the size budget", size <= nc.SERVICE_RECORD_MAX_BYTES, f"{size}B")
 check("every declared field present", not [f for f in nc.SERVICE_RECORD_IMMUTABLE if f not in rec])
 
-print("\n[3] CLI commands use the configured token, not a hardcoded one")
+print("\n[4] CLI commands use the configured token, not a hardcoded one")
 seen = {}
 def fake_run(cmd, timeout=15):
     seen["cmd"] = cmd
@@ -86,11 +117,11 @@ joined = " ".join(seen["cmd"])
 check("debit uses from=BTCn", "from=BTCn" in joined, joined[:110])
 check("debit never says USDD", "USDD" not in joined, joined[:110])
 
-print("\n[4] Minimums scale with the configured decimals")
+print("\n[5] Minimums scale with the configured decimals")
 check("8dp minimum formatted correctly", "." in rec["min_to_nexus"] or rec["min_to_nexus"].isdigit(),
       rec["min_to_nexus"])
 
-print("\n[5] Backing math is correct when the two sides have DIFFERENT decimals")
+print("\n[6] Backing math is correct when the two sides have DIFFERENT decimals")
 # The original pair was 6dp on both sides, so much of the backing math subtracted a Nexus
 # base-unit figure straight from a Solana one. That is off by 10**(difference) for any
 # other pair: a fully-backed vault can look 100x over-collateralised, and the surplus
@@ -131,7 +162,7 @@ cfgEq, _ = load({**BASE, "SOLANA_VAULT_ACCOUNT": "V", "SOLANA_TOKEN_MINT": "M",
 check("equal decimals is an identity", cfgEq.nexus_units_to_solana(12_345_678) == 12_345_678
       and cfgEq.solana_units_to_nexus(12_345_678) == 12_345_678)
 
-print("\n[6] Fees, thresholds and public terms retain their own token scales")
+print("\n[7] Fees, thresholds and public terms retain their own token scales")
 # Every threshold must be held in the base units of the token it governs.  In
 # particular, a 0.5 Solana-side flat fee is 50_000_000 units at 8dp but
 # 500_000 units at 6dp; it must never be re-used as a Nexus-side threshold.

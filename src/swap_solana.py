@@ -6,8 +6,12 @@ _LOG = structured_logging.get_logger("swapService.solana")
 
 
 def _log(event: str, **fields):
-    """Record Solana deposit lifecycle transitions as structured bridge events."""
-    structured_logging.emit(_LOG, logging.INFO, event, **fields)
+    """Best-effort Solana lifecycle diagnostics that cannot stop custody processing."""
+    try:
+        structured_logging.emit(_LOG, logging.INFO, event, **fields)
+    except Exception:
+        # A logging outage must never interrupt durable state transitions or poller work.
+        pass
 
 
 def scale_amount(amount: int, src_decimals: int, dst_decimals: int) -> int:
@@ -168,7 +172,9 @@ def poll_solana_deposits(paused: bool = False):
         if resolved > 0:
             _log("NEXUS_DEBITS_RESOLVED", count=resolved)
 
-        confirmed_debits = nexus_client.check_unconfirmed_debits(10, 8.0)
+        confirmed_debits = nexus_client.check_unconfirmed_debits(
+            config.get_nexus_transfer_min_confirmations(), 8.0
+        )
         if confirmed_debits > 0:
             _log("NEXUS_DEBITS_CONFIRMED", count=confirmed_debits)
 

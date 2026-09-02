@@ -1,10 +1,10 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Date:** 2026-08-29
-**Evaluated code:** `5d92ec0513b8f9be8d6033ecef84f6923cea612a`
+**Date:** 2026-08-31
+**Evaluated code:** `cc175cb595ebe7d1fedd8173020e2a133627906a`
 **Status:** Current issue register and repair priority for `swapService`
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-29.md`](DEVELOPMENT_REVIEW_2026-08-29.md); the 2026-08-28 review and earlier containment review remain historical evidence.
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-31.md`](DEVELOPMENT_REVIEW_2026-08-31.md); earlier reviews remain historical evidence.
 
 ## 1. Executive verdict
 
@@ -18,7 +18,7 @@ The repair work through the evaluated head materially improved the bridge:
 - unresolved Solana deposits are deducted from backing and spendable surplus;
 - backing and circulating-supply errors fail closed;
 - non-idempotent automatic surplus actions are disabled;
-- incomplete or malformed Nexus enumeration holds the waterline;
+- incomplete, malformed, truncated and empty Nexus enumeration holds the waterline;
 - the processing pass never proposes a Nexus checkpoint;
 - every unsafe automatic Nexus refund path now holds and alerts for operator review;
 - the heuristic Nexus server-side amount filter has been removed from normal and recovery scans;
@@ -26,36 +26,45 @@ The repair work through the evaluated head materially improved the bridge:
 - startup no longer reports a returned unhealthy reconciliation as green;
 - interrupted claimed Nexus transfers restart as durable `outcome_unknown` holds;
 - explicit production mode requires positive per-swap/daily caps and an alert route;
-- one composable pytest command and an exact-head green GitHub Actions gate exist.
+- reconciliation errors and unhealthy results latch an exposure pause until an explicit healthy read-back;
+- invalid production-mode text is rejected and admission refusal exits non-zero;
+- submitted Nexus transfer txids cannot be replaced;
+- unsafe dormant Nexus DEX, automatic fee-conversion and direct account-debit paths are removed;
+- Nexus/Solana money-path diagnostics are structured and secret-redacted;
+- one composable pytest command exists and is green locally.
 
-Those controls are valuable and verified locally and in CI. They do not make the service
-production-ready. Automatic Nexus refunds remain disabled while the durable intent protocol
-awaits crash-boundary and target-node evidence. Reconciliation now requires exact remote Nexus
-token-history identity and amount evidence, includes active recipients independently, and fails
-closed rather than traversing unsafe live-offset pages. Exceptions or unhealthy results still do
-not latch a pause on new exposure; the exact valid first-time-recipient case and target one-page
-ordering/boundary semantics remain unproven. The standing live-chain acceptance matrix has not
-been run.
+Those controls are valuable. They do not make the service production-ready.
+Debit lookup requires an explicitly complete range before a unique candidate can terminalize. It
+normalizes current LLL-TAO nested DEBIT endpoint objects and compares their immutable `address`
+values to the configured token-register address rather than to the display token name. Terminal
+transfer and mint records retain both `txid` and `contract_id`. These local controls remain
+fail-closed: a missing/mismatched configured register address or unstable remote range holds the
+record. Remote reconciliation intentionally fails closed beyond one page, so it cannot clear the
+exposure pause once history outgrows that bounded view. Production admission also omits the
+required multiuser session prerequisite. Automatic Nexus refunds remain disabled while the durable
+intent protocol awaits crash-boundary and target-node evidence. The standing live-chain acceptance
+matrix has not been run. See
+`DEVELOPMENT_REVIEW_2026-08-31_1616.md`.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
-| Critical release gate | 2 | Permanent refund safety and live-boundary evidence remain absent |
-| High release blocker | 1 | Reconciliation errors and unhealthy results do not pause new exposure |
-| Medium / operational | 6 | Response, custody, configuration, exposure-control, dependency or maintenance gap |
-| Low / hygiene | 2 | Documentation and dead-code cleanup |
+| Critical release gate | 0 | — |
+| High release blocker | 1 | Bounded remote-history availability / stable-range evidence |
+| Medium / operational | 3 | Session admission, logging isolation and live acceptance gaps |
+| Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
 
 ### Release gates
 
 | Gate | Status |
 |---|---|
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
-| No checkpoint advances from incomplete/lossy enumeration | **CONTAINED** — heuristic Nexus amount filter removed in normal and recovery scans; target-node enumeration evidence remains required |
+| No checkpoint advances from incomplete/lossy enumeration | **CONTAINED locally** — explicit failures, malformed responses, truncation and empty successful Nexus pages hold; target-node stable-range/pagination evidence remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — local and remote evidence fail closed, but unhealthy results do not pause exposure and target-node boundary semantics remain unproven |
-| One composable automated test command | **PASS** — 62 tests plus 4 subtests on `5d92ec0` |
-| CI enforces tests and static checks | **ENFORCED and green** — run [`33258188981`](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) passed on reconciliation evidence head `de4ae8c` (with implementation `5d92ec0` as its parent) |
+| Durable completed-state data supports reconciliation | **CONTAINED locally** — only complete lookup evidence with normalized immutable endpoint addresses can terminalize, and terminal records retain `(txid, contract_id)`; target-node stable-range evidence remains required |
+| One composable automated test command | **PASS locally** — 99 tests plus 14 subtests on `368b064` |
+| CI enforces tests and static checks | **PASS on reviewed head** — GitHub Actions run 33400416736 succeeded for `368b064`; live acceptance and independent safety gates remain open |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -77,7 +86,9 @@ are retained and timeouts,
 interruptions, non-zero exits and unparsed output become `outcome_unknown`. Resolution only
 completes an intent after a positive on-chain debit whose unique reference, source account,
 destination account and exact base-unit amount all match the immutable intent. For an already
-submitted intent, the observed txid must also match the persisted txid. It never retries a debit.
+submitted intent, the observed txid must also match the persisted txid; the state transition
+rejects an attempt to replace the persisted txid, including from an incorrect local caller. It
+never retries a debit.
 
 Automatic refunds and quarantine moves remain disabled in the service loop. A separate
 `nexus_transfer_operator.py` workflow now requires a named operator, rationale, an audited
@@ -86,6 +97,17 @@ a one-time execution request and a final exact remote-txid confirmation before i
 held source row. Each authorization, requested execution and disposition is append-only/auditable. At
 startup, any persisted `executing` intent is demoted to the explicit `outcome_unknown` hold
 before scans run, so a crash after the durable claim cannot consume its authorization again.
+
+**Independent follow-up remediation (2026-08-31):** every resolver now holds when its bounded
+reference lookup is incomplete, normalizes Nexus `from`/`to` endpoint objects to immutable register
+addresses, compares the configured token register address rather than a display name, and persists
+`contract_id` with terminal state. A transfer intent that already has the txid returned by its sole
+submitted debit resolves that exact transaction through `ledger/get/transaction`, requiring one
+contract that matches its persisted reference, endpoints and integer units; malformed/mismatched
+read-back remains held. Reference-only ambiguous outcomes still require complete stable-range
+evidence. These are local fail-closed repairs; target-node query/pagination semantics and the live
+matrix remain required before enabling the operator protocol.
+
 Focused fault injection and target-node evidence are still required; the transfer primitive remains
 fail closed outside the durable-intent workflow.
 
@@ -99,7 +121,10 @@ fail closed outside the durable-intent workflow.
 
 The direct transfer function is now a fail-closed legacy shim; only
 `execute_nexus_transfer_intent()` can form an account debit, and only from a prepared durable
-intent. Automatic callers still do not invoke it.
+intent. Automatic callers still do not invoke it. The legacy refund and quarantine preparation
+wrappers also reject anything other than a positive built-in integer base-unit value before
+creating an intent; they do not coerce a float, `Decimal`, boolean or string into a different
+Nexus debit amount.
 
 Before containment, four automatic refund paths called that boolean operation and retried it. A
 process crash or timeout after Nexus accepted the refund but before a local completion write
@@ -136,11 +161,13 @@ Disable automatic Nexus refunds. Hold affected rows for operator review and aler
 **Severity:** Critical deployment blocker
 **Priority:** P0 — remove before any live-fund run
 
-**Current status:** **contained, target-node evidence outstanding.** The setting and both
+**Current status:** **contained locally; target-node evidence outstanding.** The setting and both
 heuristic `where=contracts.amount...` construction paths have been removed. Normal polling
 and recovery now enumerate without a server-side amount predicate and apply dust/minimum
-policy locally. Regression tests assert that no `where=` argument is sent even when a legacy
-flag is injected into the test configuration.
+policy locally. An empty successful poll response now holds rather than proposing `now - safety`,
+because it cannot independently prove a complete, snapshot-stable range. Regression tests assert
+that no `where=` argument is sent even when a legacy flag is injected into the test configuration
+and that an empty page cannot advance the waterline.
 
 The remaining release gate is external: the target Nexus build must demonstrate complete,
 stable enumeration and pagination under the standing live-node matrix before a waterline is
@@ -155,7 +182,7 @@ trusted with real funds.
 
 - A target-node test creates credits below dust, between dust/minimum, and above minimum; every expected credit is returned by enumeration.
 - Unsupported/malformed query behavior produces an explicit incomplete scan and holds the waterline.
-- Empty results can advance only after an unfiltered, validated scan.
+- Empty results hold locally unless a future target-node integration proves an independently stable, complete range.
 - Pagination, processing caps and concurrent new transactions cannot move the checkpoint past an unpersisted credit.
 
 ---
@@ -225,6 +252,14 @@ A green result was not evidence of balance correctness.
 - Reconciliation uses only immutable completed/active evidence and exact integer base units.
   It never joins a completed row back to the transient queue, converts a token float with
   `int()`, or recomputes a historical issued output under mutable current fee settings.
+- A confirmation count never terminalizes a submitted Solana→Nexus mint by itself. The service
+  reads back the submitted txid's DEBIT contract and archives the mint only when exactly one
+  contract matches its persisted reference, token-supply source, memo-derived destination and
+  immutable integer Nexus output. Mismatched, missing or duplicate candidates remain held.
+- An ambiguous Solana→Nexus debit is likewise resolved only after one remote DEBIT matches the
+  persisted reference, token-supply source, memo-derived Nexus destination and exact integer
+  Nexus output. A same-reference term collision remains held and cannot attach an unrelated
+  Nexus txid to the Solana deposit.
 - Active debit intents retain the exact Nexus output atomically with their unique reference
   before the CLI invocation. Reconciliation reads completed and active debit evidence in one
   SQLite snapshot, then consumes an exact active remote debit for a first-time recipient using
@@ -340,10 +375,12 @@ multiuser session through the daemon's authenticated HTTPS API rather than invok
 `pin=` / `session=` arguments. `NEXUS_API_URL` must be a
 credential-free `https` base URL and `NEXUS_API_USER` / `NEXUS_API_PASSWORD` must be set; explicit
 production mode refuses startup before SQLite opens or either the Nexus/Solana poller starts when
-any transport control is absent. The form body carries the Nexus profile PIN and, when
-`multiuser=1`, session identifier; they are therefore absent from child-process argv and normal
-process listings. HTTP response bodies on transport errors are deliberately discarded so a broken
-node cannot reflect those fields into logs.
+any transport control is absent. When `NEXUS_MULTIUSER=true`, it also requires a non-empty
+`NEXUS_SESSION` at that same admission gate; otherwise every session-scoped Nexus
+`finance/*`/`assets/*` call would fail after the Solana-side poller starts. The form body carries
+the Nexus profile PIN and, when `multiuser=1`, session identifier; they are therefore absent from
+child-process argv and normal process listings. HTTP response bodies on transport errors are
+deliberately discarded so a broken node cannot reflect those fields into logs.
 
 The CLI fallback remains only for non-production local development. Operators must configure
 `apiauth=1`, `apissl=1`, `apisslrequired=1`, an HTTPS API port, certificate validation, and
@@ -483,6 +520,11 @@ The mixed-decimal contract still requires target-chain evidence in Batch 4.
 7. ✅ Add balanced, duplicate-mint, deleted-source-row and malformed-row regression cases.
 8. ✅ Require exact remote Nexus token-history evidence and detect unrecorded token-supply
    DEBITs without relying on unsafe multi-page live-offset scans.
+9. ✅ Resolve or terminalize a Solana→Nexus debit only from one exact DEBIT contract: every
+   bounded/incomplete reference lookup holds, endpoint objects are normalized to immutable register
+   addresses, the source is compared with the configured token register address, and terminal state
+   retains `contract_id`. Target-node pagination and transaction-response semantics remain Batch 4
+   release evidence.
 
 **Evidence exit met locally:** a known balanced completed swap returns zero delta after its queue
 row is gone; local and remote-only duplicates are detected; zero checked addresses return
@@ -491,14 +533,17 @@ active first-time recipients are scanned and keep the result unhealthy without a
 a later fee-configuration change or a concurrent completion transition; both consumers refuse green
 unless `healthy is True`; and every unhealthy or exceptional reconciliation result pauses new
 Solana↔Nexus exposure while already-owed refunds and quarantines continue in paused mode. **Batch
-remains partial:** target single-page boundary/order semantics are unproven.
+remains partial:** target-node global-uniqueness, single-page boundary/order and transaction-response
+semantics are unproven; local code holds whenever those properties cannot be established.
 
 ### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
 
 1. ✅ Persist intent, destination, exact units and a deterministic unique reference before every eligible transfer.
-2. ✅ Allow exactly one CLI execution from an atomically claimed intent and persist a parsed Nexus txid.
+2. ✅ Allow exactly one CLI/API execution from an atomically claimed intent and persist only a parsed, non-empty JSON-string Nexus txid.
 3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
-4. ✅ Resolve a positive reference match to completed; never retry a debit from the resolver.
+4. ✅ Resolve only one exact positive contract identity to completed; incomplete bounded lookups
+   hold, and terminal state retains `contract_id`. The resolver still never retries a debit.
+   Target-node proof that the lookup can establish a complete stable range remains Batch 4 evidence.
 5. ✅ Persist and retain all in-flight intents across restart.
 6. ✅ Provide an operator-only prepare → reference-confirm → authorize → execute-once →
    resolve → remote-txid-confirmed finalization workflow with an append-only attribution log;
@@ -529,7 +574,7 @@ unless reconciliation explicitly returns `healthy=True`.
 
 1. ✅ In explicit `SWAP_PRODUCTION_MODE`, require positive per-swap and daily payout caps and at least one configured alert route before startup.
 2. ✅ Require configured Solana and Nexus quarantine destinations before production startup; test at least one alert channel operationally.
-3. ✅ Refuse production mode when mandatory controls are absent.
+3. ✅ Refuse production mode when mandatory controls are absent, including the required `NEXUS_SESSION` when `NEXUS_MULTIUSER=true`.
 4. Complete the operator hold-resolution workflow with evidence, authorization and audit.
 5. Document incident response, recovery and key rotation; rehearse them before launch.
 
@@ -553,11 +598,25 @@ hold-resolution, incident-response and key-rotation procedures.
    DEX execution/rebalancer helpers and the direct local mint helper are absent from runtime;
    the regression contract prevents their reintroduction.
 4. ✅ Remove query-string dashboard authentication; require `Authorization: Bearer` through a TLS reverse proxy for non-loopback access.
-5. **In progress:** structured JSON logging now covers operator alerts and Nexus/Solana
-   deposit lifecycle transitions, with field-level credential redaction. Both chain pollers now
-   emit stable ingestion/classification summaries and fail-closed enumeration failures (including
-   Nexus page and reason context) instead of console prose. Migrate the remaining lower-level
-   client money-path output and refresh this evaluation against the final reviewed commit.
+5. ✅ Structured JSON logging covers operator alerts and Nexus/Solana deposit lifecycle
+   transitions, with field-level credential redaction. Both chain pollers emit stable
+   ingestion/classification summaries and fail-closed enumeration failures (including Nexus page
+   and reason context) instead of console prose. The durable Nexus transfer-intent client emits
+   redacted, machine-readable submission, ambiguous-outcome, hold and positive-resolution events
+   keyed by immutable intent ID/reference and remote txid. All remaining direct console diagnostics
+   in the lower-level Nexus and Solana client money paths now emit stable structured events; an AST
+   regression rejects new `print()` calls in either client. Helius API-key values are also redacted
+   from structured messages. Diagnostics remain best-effort and cannot interrupt durable state
+   transitions, so operators can correlate a Nexus debit with the related Solana payout path
+   without reopening an ambiguous retry path. The Nexus and Solana poller lifecycle wrappers also
+   isolate structured-logging failures, so a JSON logging outage cannot stop custody processing or
+   turn a durable Nexus/Solana outcome into a retryable state. Nexus deposit enumeration now uses
+   the same `nexus_client._run()` transport wrapper as other Nexus reads: it retains the
+   fail-closed timeout/error result handling while routing production reads through the configured
+   credential-safe HTTPS POST transport and leaving `register/*` session-free. This is local
+   fail-closed behavior; target-node and Solana devnet/testnet acceptance evidence remains required
+   before deployment. Refresh this evaluation against the final reviewed commit before a production
+   candidate is considered.
 
 ---
 
@@ -570,13 +629,13 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 73 passed plus 10 subtests passed on the latest local verification |
+| `python -m pytest -q tests/test_critical_safety.py` | 88 passed plus 14 subtests passed on `368b064` |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
 | Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 81 passed, 10 subtests passed in a clean Python 3.11 virtual environment after the targeted dependency remediation |
-| CI workflow | Passed on dependency-remediation code head `f9e9406` — [run 33291622439](https://github.com/distordialabs-brutus/swapService/actions/runs/33291622439); earlier reconciliation evidence is [run 33258188981](https://github.com/distordialabs-brutus/swapService/actions/runs/33258188981) on `de4ae8c` |
+| Full `python -m pytest -q` | 99 passed, 14 subtests passed locally on `368b064` (Python 3.11) |
+| CI workflow | Passed on reviewed head `368b064` — [run 33400416736](https://github.com/distordialabs-brutus/swapService/actions/runs/33400416736) |
 | `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |

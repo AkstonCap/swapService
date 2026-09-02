@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import subprocess
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
@@ -12,8 +13,20 @@ from urllib.request import (
     build_opener,
 )
 from . import config
-from . import state_db, nexus_client
+from . import state_db, nexus_client, structured_logging
 import time
+
+
+_LOG = structured_logging.get_logger("swapService.nexus_client")
+
+
+def _log(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    """Best-effort secret-safe diagnostics that cannot interrupt money-path state changes."""
+    try:
+        structured_logging.emit(_LOG, level, event, **fields)
+    except Exception:
+        # Logging must never turn a known/unknown transfer result into a retryable state.
+        pass
 
 
 # API families whose endpoints operate under a logged-in signature chain. Per the Nexus
@@ -331,8 +344,9 @@ def get_nexus_send_amount_units(amount_solana_units: int) -> int:
     Nexus-unit domain.
     """
     gross_nexus_units = config.solana_units_to_nexus(int(amount_solana_units), round_up=False)
-    dynamic_fee = _dynamic_fee_units(gross_nexus_units, config.DYNAMIC_FEE_BPS)
-    return max(0, gross_nexus_units - int(config.FLAT_FEE_TO_NEXUS_UNITS) - dynamic_fee)
+    fee_policy = config.SWAP_PAIR.fees
+    dynamic_fee = _dynamic_fee_units(gross_nexus_units, fee_policy.basis_points)
+    return max(0, gross_nexus_units - int(fee_policy.flat_to_nexus_units) - dynamic_fee)
 
 
 def get_solana_send_amount_units(amount_nexus_units: int) -> int:
@@ -343,8 +357,9 @@ def get_solana_send_amount_units(amount_nexus_units: int) -> int:
     decimal mismatch can never cause an overpayment.
     """
     gross_solana_units = config.nexus_units_to_solana(int(amount_nexus_units), round_up=False)
-    dynamic_fee = _dynamic_fee_units(gross_solana_units, config.DYNAMIC_FEE_BPS)
-    return max(0, gross_solana_units - int(config.FLAT_FEE_TO_SOLANA_UNITS) - dynamic_fee)
+    fee_policy = config.SWAP_PAIR.fees
+    dynamic_fee = _dynamic_fee_units(gross_solana_units, fee_policy.basis_points)
+    return max(0, gross_solana_units - int(fee_policy.flat_to_solana_units) - dynamic_fee)
 
 
 def get_nexus_send_amount(amount_solana: int) -> Decimal:
@@ -399,12 +414,20 @@ class TransferExecution:
 
 @dataclass(frozen=True)
 class TransferDebitEvidence:
-    """A fully specified on-chain debit observed for a persisted transfer intent."""
+    """A fully specified on-chain debit observed for a persisted transfer intent.
+
+    A Nexus transaction may contain multiple DEBIT contracts. ``remote_txid`` alone is
+    therefore not a sufficient identity for an idempotent transfer resolution.
+    """
 
     remote_txid: str
+    contract_id: int
     from_address: str
     to_address: str
     amount_usdd_units: int
+    # Direct txid read-back must compare the on-chain reference too. History callers
+    # retain a keyed lookup compatibility path for legacy fixture records.
+    reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -435,6 +458,23 @@ def _parse_exact_nexus_units(value: object) -> int | None:
         return None
 
 
+def _parse_nexus_contract_address(value: object) -> str | None:
+    """Return the immutable register address from an LLL-TAO contract endpoint.
+
+    Current token-history responses encode ``from``/``to`` as objects containing an
+    ``address`` field. Accept legacy flat strings for historical records, but never
+    stringify arbitrary mappings because that would turn a representation mismatch
+    into a false contract match.
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        address = value.get("address")
+        if isinstance(address, str):
+            return address.strip() or None
+    return None
+
+
 def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
     """Execute one prepared intent and persist its outcome before returning.
 
@@ -451,6 +491,12 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
 
     if not config.NEXUS_PIN:
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reason="missing_pin",
+        )
         return TransferExecution(False, "outcome_unknown")
 
     amount_str = _format_nexus_amount(int(intent["amount_usdd_units"]))
@@ -466,61 +512,238 @@ def execute_nexus_transfer_intent(intent_id: str) -> TransferExecution:
     try:
         code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
     except Exception as exc:
-        print("Nexus transfer outcome unknown:", redact(str(exc)))
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reference=intent["reference"],
+            reason="exception",
+            error=redact(str(exc)),
+        )
         return TransferExecution(True, "outcome_unknown")
 
     if code != 0:
-        print("Nexus transfer outcome unknown:", redact(err or out))
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reference=intent["reference"],
+            reason="cli_error",
+            error=redact(err or out),
+        )
         return TransferExecution(True, "outcome_unknown")
 
     data = _parse_json_lenient(out)
     remote_txid = data.get("txid") if isinstance(data, dict) else None
-    if not remote_txid:
-        # Text-only success is deliberately not treated as a safe retry.  The
-        # persisted reference is resolved against the chain in a later pass.
+    if not isinstance(remote_txid, str) or not remote_txid.strip():
+        # A non-string (or blank) JSON value is not an authoritative Nexus
+        # transaction identity. Treat it exactly like unparsed success: the
+        # sole debit may have reached the node, so hold and resolve the
+        # persisted reference later rather than inventing a string identity.
         state_db.update_nexus_transfer_intent(intent_id, status="outcome_unknown")
+        _log(
+            "NEXUS_TRANSFER_OUTCOME_UNKNOWN",
+            level=logging.WARNING,
+            intent_id=intent_id,
+            reference=intent["reference"],
+            reason="unparsed_success",
+        )
         return TransferExecution(True, "outcome_unknown")
 
-    remote_txid = str(remote_txid)
+    remote_txid = remote_txid.strip()
     state_db.update_nexus_transfer_intent(
         intent_id, status="submitted", remote_txid=remote_txid
+    )
+    _log(
+        "NEXUS_TRANSFER_SUBMITTED",
+        intent_id=intent_id,
+        reference=intent["reference"],
+        remote_txid=remote_txid,
     )
     return TransferExecution(True, "submitted", remote_txid)
 
 
+def get_nexus_transfer_debits_by_txid(txid: str) -> "BatchLookup":
+    """Read one returned Nexus transaction by its authoritative immutable identity.
+
+    A locally persisted txid is evidence returned by the sole allowed debit invocation.
+    Unlike a live offset-paginated token-history scan, ``ledger/get/transaction`` addresses
+    exactly that transaction, so it can safely establish whether that transaction contains
+    one matching DEBIT contract.  It does *not* make reference-only ambiguous outcomes
+    retryable; those remain held pending a target-proven stable-range query.
+    """
+    expected_txid = str(txid or "").strip()
+    if not expected_txid:
+        return BatchLookup({}, False, "invalid_txid")
+    cmd = [config.NEXUS_CLI, "ledger/get/transaction", f"txid={expected_txid}"]
+    try:
+        code, cli_out, err = _run(
+            cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
+        )
+    except Exception as exc:
+        _log("nexus_transfer_txid_lookup_failed", level=logging.ERROR, error=redact(str(exc)))
+        return BatchLookup({}, False, "exception")
+    if code != 0:
+        _log("nexus_transfer_txid_lookup_failed", level=logging.ERROR,
+             error=redact(err or cli_out), reason="cli_error")
+        return BatchLookup({}, False, "cli_error")
+    data = _parse_json_lenient(cli_out)
+    if isinstance(data, dict) and data.get("error"):
+        return BatchLookup({}, False, "api_error")
+    tx = data.get("result") if isinstance(data, dict) and "result" in data else data
+    if not isinstance(tx, dict) or str(tx.get("txid") or "") != expected_txid:
+        return BatchLookup({}, False, "invalid_transaction")
+    confirmations = tx.get("confirmations")
+    try:
+        minimum_confirmations = config.get_nexus_transfer_min_confirmations()
+    except ValueError:
+        return BatchLookup({}, False, "invalid_finality_policy")
+    if (isinstance(confirmations, bool) or not isinstance(confirmations, int)
+            or confirmations < minimum_confirmations):
+        return BatchLookup({}, False, "insufficient_confirmations")
+    contracts = tx.get("contracts")
+    if not isinstance(contracts, list):
+        return BatchLookup({}, False, "invalid_contracts")
+
+    evidence: list[TransferDebitEvidence] = []
+    seen_contracts: set[int] = set()
+    for contract in contracts:
+        if not isinstance(contract, dict):
+            return BatchLookup({}, False, "invalid_contract")
+        if str(contract.get("OP") or "").upper() != "DEBIT":
+            continue
+        contract_id = contract.get("id")
+        if isinstance(contract_id, bool) or not isinstance(contract_id, int):
+            return BatchLookup({}, False, "invalid_contract_id")
+        if contract_id in seen_contracts:
+            return BatchLookup({}, False, "duplicate_contract_id")
+        seen_contracts.add(contract_id)
+        reference = contract.get("reference")
+        amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
+        from_address = _parse_nexus_contract_address(contract.get("from"))
+        to_address = _parse_nexus_contract_address(contract.get("to"))
+        if (reference is None or not str(reference).strip() or amount_usdd_units is None
+                or from_address is None or to_address is None):
+            return BatchLookup({}, False, "invalid_debit_evidence")
+        evidence.append(TransferDebitEvidence(
+            remote_txid=expected_txid,
+            contract_id=contract_id,
+            from_address=from_address,
+            to_address=to_address,
+            amount_usdd_units=amount_usdd_units,
+            reference=str(reference).strip(),
+        ))
+    return BatchLookup({expected_txid: evidence}, True)
+
+
+def _matching_transfer_debit_evidence(
+    intent: dict, candidates: list[TransferDebitEvidence], *, require_reference: bool = False
+) -> list[TransferDebitEvidence]:
+    """Filter observed DEBITs against the immutable terms persisted before execution."""
+    expected_reference = str(intent["reference"]).strip()
+    return [
+        evidence for evidence in candidates
+        if evidence.from_address == str(intent["from_address"])
+        and evidence.to_address == str(intent["to_address"])
+        and evidence.amount_usdd_units == int(intent["amount_usdd_units"])
+        and (not require_reference or evidence.reference == expected_reference)
+        and (intent["status"] != "submitted"
+             or evidence.remote_txid == str(intent.get("remote_txid") or ""))
+    ]
+
+
+def _complete_nexus_transfer_intent(intent: dict, evidence: TransferDebitEvidence) -> None:
+    """Persist exact remote identity after one authoritative match."""
+    state_db.update_nexus_transfer_intent(
+        intent["id"], status="completed", remote_txid=evidence.remote_txid,
+        contract_id=evidence.contract_id, resolved=True
+    )
+    _log(
+        "NEXUS_TRANSFER_RESOLVED",
+        intent_id=intent["id"],
+        reference=str(intent["reference"]).strip(),
+        remote_txid=evidence.remote_txid,
+    )
+
+
 def resolve_nexus_transfer_intents(limit: int = 200) -> int:
-    """Complete only an exact observed debit; never re-debit an ambiguous intent."""
+    """Complete exact known-txid debits; hold every reference-only ambiguous outcome."""
     intents = state_db.get_nexus_transfer_intents_by_status(
         ("executing", "submitted", "outcome_unknown"), limit=limit
     )
     if not intents:
         return 0
-    lookup = find_nexus_transfer_debits_by_references(
-        [intent["reference"] for intent in intents]
-    )
     resolved = 0
+    reference_only: list[dict] = []
+
     for intent in intents:
-        reference = str(intent["reference"]).strip()
-        candidates = [
-            evidence for evidence in lookup.values.get(reference, [])
-            if evidence.from_address == str(intent["from_address"])
-            and evidence.to_address == str(intent["to_address"])
-            and evidence.amount_usdd_units == int(intent["amount_usdd_units"])
-            and (intent["status"] != "submitted"
-                 or evidence.remote_txid == str(intent.get("remote_txid") or ""))
-        ]
-        matching_txids = {evidence.remote_txid for evidence in candidates}
-        if len(matching_txids) != 1:
-            print("[NEXUS_TRANSFER_HOLD] intent=%s reference=%s lookup=%s" % (
-                intent["id"], reference, lookup.reason or "no_exact_debit_match"
-            ))
+        if intent["status"] != "submitted":
+            reference_only.append(intent)
             continue
-        remote_txid = matching_txids.pop()
-        state_db.update_nexus_transfer_intent(
-            intent["id"], status="completed", remote_txid=remote_txid, resolved=True
+        remote_txid = str(intent.get("remote_txid") or "").strip()
+        lookup = get_nexus_transfer_debits_by_txid(remote_txid)
+        if not lookup.complete:
+            _log(
+                "NEXUS_TRANSFER_HELD",
+                level=logging.WARNING,
+                intent_id=intent["id"],
+                reference=str(intent["reference"]).strip(),
+                reason=lookup.reason or "authoritative_txid_lookup_incomplete",
+                matching_contracts=0,
+            )
+            continue
+        candidates = _matching_transfer_debit_evidence(
+            intent, lookup.values.get(remote_txid, []), require_reference=True
         )
+        if len(candidates) != 1:
+            _log(
+                "NEXUS_TRANSFER_HELD",
+                level=logging.WARNING,
+                intent_id=intent["id"],
+                reference=str(intent["reference"]).strip(),
+                reason="no_unique_exact_debit_contract",
+                matching_contracts=len(candidates),
+            )
+            continue
+        _complete_nexus_transfer_intent(intent, candidates[0])
+        resolved += 1
+
+    if not reference_only:
+        return resolved
+    lookup = find_nexus_transfer_debits_by_references(
+        [intent["reference"] for intent in reference_only]
+    )
+    # A single observed candidate from a bounded/failed scan does not prove there are
+    # no competing contracts outside that scan. Completion is permitted only when the
+    # lookup explicitly establishes completeness for every requested reference.
+    if not lookup.complete:
+        _log(
+            "NEXUS_TRANSFER_LOOKUP_HELD",
+            level=logging.WARNING,
+            reason=lookup.reason or "incomplete_debit_lookup",
+            intent_count=len(reference_only),
+        )
+        return resolved
+    for intent in reference_only:
+        reference = str(intent["reference"]).strip()
+        candidates = _matching_transfer_debit_evidence(
+            intent, lookup.values.get(reference, [])
+        )
+        # Count complete contract identities, never only transaction ids: one Nexus
+        # transaction can contain multiple DEBIT contracts with the same terms.
+        if len(candidates) != 1:
+            _log(
+                "NEXUS_TRANSFER_HELD",
+                level=logging.WARNING,
+                intent_id=intent["id"],
+                reference=reference,
+                reason=lookup.reason or "no_unique_exact_debit_contract",
+                matching_contracts=len(candidates),
+            )
+            continue
+        _complete_nexus_transfer_intent(intent, candidates[0])
         resolved += 1
     return resolved
 
@@ -590,7 +813,7 @@ def get_transactions_confirmations(txids, limit: int = 200) -> BatchLookup:
                 # Only a positive txid/reference match is actionable automatically.
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as e:
-            print(f"Error batch-fetching confirmations: {e}")
+            _log("nexus_confirmation_lookup_failed", level=logging.ERROR, error=str(e))
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
@@ -615,18 +838,31 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
     # One bounded lookup for the whole batch instead of an unbounded fetch per row.
     confirmation_lookup = get_transactions_confirmations([row[6] for row in sigs if row[6]])
 
+    # A confirmation count proves only that the submitted transaction exists.  For a
+    # known txid, use the authoritative ledger lookup instead of a live offset-paginated
+    # reference-history scan: the latter cannot establish a stable global range and would
+    # leave a valid Solana→Nexus mint held forever.  Each returned DEBIT is still checked
+    # against the immutable reference, source register, destination and integer output.
+    debit_lookups: dict[str, BatchLookup] = {}
+    for _sig, _timestamp, _memo, _from_address, _amount_usdc_units, _status, txid in sigs:
+        txid_text = str(txid).strip() if txid else ""
+        confirmations = confirmation_lookup.values.get(txid_text) if txid_text else None
+        if confirmations is not None and confirmations >= min_confirmations:
+            debit_lookups.setdefault(txid_text, get_nexus_transfer_debits_by_txid(txid_text))
+
     # filter_unprocessed_sigs returns: (sig, timestamp, memo, from_address, amount_usdc_units, status, txid)
     for sig, timestamp, memo, from_address, amount_usdc_units, status, txid in sigs:
         if not txid:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} has no txid; manual resolution required")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig,
+                 reason="missing_txid")
             continue
 
         confirmations = confirmation_lookup.values.get(str(txid))
         
         # A missing value is never proof that the debit did not execute.
         if confirmations is None:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} "
-                  f"lookup={confirmation_lookup.reason or 'not_observed'}")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason=confirmation_lookup.reason or "not_observed")
             continue
         
         # Case 2: Transaction exists but not enough confirmations yet
@@ -635,29 +871,64 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             # Wait for more confirmations - do not timeout a partially confirmed transaction.
             continue
         
-        # Case 3: Transaction is confirmed. Its persisted per-deposit reference is part
-        # of the immutable on-chain identity. Never substitute the latest global
-        # reference: another worker may have advanced it while this transaction waited.
+        # Case 3: a confirmed transaction still needs exact contract read-back.  Its
+        # persisted per-deposit reference is part of the immutable on-chain identity;
+        # never substitute the latest global reference while this debit waited.
         reference = state_db.get_unprocessed_sig_reference(sig)
         if reference is None:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has no persisted reference")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="missing_reference")
+            continue
+        txid_text = str(txid).strip()
+        debit_lookup = debit_lookups.get(txid_text)
+        if debit_lookup is None:
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reference=reference, reason="missing_authoritative_txid_lookup")
             continue
         if isinstance(amount_usdc_units, bool) or not isinstance(amount_usdc_units, int):
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has non-integer Solana units")
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="non_integer_solana_units")
             continue
 
         # Archive the immutable output fixed before the debit. Recomputing fees here
         # after an operator configuration change would make the local record disagree
         # with the already-submitted Nexus debit.
         nexus_out_base = state_db.get_unprocessed_sig_nexus_amount(sig)
-        if nexus_out_base is None:
-            print(f"[DEBIT_CONFIRMATION_HOLD] sig={sig} txid={txid} has no persisted Nexus output")
+        if (isinstance(nexus_out_base, bool) or not isinstance(nexus_out_base, int)
+                or nexus_out_base <= 0):
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="missing_or_invalid_nexus_output")
             continue
+        nexus_destination = _nexus_destination_from_memo(memo)
+        if nexus_destination is None:
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reason="missing_or_invalid_nexus_destination")
+            continue
+
+        # The returned txid is an authoritative identity, but the transaction may still
+        # contain multiple DEBITs. Terminalize only one contract whose persisted reference,
+        # immutable token register source, memo destination and exact integer units all match.
+        if not debit_lookup.complete:
+            _log("nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                 reference=reference, reason=debit_lookup.reason or "authoritative_txid_lookup_incomplete")
+            continue
+        exact_contracts = [
+            evidence for evidence in debit_lookup.values.get(txid_text, [])
+            if evidence.reference == str(reference).strip()
+            and evidence.from_address == str(config.NEXUS_TOKEN_REGISTER_ADDRESS)
+            and evidence.to_address == nexus_destination
+            and evidence.amount_usdd_units == nexus_out_base
+        ]
+        if len(exact_contracts) != 1:
+            _log(
+                "nexus_debit_confirmation_held", level=logging.WARNING, sig=sig, txid=txid,
+                reference=reference,
+                reason=debit_lookup.reason or "no_unique_exact_debit_contract",
+                matching_contracts=len(exact_contracts),
+            )
+            continue
+
         amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
-        nexus_destination = None
-        prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
-        if memo and str(memo).lower().startswith(prefix.lower()):
-            nexus_destination = str(memo)[len(prefix):].strip() or None
 
         # Bug #10 fix: Track fees when debit is confirmed.
         # The fee is what the deposit gave up: deposit in, minus what was credited out.
@@ -677,7 +948,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
                     amount_usdd_units=None
                 )
         except Exception as e:
-            print(f"[FEE_TRACKING] Error recording fee for sig={sig}: {e}")
+            _log("nexus_fee_record_failed", level=logging.ERROR, sig=sig, txid=txid, error=str(e))
         
         state_db.mark_processed_sig(
             sig, timestamp, int(amount_usdc_units or 0), txid, amount_nexus_debited,
@@ -685,6 +956,7 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             amount_usdd_units=nexus_out_base,
             nexus_destination=nexus_destination,
             memo=memo,
+            contract_id=exact_contracts[0].contract_id,
         )
         state_db.remove_unprocessed_sig(sig)
         processed_count += 1
@@ -697,6 +969,15 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
 
 
 DEBIT_UNVERIFIED_STATUSES = ("debit in flight", "debit unverified")
+
+
+def _nexus_destination_from_memo(memo: object) -> str | None:
+    """Return the immutable Nexus recipient encoded in a queued Solana deposit memo."""
+    prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
+    value = str(memo or "")
+    if not prefix or not value.lower().startswith(prefix.lower()):
+        return None
+    return value[len(prefix):].strip() or None
 
 
 def resolve_unverified_debits(limit: int = 200) -> int:
@@ -714,10 +995,27 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     if not rows:
         return 0
 
-    # One lookup for the whole batch instead of one subprocess per row.
-    reference_lookup = find_nexus_debits_by_references(
+    # A reference is not sufficient proof of a mint.  It identifies a durable local
+    # intent, but the remote debit must also match the memo recipient and exact output
+    # fixed before the debit was submitted.  Otherwise a same-reference debit could
+    # attach an unrelated Nexus txid to this Solana deposit and later authorize a payout.
+    reference_lookup = find_nexus_transfer_debits_by_references(
         [r[7] for r in rows if r[7] is not None]
     )
+
+    # A reference scan that is bounded, malformed, failed, or otherwise incomplete
+    # cannot prove global uniqueness.  In particular, one exact-looking contract in
+    # the observed window does not exclude a second matching contract outside it.
+    # Leave every ambiguous debit held rather than attaching a remote txid that could
+    # later authorize an unrelated terminal mint.
+    if not reference_lookup.complete:
+        _log(
+            "nexus_debit_resolution_held",
+            level=logging.WARNING,
+            reason=reference_lookup.reason or "incomplete_debit_lookup",
+            pending_count=len(rows),
+        )
+        return 0
 
     resolved = 0
 
@@ -727,24 +1025,47 @@ def resolve_unverified_debits(limit: int = 200) -> int:
                 # Intent was never recorded (pre-upgrade row): fall back to the memo-scan-free
                 # safe option - leave for manual review rather than risk a double action.
                 state_db.update_unprocessed_sig_status(sig, "to be quarantined")
-                print(f"[DEBIT_RESOLVE] sig={sig} has no reference; quarantining for manual review")
+                _log("nexus_debit_resolution_quarantined", level=logging.WARNING, sig=sig,
+                     reason="missing_reference")
                 resolved += 1
                 continue
 
-            found_txid = reference_lookup.values.get(str(reference).strip())
-            if found_txid:
-                state_db.update_unprocessed_sig_txid(sig, found_txid)
-                state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
-                state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
-                print(f"[DEBIT_RESOLVE] sig={sig} ref={reference} CONFIRMED on-chain txid={found_txid}")
-                resolved += 1
+            destination = _nexus_destination_from_memo(memo)
+            expected_amount = state_db.get_unprocessed_sig_nexus_amount(sig)
+            if destination is None or expected_amount is None:
+                _log(
+                    "nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
+                    reference=reference,
+                    reason="missing_durable_debit_terms",
+                )
                 continue
 
-            print(f"[DEBIT_RESOLVE_HOLD] sig={sig} ref={reference} "
-                  f"lookup={reference_lookup.reason or 'not_observed'}")
-            continue
+            candidates = [
+                evidence for evidence in reference_lookup.values.get(str(reference).strip(), [])
+                if evidence.from_address == str(config.NEXUS_TOKEN_REGISTER_ADDRESS)
+                and evidence.to_address == destination
+                and evidence.amount_usdd_units == expected_amount
+            ]
+            # A single transaction can have multiple matching contracts. Treat that as
+            # an ambiguous mint until an operator resolves it; its txid is not identity.
+            if len(candidates) != 1:
+                _log(
+                    "nexus_debit_resolution_held", level=logging.WARNING, sig=sig,
+                    reference=reference,
+                    reason=reference_lookup.reason or "no_unique_exact_debit_contract",
+                    matching_contracts=len(candidates),
+                )
+                continue
+
+            found_txid = candidates[0].remote_txid
+            state_db.update_unprocessed_sig_txid(sig, found_txid)
+            state_db.update_unprocessed_sig_status(sig, "debited, awaiting confirmation")
+            state_db.release_reservation(state_db.DEBIT_RESERVATION_KIND, sig)
+            _log("nexus_debit_resolution_confirmed", sig=sig, reference=reference,
+                 remote_txid=found_txid)
+            resolved += 1
         except Exception as e:
-            print(f"[DEBIT_RESOLVE] error for sig={sig}: {e}")
+            _log("nexus_debit_resolution_failed", level=logging.ERROR, sig=sig, error=str(e))
             continue
 
     return resolved
@@ -759,8 +1080,9 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
     """
     dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-    if not dest or not treas or int(amount_usdd_units or 0) <= 0 or not txid:
-        print("[quarantine_nexus_token] cannot prepare durable quarantine intent")
+    if (not dest or not treas or not txid or
+            type(amount_usdd_units) is not int or amount_usdd_units <= 0):
+        _log("nexus_quarantine_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
         intent = state_db.create_nexus_transfer_intent(
@@ -768,13 +1090,13 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
             source_txid=str(txid),
             from_address=str(treas),
             to_address=str(dest),
-            amount_usdd_units=int(amount_usdd_units),
+            amount_usdd_units=amount_usdd_units,
         )
     except ValueError as exc:
-        print("[quarantine_nexus_token] intent conflict:", redact(str(exc)))
+        _log("nexus_quarantine_intent_conflict", level=logging.WARNING, error=redact(str(exc)))
         return False
-    print("[quarantine_nexus_token] prepared intent=%s reason=%s; manual authorization required" %
-          (intent["id"], redact(reason)))
+    _log("nexus_quarantine_intent_prepared", level=logging.WARNING, intent_id=intent["id"],
+         reason=redact(reason), automatic_execution=False)
     return False
 
 
@@ -791,8 +1113,12 @@ def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> boo
     """Prepare a refund intent and hold; automatic Nexus refunds remain disabled."""
     source_txid = _refund_source_txid(reason)
     treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
-    if not source_txid or not treas or not to_addr or int(amount_usdd_units or 0) <= 0:
-        print("[refund_nexus_token] cannot prepare durable refund intent; holding for review")
+    # Preserve the exact integer amount all the way to the durable state boundary.
+    # Coercing here would silently turn e.g. 1.9 Nexus base units into a one-unit
+    # operator disposition despite create_nexus_transfer_intent correctly rejecting it.
+    if (not source_txid or not treas or not to_addr or
+            type(amount_usdd_units) is not int or amount_usdd_units <= 0):
+        _log("nexus_refund_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
         intent = state_db.create_nexus_transfer_intent(
@@ -800,12 +1126,13 @@ def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> boo
             source_txid=source_txid,
             from_address=str(treas),
             to_address=str(to_addr),
-            amount_usdd_units=int(amount_usdd_units),
+            amount_usdd_units=amount_usdd_units,
         )
     except ValueError as exc:
-        print("[refund_nexus_token] intent conflict:", redact(str(exc)))
+        _log("nexus_refund_intent_conflict", level=logging.WARNING, error=redact(str(exc)))
         return False
-    print("[refund_nexus_token] prepared intent=%s; automatic execution disabled" % intent["id"])
+    _log("nexus_refund_intent_prepared", level=logging.WARNING, intent_id=intent["id"],
+         automatic_execution=False)
     return False
 
 
@@ -815,40 +1142,20 @@ def transfer_nexus_between_accounts(from_addr: str, to_addr: str, amount_usdd_un
     Callers must first create an immutable ``nexus_transfer_intents`` row and then use
     ``execute_nexus_transfer_intent``. This function deliberately cannot issue a debit.
     """
-    print("Nexus transfer blocked: durable transfer intent required")
+    _log("nexus_transfer_blocked", level=logging.WARNING, reason="durable_intent_required")
     return False
 
 def debit_account_with_txid(from_addr: str, to_addr: str, amount_units: int, reference: int | str) -> tuple[bool, str | None]:
-    """Debit from a specific account (e.g., treasury) to recipient and parse txid.
-    Input amount is in internal base units; formatted as decimal token amount for Nexus CLI.
+    """Legacy direct-debit entrypoint retained only to fail closed.
+
+    A parsed response does not prove an account debit is safe to retry after a process
+    loss.  The durable intent ledger therefore owns the only permitted invocation path:
+    create a ``nexus_transfer_intents`` row, record the audited preparation,
+    authorization and execution request, then call ``execute_nexus_transfer_intent``.
     """
-    if not config.NEXUS_PIN:
-        return (False, None)
-    amount_str = _format_nexus_amount(int(amount_units))
-    cmd = [
-        config.NEXUS_CLI,
-        "finance/debit/account",
-        f"from={from_addr}",
-        f"to={to_addr}",
-        f"amount={amount_str}",
-        f"reference={reference}",
-        f"pin={config.NEXUS_PIN}",
-    ]
-    # Generous, consistent timeout (see debit_nexus_token_with_txid): avoid killing an
-    # in-flight debit that may still commit on the node.
-    code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 30))
-    if code != 0:
-        return (False, None)
-    txid = None
-    data = _parse_json_lenient(out)
-    if isinstance(data, dict):
-        txid = data.get("txid")
-    if not txid:
-        for line in (out or "").splitlines():
-            if "txid=" in line:
-                txid = line.split("txid=", 1)[1].strip().split()[0]
-                break
-    return (True, str(txid) if txid else None)
+    _log("NEXUS_TRANSFER_BLOCKED", level=logging.WARNING,
+         reason="durable_intent_required")
+    return (False, None)
 
 
 # --- Asset mapping for swaps (distordiaBridge) ---
@@ -1015,10 +1322,11 @@ def find_nexus_mint_debits_since(
                 cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
             )
         except Exception as exc:
-            print("Nexus: mint-history lookup exception:", redact(str(exc)))
+            _log("nexus_mint_history_lookup_failed", level=logging.ERROR, error=redact(str(exc)))
             return BatchLookup(found, False, "exception")
         if code != 0:
-            print("Nexus: mint-history lookup error:", redact(err or cli_out))
+            _log("nexus_mint_history_lookup_failed", level=logging.ERROR,
+                 error=redact(err or cli_out), reason="cli_error")
             return BatchLookup(found, False, "cli_error")
 
         data = _parse_json_lenient(cli_out)
@@ -1053,15 +1361,12 @@ def find_nexus_mint_debits_since(
                     return BatchLookup(found, False, "invalid_contract")
                 if str(contract.get("OP") or "").upper() != "DEBIT":
                     continue
-                source = contract.get("from")
-                destination = contract.get("to")
+                source = _parse_nexus_contract_address(contract.get("from"))
+                destination = _parse_nexus_contract_address(contract.get("to"))
                 # A DEBIT without complete endpoints cannot be classified as a token
                 # mint versus an account transfer, so fail closed rather than skip it.
-                if (source is None or not str(source).strip() or
-                        destination is None or not str(destination).strip()):
+                if source is None or destination is None:
                     return BatchLookup(found, False, "invalid_debit_endpoints")
-                source = str(source).strip()
-                destination = str(destination).strip()
                 reference = contract.get("reference")
                 amount_units = _parse_exact_nexus_units(contract.get("amount"))
                 if reference is None or not str(reference).strip() or amount_units is None:
@@ -1105,6 +1410,7 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
     """
     wanted = {str(reference).strip() for reference in references if reference is not None}
     out: dict[str, list[TransferDebitEvidence]] = {}
+    seen_contracts: dict[tuple[str, str, int], TransferDebitEvidence] = {}
     if not wanted:
         return BatchLookup(out, True)
 
@@ -1113,7 +1419,7 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
     for page in range(max_pages):
         cmd = [
             config.NEXUS_CLI,
-            "finance/transactions/token/txid,timestamp,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
+            "finance/transactions/token/txid,timestamp,contracts.id,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
             f"name={config.NEXUS_TOKEN_NAME}",
             "sort=timestamp",
             "order=desc",
@@ -1125,7 +1431,8 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
                 cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
             )
             if code != 0:
-                print("Nexus: transfer-debit lookup error:", redact(err or cli_out))
+                _log("nexus_transfer_debit_lookup_failed", level=logging.ERROR,
+                     error=redact(err or cli_out), reason="cli_error")
                 return BatchLookup(out, False, "cli_error")
             data = _parse_json_lenient(cli_out)
             if isinstance(data, dict) and data.get("error"):
@@ -1148,21 +1455,32 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
                     if key not in wanted:
                         continue
                     amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
-                    from_address = contract.get("from")
-                    to_address = contract.get("to")
-                    if (amount_usdd_units is None or from_address is None or to_address is None or
-                            not str(from_address).strip() or not str(to_address).strip()):
+                    from_address = _parse_nexus_contract_address(contract.get("from"))
+                    to_address = _parse_nexus_contract_address(contract.get("to"))
+                    contract_id = contract.get("id")
+                    if isinstance(contract_id, bool) or not isinstance(contract_id, int):
+                        return BatchLookup(out, False, "invalid_contract_id")
+                    if amount_usdd_units is None or from_address is None or to_address is None:
                         continue
-                    out.setdefault(key, []).append(TransferDebitEvidence(
+                    evidence = TransferDebitEvidence(
                         remote_txid=str(tx["txid"]),
-                        from_address=str(from_address).strip(),
-                        to_address=str(to_address).strip(),
+                        contract_id=contract_id,
+                        from_address=from_address,
+                        to_address=to_address,
                         amount_usdd_units=amount_usdd_units,
-                    ))
+                    )
+                    identity = (key, evidence.remote_txid, evidence.contract_id)
+                    previous = seen_contracts.get(identity)
+                    if previous is not None:
+                        if previous != evidence:
+                            return BatchLookup(out, False, "conflicting_contract_identity")
+                        continue
+                    seen_contracts[identity] = evidence
+                    out.setdefault(key, []).append(evidence)
             if len(txs) < page_size:
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as exc:
-            print("Nexus: transfer-debit lookup exception:", redact(str(exc)))
+            _log("nexus_transfer_debit_lookup_failed", level=logging.ERROR, error=redact(str(exc)))
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
@@ -1192,7 +1510,8 @@ def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup
                 cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20)
             )
             if code != 0:
-                print("Nexus: batch debit-by-reference lookup error:", err or cli_out)
+                _log("nexus_debit_reference_lookup_failed", level=logging.ERROR,
+                     error=redact(err or cli_out), reason="cli_error")
                 return BatchLookup(out, False, "cli_error")
             data = _parse_json_lenient(cli_out)
             if isinstance(data, dict) and data.get("error"):
@@ -1224,7 +1543,7 @@ def find_nexus_debits_by_references(references, limit: int = 100) -> BatchLookup
                 # Only a positive txid/reference match is actionable automatically.
                 return BatchLookup(out, False, "not_found_unverified")
         except Exception as e:
-            print("Nexus: batch debit-by-reference lookup exception:", e)
+            _log("nexus_debit_reference_lookup_failed", level=logging.ERROR, error=redact(str(e)))
             return BatchLookup(out, False, "exception")
 
     return BatchLookup(out, False, "pagination_truncated")
@@ -1243,7 +1562,7 @@ def get_circulating_nexus_supply() -> int:
     try:
         code, out, err = _run(cmd, timeout=10)
         if code != 0:
-            print("Nexus Nexus token supply error:", redact(err or out))
+            _log("nexus_token_supply_lookup_failed", level=logging.ERROR, error=redact(err or out))
             return 0
         data = _parse_json_lenient(out)
         # Accept either raw number or an object containing value/amount
@@ -1257,7 +1576,7 @@ def get_circulating_nexus_supply() -> int:
         units = int(dec)
         return units
     except Exception as e:
-        print("Nexus Nexus token supply exception:", e)
+        _log("nexus_token_supply_lookup_failed", level=logging.ERROR, error=redact(str(e)))
         return 0
 
 
@@ -1386,9 +1705,17 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         "version": str(getattr(config, "SERVICE_VERSION", "1.0.0")),
         "contact": str(getattr(config, "SERVICE_CONTACT", "") or "-"),
         # Terms, so a client can compute what they will receive before sending anything.
-        "fee_flat_to_nexus": str(config.FLAT_FEE_USDD),
-        "fee_flat_to_solana": str(config.FLAT_FEE_USDC),
-        "fee_bps": str(int(config.DYNAMIC_FEE_BPS)),
+        # These must share the exact immutable policy used by the payout functions above;
+        # legacy flat-fee aliases remain inputs only during the compatibility migration.
+        "fee_flat_to_nexus": _format_amount_units(
+            config.SWAP_PAIR.fees.flat_to_nexus_units,
+            config.SWAP_PAIR.nexus.decimals,
+        ),
+        "fee_flat_to_solana": _format_amount_units(
+            config.SWAP_PAIR.fees.flat_to_solana_units,
+            config.SWAP_PAIR.solana.decimals,
+        ),
+        "fee_bps": str(int(config.SWAP_PAIR.fees.basis_points)),
         "min_to_nexus": format_solana_units(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
         "min_to_solana": format_nexus_units(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }
@@ -1432,12 +1759,12 @@ def publish_service_record(status: str = "online", last_poll: int | None = None,
     try:
         code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 20))
         if code != 0:
-            print("Nexus: service record update error:", redact(err or out))
+            _log("nexus_service_record_update_failed", level=logging.ERROR, error=redact(err or out))
             return False
         data = _parse_json_lenient(out)
         return bool(isinstance(data, dict) and data.get("success"))
     except Exception as e:
-        print("Nexus: service record update exception:", redact(str(e)))
+        _log("nexus_service_record_update_failed", level=logging.ERROR, error=redact(str(e)))
         return False
 
 
@@ -1482,7 +1809,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: update heartbeat asset error:", redact(err or out))
+            _log("nexus_heartbeat_update_failed", level=logging.ERROR, error=redact(err or out))
             return False
         data = _parse_json_lenient(out)
         if isinstance(data, dict) and data.get("success"):
@@ -1496,7 +1823,7 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
         else:
             return False
     except Exception as e:
-        print("Error updating heartbeat asset:", e)
+        _log("nexus_heartbeat_update_failed", level=logging.ERROR, error=redact(str(e)))
         return False
     
 
@@ -1558,15 +1885,16 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: get heartbeat asset error:", redact(err or out))
+            _log("nexus_heartbeat_lookup_failed", level=logging.ERROR, error=redact(err or out))
             return None
         data = _parse_json_lenient(out)
         if not isinstance(data, dict) or not data.get("address"):
-            print("Nexus: get heartbeat asset failed:", out)
+            _log("nexus_heartbeat_lookup_failed", level=logging.ERROR,
+                 error=redact(out), reason="invalid_response")
             return None
         return data
     except Exception as e:
-        print("Error getting heartbeat asset:", e)
+        _log("nexus_heartbeat_lookup_failed", level=logging.ERROR, error=redact(str(e)))
         return None
 
 
@@ -1604,7 +1932,8 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
         try:
             code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12))
             if code != 0:
-                print(f"Nexus: fetch deposits page {page} error:", err or out)
+                _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
+                     error=redact(err or out))
                 break
             
             txs = _parse_json_lenient(out)
@@ -1657,7 +1986,8 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
                 break  # No more pages
         
         except Exception as e:
-            print(f"Error fetching deposits page {page}:", e)
+            _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
+                 error=redact(str(e)))
             break
     
     return results
@@ -1670,7 +2000,7 @@ def get_last_reference() -> int | None:
     try:
         code, out, err = _run(cmd, timeout=5)
         if code != 0:
-            print("Nexus: get last reference error:", redact(err or out))
+            _log("nexus_reference_lookup_failed", level=logging.ERROR, error=redact(err or out))
             return None
         data = _parse_json_lenient(out)
         txs = data if isinstance(data, list) else [data]
@@ -1692,5 +2022,5 @@ def get_last_reference() -> int | None:
                     continue
         return None
     except Exception as e:
-        print("Error getting last reference:", e)
+        _log("nexus_reference_lookup_failed", level=logging.ERROR, error=redact(str(e)))
         return None

@@ -50,7 +50,7 @@ def _completed_mint_rows(
         return conn.execute(
             """
             SELECT sig, timestamp, amount_usdc_units, txid, amount_usdd_units,
-                   status, reference, nexus_destination, memo
+                   status, reference, nexus_destination, memo, contract_id
             FROM processed_sigs
             WHERE timestamp >= ? AND status LIKE 'debit_confirmed%'
             ORDER BY timestamp ASC
@@ -64,7 +64,7 @@ def _completed_mint_rows(
 
 def _validate_mint_row(row: Tuple) -> Tuple[str | None, str | None]:
     """Return (destination, error).  No REAL values are accepted as evidence."""
-    sig, _ts, solana_units, txid, nexus_units, _status, reference, destination, memo = row
+    sig, _ts, solana_units, txid, nexus_units, _status, reference, destination, memo, contract_id = row
     if not sig:
         return None, "completed mint has no Solana signature"
     if not txid:
@@ -81,8 +81,14 @@ def _validate_mint_row(row: Tuple) -> Tuple[str | None, str | None]:
         nexus_units = _exact_db_integer(nexus_units, f"completed mint {sig} Nexus units")
     except ValueError:
         return None, f"completed mint {sig} has non-integer base-unit evidence"
-    if solana_units < 0 or nexus_units <= 0:
+    if solana_units <= 0 or nexus_units <= 0:
         return None, f"completed mint {sig} has non-positive base-unit evidence"
+    try:
+        exact_contract_id = _exact_db_integer(contract_id, f"completed mint {sig} Nexus contract id")
+    except ValueError:
+        return None, f"completed mint {sig} has no exact Nexus contract identity"
+    if exact_contract_id < 0:
+        return None, f"completed mint {sig} has negative Nexus contract identity"
     # This amount was committed with the debit reference before the Nexus CLI call.
     # Fee policy is mutable, so re-running today's calculation against a historical
     # debit would reject otherwise exact on-chain evidence after a legitimate change.
@@ -158,7 +164,7 @@ def reconcile_account_trades(
 
     minted = expected_from_deposits = 0
     details: List[Dict] = []
-    for sig, ts, solana_units, txid, nexus_units, status, reference, destination, memo in mint_rows:
+    for sig, ts, solana_units, txid, nexus_units, status, reference, destination, memo, contract_id in mint_rows:
         input_units = int(solana_units)
         output_units = int(nexus_units)
         # The confirmed output is the immutable amount fixed with this debit intent.
@@ -373,8 +379,11 @@ def _reconcile_remote_mint_history(
     verified_mint_sources: set[str] = set()
     incomplete: List[str] = []
     completed = completed_rows if completed_rows is not None else _completed_mint_rows(waterline_ts)
+    configured_token_register = str(getattr(config, "NEXUS_TOKEN_REGISTER_ADDRESS", "") or "").strip()
+    if not configured_token_register:
+        return {}, ["configured Nexus token register address is missing"]
     for row in completed:
-        sig, _ts, _solana_units, txid, nexus_units, _status, reference, destination, _memo = row
+        sig, _ts, _solana_units, txid, nexus_units, _status, reference, destination, _memo, contract_id = row
         _valid_destination, error = _validate_mint_row(row)
         if error:
             continue  # already reported by _distinct_mint_recipient_accounts
@@ -382,10 +391,12 @@ def _reconcile_remote_mint_history(
         exact = [
             evidence for evidence in candidates
             if (evidence.remote_txid, evidence.contract_id) not in consumed
+            and evidence.from_address == configured_token_register
+            and evidence.contract_id == contract_id
             and evidence.to_address == str(destination)
             and evidence.amount_usdd_units == int(nexus_units)
             and evidence.reference == str(reference).strip()
-            and evidence.confirmations >= 10
+            and evidence.confirmations >= config.get_nexus_transfer_min_confirmations()
         ]
         if len(exact) != 1:
             incomplete.append(

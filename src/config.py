@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from dotenv import load_dotenv
 from solders.pubkey import Pubkey as PublicKey
 
@@ -11,7 +12,7 @@ REQUIRED_ENV = [
     ("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT"),
     ("SOLANA_TOKEN_MINT", "USDC_MINT"),
     ("NEXUS_PIN",),
-    ("NEXUS_USDD_TREASURY_ACCOUNT",),
+    ("NEXUS_TREASURY_ACCOUNT", "NEXUS_USDD_TREASURY_ACCOUNT"),
     ("SOL_MAIN_ACCOUNT",),
 ]
 for _names in REQUIRED_ENV:
@@ -28,7 +29,8 @@ for _names in REQUIRED_ENV:
 # are accepted, so existing .env files keep working.
 #
 #   Solana side : SOLANA_TOKEN_MINT + SOLANA_VAULT_ACCOUNT  (aliases: USDC_MINT, VAULT_USDC_ACCOUNT)
-#   Nexus  side : NEXUS_TOKEN_NAME  + NEXUS_USDD_TREASURY_ACCOUNT
+#   Nexus  side : NEXUS_TOKEN_NAME + NEXUS_TREASURY_ACCOUNT
+#                  (alias: NEXUS_USDD_TREASURY_ACCOUNT)
 #
 # Internal identifiers now say `solana` and `nexus` rather than naming the original pair.
 # Three categories deliberately keep the old spelling, because in each case the name is
@@ -52,11 +54,29 @@ def _first_env(*names, default=None):
             return v
     return default
 
+
+def _compat_env(canonical: str, legacy: str, *, default: str = "") -> str:
+    """Read a canonical setting or its legacy alias without silently choosing a pair.
+
+    A conflicting token identity, custody account, or precision can direct the Solana and
+    Nexus money paths at a pair other than the one an operator configured.  During the
+    compatibility window both spellings are accepted, but an explicit conflict is a
+    startup error rather than a precedence rule.
+    """
+    canonical_value = os.getenv(canonical)
+    legacy_value = os.getenv(legacy)
+    if canonical_value and legacy_value and canonical_value != legacy_value:
+        raise ValueError(
+            f"Conflicting {canonical}={canonical_value!r} and {legacy}={legacy_value!r}; "
+            "set only one spelling or make both values identical"
+        )
+    return canonical_value or legacy_value or default
+
 # Solana
 RPC_URL = os.getenv("SOLANA_RPC_URL")
 VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
-_vault_acct = _first_env("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT")
-_sol_mint = _first_env("SOLANA_TOKEN_MINT", "USDC_MINT")
+_vault_acct = _compat_env("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT")
+_sol_mint = _compat_env("SOLANA_TOKEN_MINT", "USDC_MINT")
 if not _vault_acct:
     raise ValueError("Required environment variable SOLANA_VAULT_ACCOUNT (or VAULT_USDC_ACCOUNT) is not set")
 if not _sol_mint:
@@ -72,8 +92,8 @@ SOLANA_TOKEN_SYMBOL = os.getenv("SOLANA_TOKEN_SYMBOL", "USDC")
 SOL_MAIN_ACCOUNT = PublicKey.from_string(os.getenv("SOL_MAIN_ACCOUNT"))
 
 # Decimals for each side of the pair
-USDC_DECIMALS = int(_first_env("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS", default="6"))
-USDD_DECIMALS = int(_first_env("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", default="6"))
+USDC_DECIMALS = int(_compat_env("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS", default="6"))
+USDD_DECIMALS = int(_compat_env("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS", default="6"))
 SOLANA_TOKEN_DECIMALS = USDC_DECIMALS
 NEXUS_TOKEN_DECIMALS = USDD_DECIMALS
 
@@ -126,8 +146,14 @@ NEXUS_API_URL = os.getenv("NEXUS_API_URL", "").strip().rstrip("/")
 NEXUS_API_USER = os.getenv("NEXUS_API_USER", "")
 NEXUS_API_PASSWORD = os.getenv("NEXUS_API_PASSWORD", "")
 NEXUS_TOKEN_NAME = os.getenv("NEXUS_TOKEN_NAME", "USDD")
+# Immutable register identity of NEXUS_TOKEN_NAME, resolved from a trusted Nexus
+# node during deployment and recorded explicitly rather than inferred from the
+# mutable/display token label.
+NEXUS_TOKEN_REGISTER_ADDRESS = os.getenv("NEXUS_TOKEN_REGISTER_ADDRESS", "").strip()
 NEXUS_RPC_HOST = os.getenv("NEXUS_RPC_HOST", "http://127.0.0.1:8399")
-NEXUS_USDD_TREASURY_ACCOUNT = os.getenv("NEXUS_USDD_TREASURY_ACCOUNT")
+NEXUS_USDD_TREASURY_ACCOUNT = _compat_env(
+    "NEXUS_TREASURY_ACCOUNT", "NEXUS_USDD_TREASURY_ACCOUNT"
+)
 NEXUS_TREASURY_ACCOUNT = NEXUS_USDD_TREASURY_ACCOUNT  # generic alias
 # Memo prefix a depositor puts on the Solana transfer to name their Nexus destination,
 # e.g. "nexus:8Cuy...". Configurable so an operator can namespace their bridge.
@@ -138,9 +164,15 @@ SERVICE_PROVIDER = os.getenv("SERVICE_PROVIDER", "")          # operator name / 
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "1.0.0")
 SERVICE_CONTACT = os.getenv("SERVICE_CONTACT", "")            # url or contact handle
 NEXUS_USDD_LOCAL_ACCOUNT = os.getenv("NEXUS_USDD_LOCAL_ACCOUNT")
-NEXUS_USDD_QUARANTINE_ACCOUNT = os.getenv("NEXUS_USDD_QUARANTINE_ACCOUNT")
+NEXUS_USDD_QUARANTINE_ACCOUNT = _compat_env(
+    "NEXUS_QUARANTINE_ACCOUNT", "NEXUS_USDD_QUARANTINE_ACCOUNT"
+)
+NEXUS_QUARANTINE_ACCOUNT = NEXUS_USDD_QUARANTINE_ACCOUNT
 # Optional Nexus-side fees account (if you separately account for accrued fees on Nexus)
-NEXUS_USDD_FEES_ACCOUNT = os.getenv("NEXUS_USDD_FEES_ACCOUNT")
+NEXUS_USDD_FEES_ACCOUNT = _compat_env(
+    "NEXUS_FEE_ACCOUNT", "NEXUS_USDD_FEES_ACCOUNT"
+)
+NEXUS_FEE_ACCOUNT = NEXUS_USDD_FEES_ACCOUNT
 NEXUS_PIN = os.getenv("NEXUS_PIN", "")
 # Nexus multiuser mode. With `multiuser=1` in nexus.conf the node supports several
 # signature chains at once, and EVERY call to a user-scoped API (finance/*, assets/*,
@@ -151,7 +183,8 @@ NEXUS_MULTIUSER = os.getenv("NEXUS_MULTIUSER", "false").lower() in ("1", "true",
 # Session id returned by `sessions/create/local` when multiuser=1. Treat as a credential:
 # combined with the PIN it authorises spending.
 NEXUS_SESSION = os.getenv("NEXUS_SESSION", "")
-USDC_FEES_ACCOUNT = os.getenv("USDC_FEES_ACCOUNT")  # deprecated: USDC fees remain in vault
+USDC_FEES_ACCOUNT = _compat_env("SOLANA_FEE_ACCOUNT", "USDC_FEES_ACCOUNT")
+SOLANA_FEE_ACCOUNT = USDC_FEES_ACCOUNT  # empty means fees remain in the vault
 
 # Polling & State
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))  # legacy/global fallback
@@ -191,7 +224,31 @@ METRICS_INTERVAL_SEC = int(os.getenv("METRICS_INTERVAL_SEC", "30"))
 REFUND_TIMEOUT_SEC = int(os.getenv("REFUND_TIMEOUT_SEC", "3600"))  # 1 hour default
 STALE_DEPOSIT_QUARANTINE_SEC = int(os.getenv("STALE_DEPOSIT_QUARANTINE_SEC", "86400"))  # 24h default
 SOLANA_CONFIRM_TIMEOUT_SEC = int(_first_env("SOLANA_CONFIRM_TIMEOUT_SEC",
-                                            "USDC_CONFIRM_TIMEOUT_SEC", default="600"))  # 10 minutes default for Nexus->Solana confirmations
+                                             "USDC_CONFIRM_TIMEOUT_SEC", default="600"))  # 10 minutes default for Nexus->Solana confirmations
+# A direct ledger txid read remains non-terminal until this many Nexus confirmations.
+def _positive_int_env(name: str, default: str) -> int:
+    """Read an integer safety threshold, refusing values that disable the control."""
+    raw = os.getenv(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def get_nexus_transfer_min_confirmations() -> int:
+    """Return the active Nexus finality policy, rejecting runtime corruption too."""
+    value = NEXUS_TRANSFER_MIN_CONFIRMATIONS
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("NEXUS_TRANSFER_MIN_CONFIRMATIONS must be a positive integer")
+    return value
+
+
+NEXUS_TRANSFER_MIN_CONFIRMATIONS = _positive_int_env(
+    "NEXUS_TRANSFER_MIN_CONFIRMATIONS", "10"
+)
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() in ("1","true","yes","on")
@@ -211,10 +268,21 @@ HEARTBEAT_WATERLINE_SAFETY_SEC = int(os.getenv("HEARTBEAT_WATERLINE_SAFETY_SEC",
 # Fees are configured in whole-token values, then represented independently in the
 # base units of every chain-side operation they govern.  Do not re-use an amount
 # expressed on one chain for a threshold or payout on the other: the decimals may differ.
-# - FLAT_FEE_USDC: Charged on Nexus->Solana payouts.
-# - FLAT_FEE_USDD: Charged on Solana->Nexus payouts and deducted from a Solana refund.
-FLAT_FEE_USDC = os.getenv("FLAT_FEE_USDC", "0.5")
-FLAT_FEE_USDD = os.getenv("FLAT_FEE_USDD", "0.1")
+# - FEE_FLAT_TO_SOLANA (legacy FLAT_FEE_USDC): Nexus->Solana output fee.
+# - FEE_FLAT_TO_NEXUS (legacy FLAT_FEE_USDD): Solana->Nexus output fee.
+# - FEE_REFUND_SOLANA (legacy FLAT_FEE_USDD): Solana-side refund fee.
+#
+# The old USDD fee supplied both the Nexus-output and Solana-refund fees.  Retaining it
+# as the fallback preserves existing deployments while allowing canonical configuration
+# to state the two independently.
+FLAT_FEE_TO_SOLANA = _compat_env("FEE_FLAT_TO_SOLANA", "FLAT_FEE_USDC", default="0.5")
+FLAT_FEE_TO_NEXUS = _compat_env("FEE_FLAT_TO_NEXUS", "FLAT_FEE_USDD", default="0.1")
+FEE_REFUND_SOLANA = _compat_env(
+    "FEE_REFUND_SOLANA", "FLAT_FEE_USDD", default=FLAT_FEE_TO_NEXUS
+)
+# Compatibility attributes for existing callers. New code should consume SWAP_PAIR.
+FLAT_FEE_USDC = FLAT_FEE_TO_SOLANA
+FLAT_FEE_USDD = FLAT_FEE_TO_NEXUS
 
 def _to_units(s: str, decimals: int) -> int:
     """Parse an operator token value only if it is exactly representable on-chain."""
@@ -226,19 +294,20 @@ def _to_units(s: str, decimals: int) -> int:
     return int(integral)
 
 # Fee charged on an output sent to Nexus, in Nexus base units.
-FLAT_FEE_TO_NEXUS_UNITS = _to_units(FLAT_FEE_USDD, USDD_DECIMALS)
+FLAT_FEE_TO_NEXUS_UNITS = _to_units(FLAT_FEE_TO_NEXUS, USDD_DECIMALS)
 # Fee charged on an output sent to Solana, in Solana base units.
-FLAT_FEE_TO_SOLANA_UNITS = _to_units(FLAT_FEE_USDC, USDC_DECIMALS)
+FLAT_FEE_TO_SOLANA_UNITS = _to_units(FLAT_FEE_TO_SOLANA, USDC_DECIMALS)
 # A failed Solana deposit is returned on Solana, so its USDD-denominated refund fee
 # must be represented in Solana base units, not Nexus base units.
-FLAT_FEE_REFUND_SOLANA_UNITS = _to_units(FLAT_FEE_USDD, USDC_DECIMALS)
+FLAT_FEE_REFUND_SOLANA_UNITS = _to_units(FEE_REFUND_SOLANA, USDC_DECIMALS)
 # The Solana-output fee re-expressed in Nexus base units for Nexus-side input thresholds.
-FLAT_FEE_TO_SOLANA_NEXUS_UNITS = _to_units(FLAT_FEE_USDC, USDD_DECIMALS)
+FLAT_FEE_TO_SOLANA_NEXUS_UNITS = _to_units(FLAT_FEE_TO_SOLANA, USDD_DECIMALS)
 
 # A single bps rate is deliberately applied to the input of each direction.  Callers use
 # direction-named helpers/inputs so the source scale is explicit: Nexus units for a
 # Nexus->Solana payout and Solana units for a Solana->Nexus payout.
-DYNAMIC_FEE_BPS = int(os.getenv("DYNAMIC_FEE_BPS", "10"))  # 10 bps = 0.1%
+FEE_BPS = int(_compat_env("FEE_BPS", "DYNAMIC_FEE_BPS", default="10"))
+DYNAMIC_FEE_BPS = FEE_BPS  # compatibility attribute for existing callers
 FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
 
 # Nexus congestion fee for Nexus refunds (token units)
@@ -300,7 +369,10 @@ BACKING_DEFICIT_PAUSE_PCT = int(os.getenv("BACKING_DEFICIT_PAUSE_PCT", "90"))  #
 BACKING_RECONCILE_INTERVAL_SEC = int(os.getenv("BACKING_RECONCILE_INTERVAL_SEC", "3600"))  # minimum spacing between read-only surplus alerts
 
 # Quarantine account for failed refunds (token account we own)
-USDC_QUARANTINE_ACCOUNT = os.getenv("USDC_QUARANTINE_ACCOUNT")
+USDC_QUARANTINE_ACCOUNT = _compat_env(
+    "SOLANA_QUARANTINE_ACCOUNT", "USDC_QUARANTINE_ACCOUNT"
+)
+SOLANA_QUARANTINE_ACCOUNT = USDC_QUARANTINE_ACCOUNT
 
 # --- Production safety gate -----------------------------------------------------------
 # Development/test deployments intentionally permit disabled caps and stdout-only alerts.
@@ -353,3 +425,71 @@ try:
     BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS = int((_D(_SURPLUS_THRESH_SOLANA) * (_D(10) ** USDC_DECIMALS)).to_integral_value())
 except Exception:
     BACKING_SURPLUS_MINT_THRESHOLD_SOLANA_UNITS = 20 * (10 ** USDC_DECIMALS)
+
+
+# --- Canonical token-pair configuration ----------------------------------------------
+# This immutable object is the Batch 7 compatibility boundary.  It groups canonical
+# identities, custody and exact fee terms assembled at startup, while the old module
+# attributes remain aliases until every caller and persisted schema can migrate safely.
+# A symbol is display metadata; money paths must use ``mint`` or ``register_address``.
+@dataclass(frozen=True)
+class SolanaTokenConfig:
+    mint: str
+    symbol: str
+    decimals: int
+    vault_account: str
+    quarantine_account: str
+    fee_account: str
+
+
+@dataclass(frozen=True)
+class NexusTokenConfig:
+    register_address: str
+    symbol: str
+    decimals: int
+    treasury_account: str
+    quarantine_account: str
+    fee_account: str
+
+
+@dataclass(frozen=True)
+class FeePolicy:
+    flat_to_nexus_units: int
+    flat_to_solana_units: int
+    refund_solana_units: int
+    basis_points: int
+
+
+@dataclass(frozen=True)
+class SwapPairConfig:
+    solana: SolanaTokenConfig
+    nexus: NexusTokenConfig
+    fees: FeePolicy
+    deposit_memo_prefix: str
+
+
+SWAP_PAIR = SwapPairConfig(
+    solana=SolanaTokenConfig(
+        mint=str(SOLANA_TOKEN_MINT),
+        symbol=SOLANA_TOKEN_SYMBOL,
+        decimals=SOLANA_TOKEN_DECIMALS,
+        vault_account=str(SOLANA_VAULT_ACCOUNT),
+        quarantine_account=str(SOLANA_QUARANTINE_ACCOUNT or ""),
+        fee_account=str(SOLANA_FEE_ACCOUNT or ""),
+    ),
+    nexus=NexusTokenConfig(
+        register_address=NEXUS_TOKEN_REGISTER_ADDRESS,
+        symbol=NEXUS_TOKEN_NAME,
+        decimals=NEXUS_TOKEN_DECIMALS,
+        treasury_account=str(NEXUS_TREASURY_ACCOUNT),
+        quarantine_account=str(NEXUS_QUARANTINE_ACCOUNT or ""),
+        fee_account=str(NEXUS_FEE_ACCOUNT or ""),
+    ),
+    fees=FeePolicy(
+        flat_to_nexus_units=FLAT_FEE_TO_NEXUS_UNITS,
+        flat_to_solana_units=FLAT_FEE_TO_SOLANA_UNITS,
+        refund_solana_units=FLAT_FEE_REFUND_SOLANA_UNITS,
+        basis_points=FEE_BPS,
+    ),
+    deposit_memo_prefix=DEPOSIT_MEMO_PREFIX,
+)

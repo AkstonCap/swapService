@@ -1,6 +1,7 @@
 from asyncio import timeout
 import json
 import base64
+import logging
 from time import time
 from typing import Optional
 import os
@@ -17,7 +18,19 @@ import threading, queue
 from . import state_db, nexus_client
 import time
 
-from . import config
+from . import config, structured_logging
+
+
+_LOG = structured_logging.get_logger("swapService.solana_client")
+
+
+def _log(event: str, *, level: int = logging.INFO, **fields) -> None:
+    """Best-effort secret-safe diagnostics that cannot alter payout state transitions."""
+    try:
+        structured_logging.emit(_LOG, level, event, **fields)
+    except Exception:
+        pass
+
 
 # Expose last sent signature for higher-level idempotency logging (refund / quarantine / debit flows)
 last_sent_sig: str | None = None
@@ -235,7 +248,7 @@ def fetch_incoming_deposits_via_helius(
         return helius_result
     
     # Fallback to core RPC (slow path: N+1 API calls)
-    print("[HELIUS_FALLBACK] Helius unavailable, using core RPC (slower)")
+    _log("solana_helius_fallback", level=logging.WARNING, fallback="core_rpc")
     return _fetch_deposits_core_rpc(token_account_addr, since_ts, min_units, limit)
 
 
@@ -330,7 +343,7 @@ def _fetch_deposits_helius(
         collected.sort(key=lambda r: r[1])
         return collected
     except Exception as e:
-        print(f"[HELIUS_ERROR] {e}")
+        _log("solana_helius_fetch_failed", level=logging.WARNING, error=str(e))
         return None  # Signal fallback needed
 
 
@@ -450,7 +463,7 @@ def _fetch_deposits_core_rpc(
         return collected
         
     except Exception as e:
-        print(f"[CORE_RPC_ERROR] {e}")
+        _log("solana_core_rpc_fetch_failed", level=logging.ERROR, error=str(e))
         return []
     
 
@@ -489,8 +502,8 @@ def process_helius_deposits(deposits: list, db_check: bool = True) -> tuple:
             finalized = get_signatures_confirmation(big_sigs)
             require_final = {s for s in big_sigs if not finalized.get(s)}
             if require_final:
-                print(f"[FINALITY_HOLD] {len(require_final)} large deposit(s) not yet finalized; "
-                      f"deferring until they are")
+                _log("solana_deposits_finality_held", level=logging.WARNING,
+                     deferred_count=len(require_final), reason="not_finalized")
 
     added = 0
     oldest_deferred_ts = None
@@ -646,7 +659,8 @@ def process_unprocessed_solana_deposits(limit: int = 1000, timeout: float = 8.0)
             except Exception as e:
                 # Timeout or transport failure: the debit may still have executed.
                 state_db.update_unprocessed_sig_status(sig, "debit unverified")
-                print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} error={e} - awaiting chain verification")
+                _log("nexus_debit_outcome_unknown", level=logging.WARNING, sig=sig,
+                     reference=reference, error=str(e))
                 continue
 
             if result[0] and result[1]:
@@ -658,9 +672,10 @@ def process_unprocessed_solana_deposits(limit: int = 1000, timeout: float = 8.0)
                 # AMBIGUOUS - debit_nexus_token_with_txid returns (False, None) when the call
                 # succeeded but no txid could be parsed. Never refund on this signal.
                 state_db.update_unprocessed_sig_status(sig, "debit unverified")
-                print(f"[DEBIT_AMBIGUOUS] sig={sig} ref={reference} - outcome unknown, awaiting chain verification")
+                _log("nexus_debit_outcome_unknown", level=logging.WARNING, sig=sig,
+                     reference=reference, reason="missing_remote_txid")
         except Exception as e:
-            print(f"Error processing deposit {sig}: {e}")
+            _log("solana_deposit_processing_failed", level=logging.ERROR, sig=sig, error=str(e))
             continue
 
         current_timestamp = time.monotonic()
@@ -809,7 +824,7 @@ def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -
                 sig_r = send_solana_token(from_address, net_amount, memo=f"refundSig:{sig}")
             except PayoutCapExceeded as e:
                 # Throttled, not failed: leave status as "to be refunded" and retry later.
-                print(f"[REFUND_DEFERRED] sig={sig} {e}")
+                _log("solana_refund_deferred", level=logging.WARNING, sig=sig, reason=str(e))
                 continue
             if sig_r[0]:
                 processed_count += 1
@@ -830,7 +845,7 @@ def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -
                 continue
 
         except Exception as e:
-            print(f"Error processing deposit {sig}: {e}")
+            _log("solana_refund_processing_failed", level=logging.ERROR, sig=sig, error=str(e))
             continue
 
         current_timestamp = time.monotonic()
@@ -912,7 +927,7 @@ def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0)
             try:
                 sig_q = send_solana_token(config.USDC_QUARANTINE_ACCOUNT, net_amount, memo=f"quarantinedSig:{sig}")
             except PayoutCapExceeded as e:
-                print(f"[QUARANTINE_DEFERRED] sig={sig} {e}")
+                _log("solana_quarantine_deferred", level=logging.WARNING, sig=sig, reason=str(e))
                 continue
             if sig_q[0]:
                 processed_count += 1
@@ -935,7 +950,7 @@ def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0)
                 continue
 
         except Exception as e:
-            print(f"Error processing deposit {sig}: {e}")
+            _log("solana_quarantine_processing_failed", level=logging.ERROR, sig=sig, error=str(e))
             continue
 
         current_timestamp = time.monotonic()
@@ -993,7 +1008,8 @@ def send_solana_token(destination: str, amount_base_units: int, memo: str | None
                 owner_pubkey = PublicKey.from_string(destination)
                 dest_token_account = str(get_associated_token_address(owner=owner_pubkey, mint=config.USDC_MINT))
             except Exception as e:
-                print(f"Error deriving ATA for {destination}: {e}")
+                _log("solana_payout_destination_invalid", level=logging.WARNING,
+                     destination=destination, error=str(e))
                 return False, None
         
         # Build transfer instruction
@@ -1021,13 +1037,15 @@ def send_solana_token(destination: str, amount_base_units: int, memo: str | None
         try:
             state_db.record_payout("solana_send", int(amount_base_units), sig)
         except Exception as e:
-            print(f"[payout_ledger] failed to record payout {sig}: {e}")
+            _log("solana_payout_ledger_record_failed", level=logging.ERROR, signature=sig, error=str(e))
 
-        print(f"Sent {config.SOLANA_TOKEN_SYMBOL} tx sig: {sig}")
+        _log("solana_payout_submitted", signature=sig, amount_units=int(amount_base_units),
+             token=config.SOLANA_TOKEN_SYMBOL)
         return True, sig
 
     except Exception as e:
-        print(f"Error sending {config.SOLANA_TOKEN_SYMBOL}: {e}")
+        _log("solana_payout_submission_failed", level=logging.ERROR,
+             token=config.SOLANA_TOKEN_SYMBOL, error=str(e))
         return False, None
 
 
@@ -1122,9 +1140,10 @@ def check_sig_confirmations(min_confirmations: int, timeout: float) -> int:
                 state_db.remove_unprocessed_sig(deposit_sig)
                 
                 processed_count += 1
-                print(f"Refund confirmed for deposit {deposit_sig}, refund tx {refund_sig}")
+                _log("solana_refund_confirmed", deposit_sig=deposit_sig, refund_signature=refund_sig)
             except Exception as e:
-                print(f"Error marking refund confirmed for {deposit_sig}: {e}")
+                _log("solana_refund_confirmation_persist_failed", level=logging.ERROR,
+                     deposit_sig=deposit_sig, error=str(e))
         # If confirmations is None, skip (not confirmed yet)
 
     return processed_count
@@ -1176,9 +1195,11 @@ def check_quarantine_confirmations(min_confirmations: int, timeout: float) -> in
                 state_db.remove_unprocessed_sig(deposit_sig)
                 
                 processed_count += 1
-                print(f"Quarantine confirmed for deposit {deposit_sig}, quarantine tx {quarantine_sig}")
+                _log("solana_quarantine_confirmed", deposit_sig=deposit_sig,
+                     quarantine_signature=quarantine_sig)
             except Exception as e:
-                print(f"Error marking quarantine confirmed for {deposit_sig}: {e}")
+                _log("solana_quarantine_confirmation_persist_failed", level=logging.ERROR,
+                     deposit_sig=deposit_sig, error=str(e))
         # If confirmations is None, skip (not confirmed yet)
 
     return processed_count
@@ -1391,10 +1412,11 @@ def transfer_solana_token_between_accounts(source_token_account: str, dest_token
             signers=[],
         )
         sig = _build_and_send_legacy_tx([ix], kp)
-        print(f"Token transfer token->token sig: {sig}")
+        _log("solana_internal_transfer_submitted", signature=sig,
+             amount_units=int(amount_base_units))
         return True
     except Exception as e:
-        print(f"Error transferring between token accounts: {e}")
+        _log("solana_internal_transfer_failed", level=logging.ERROR, error=str(e))
         return False
 
 
@@ -1422,7 +1444,8 @@ def check_timestamp_unpr_sigs() -> int | None:
     
     # Propose the new waterline
     state_db.propose_solana_waterline(new_waterline)
-    print(f"Proposed new waterline: {new_waterline} (based on oldest unprocessed sig timestamp: {oldest_timestamp})")
+    _log("solana_waterline_proposed", proposed_waterline=new_waterline,
+         oldest_unprocessed_timestamp=oldest_timestamp)
     
     return new_waterline
 
@@ -1453,7 +1476,7 @@ def swap_token_for_sol_via_jupiter(amount_solana_base_units: int, slippage_bps: 
         qd = q.json()
         routes = qd.get("data") or []
         if not routes:
-            print("[fees] Jupiter: no route found")
+            _log("solana_jupiter_route_unavailable", level=logging.WARNING)
             return False
         route = routes[0]
 
@@ -1471,7 +1494,7 @@ def swap_token_for_sol_via_jupiter(amount_solana_base_units: int, slippage_bps: 
         sd = s.json()
         swap_tx_b64 = sd.get("swapTransaction")
         if not swap_tx_b64:
-            print("[fees] Jupiter: missing swapTransaction")
+            _log("solana_jupiter_swap_missing_transaction", level=logging.ERROR)
             return False
 
         tx_bytes = base64.b64decode(swap_tx_b64)
@@ -1481,16 +1504,17 @@ def swap_token_for_sol_via_jupiter(amount_solana_base_units: int, slippage_bps: 
         send_resp = client.send_raw_transaction(raw)
         sig = _rpc_get_result(send_resp)
         if not isinstance(sig, str):
-            print("[fees] Jupiter: unexpected send response")
+            _log("solana_jupiter_swap_invalid_response", level=logging.ERROR)
             return False
         try:
             client.confirm_transaction(sig, commitment="confirmed")
         except Exception:
             pass
-        print(f"[fees] Jupiter swap sent: {sig}")
+        _log("solana_jupiter_swap_submitted", signature=sig,
+             amount_units=int(amount_solana_base_units))
         return True
     except Exception as e:
-        print(f"[fees] Jupiter swap error: {e}")
+        _log("solana_jupiter_swap_failed", level=logging.ERROR, error=str(e))
         return False
 
 
@@ -1507,8 +1531,8 @@ def ensure_send_token(to_owner_addr: str, amount_base_units: int, memo: str | No
         client = _get_client()
         ata_info = _rpc_get_value(_rpc_call(client.get_account_info, dest_ata))
         if ata_info is None:
-            print("Recipient associated token account is missing; not creating it. "
-                  "Ask the recipient to initialize it.")
+            _log("solana_recipient_ata_missing", level=logging.WARNING,
+                 destination=to_owner_addr)
             return False
         if amount_base_units <= 0:
             return True
@@ -1526,10 +1550,12 @@ def ensure_send_token(to_owner_addr: str, amount_base_units: int, memo: str | No
         if mix:
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Sent {config.SOLANA_TOKEN_SYMBOL} tx sig: {sig}")
+        _log("solana_owner_payout_submitted", signature=sig, destination=to_owner_addr,
+             amount_units=int(amount_base_units), token=config.SOLANA_TOKEN_SYMBOL)
         return True
     except Exception as e:
-        print(f"Error sending {config.SOLANA_TOKEN_SYMBOL}: {e}")
+        _log("solana_owner_payout_failed", level=logging.ERROR,
+             destination=to_owner_addr, token=config.SOLANA_TOKEN_SYMBOL, error=str(e))
         return False
 
 
@@ -1556,7 +1582,8 @@ def send_solana_token_to_account_with_sig(dest_token_account_addr: str, amount_b
         if amount_base_units <= 0:
             return True, None
         if not _is_token_account_for_mint(dest_token_account_addr, config.USDC_MINT):
-            print("Destination is not a valid token account for the configured mint")
+            _log("solana_payout_destination_invalid", level=logging.WARNING,
+                 destination=dest_token_account_addr, reason="wrong_token_account_or_mint")
             return False, None
         kp = load_vault_keypair()
         dest = PublicKey.from_string(dest_token_account_addr)
@@ -1576,7 +1603,9 @@ def send_solana_token_to_account_with_sig(dest_token_account_addr: str, amount_b
         if mix:
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Sent {config.SOLANA_TOKEN_SYMBOL} to token account tx sig: {sig}")
+        _log("solana_token_account_payout_submitted", signature=sig,
+             destination=dest_token_account_addr, amount_units=int(amount_base_units),
+             token=config.SOLANA_TOKEN_SYMBOL)
 
         # Mark processed based on memo form for future idempotency.
         # "usdc_sent" is a persisted `processed_txids.status` value, frozen for the same
@@ -1594,7 +1623,7 @@ def send_solana_token_to_account_with_sig(dest_token_account_addr: str, amount_b
         
         return True, sig
     except Exception as e:
-        print(f"Error sending to token account: {e}")
+        _log("solana_token_account_payout_failed", level=logging.ERROR, error=str(e))
         return False, None
 
 
@@ -1610,7 +1639,8 @@ def ensure_send_token_owner_or_ata(addr_maybe_owner_or_token: str, amount_base_u
             return ensure_send_token_to_account(addr_maybe_owner_or_token, amount_base_units, memo)
         return ensure_send_token(addr_maybe_owner_or_token, amount_base_units, memo)
     except Exception as e:
-        print(f"Error in ensure_send_token_owner_or_ata: {e}")
+        _log("solana_recipient_resolution_failed", level=logging.ERROR,
+             destination=addr_maybe_owner_or_token, error=str(e))
         return False
 
 
@@ -1956,7 +1986,7 @@ def scan_memos_since_timestamp(since_timestamp: int, max_signatures: int = 10000
                 break  # No more signatures available
             
         except Exception as e:
-            print(f"Error scanning signatures: {e}")
+            _log("solana_memo_scan_failed", level=logging.ERROR, error=str(e))
             break
     
     return out
@@ -2018,10 +2048,12 @@ def refund_solana_token_to_source(source_token_account: str, amount_base_units: 
         if memo_ix:
             ixs.append(memo_ix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Refunded tx sig: {sig}")  # retain basic trace
+        _log("solana_refund_submitted", signature=sig, amount_units=int(amount_base_units),
+             deposit_sig=deposit_sig)
         return True
     except Exception as e:
-        print(f"Error refunding {config.SOLANA_TOKEN_SYMBOL}: {e}")
+        _log("solana_refund_submission_failed", level=logging.ERROR,
+             token=config.SOLANA_TOKEN_SYMBOL, error=str(e))
         return False
 
 
@@ -2035,7 +2067,7 @@ def move_solana_token_to_quarantine(amount_base_units: int, note: str | None = N
     try:
         dest = getattr(config, "USDC_QUARANTINE_ACCOUNT", None)
         if not dest:
-            print("Quarantine account not configured; skipping move")
+            _log("solana_quarantine_not_configured", level=logging.ERROR)
             return False
         kp = load_vault_keypair()
         ixs = [
@@ -2061,8 +2093,9 @@ def move_solana_token_to_quarantine(amount_base_units: int, note: str | None = N
         if mix:
             ixs.append(mix)
         sig = _build_and_send_legacy_tx(ixs, kp)
-        print(f"Moved {config.SOLANA_TOKEN_SYMBOL} to quarantine, sig: {sig} memo={memo_txt}")
+        _log("solana_quarantine_submitted", signature=sig, amount_units=int(amount_base_units),
+             memo=memo_txt)
         return True
     except Exception as e:
-        print(f"Error moving funds to quarantine: {e}")
+        _log("solana_quarantine_submission_failed", level=logging.ERROR, error=str(e))
     return False

@@ -42,6 +42,15 @@
 > development mode. A valid production admission-control rejection returns non-zero from
 > the service entrypoint. The historical review above retains the finding as evidence; see
 > [`EVALUATION.md`](EVALUATION.md) for the current remediation status.
+>
+> **Weekly review update (2026-08-31, `cc175cb`):** reconciliation pause,
+> strict production-mode parsing, non-zero admission refusal and submitted-txid
+> immutability are closed locally. Deployment remains hard-blocked. Empty
+> successful Nexus enumeration still advances the checkpoint; multiple exact
+> contracts in one txid collapse to one debit; a confirmed mint txid is not read
+> back for full contract terms; one-page reconciliation cannot scale; and the
+> target-chain crash/pagination/finality matrix remains unrun. See
+> [`DEVELOPMENT_REVIEW_2026-08-31.md`](DEVELOPMENT_REVIEW_2026-08-31.md).
 
 **Method:** Static review of the money paths, state machine, polling loop, recovery logic, helper tooling, configuration, and documentation, plus targeted reasoning about Solana/Nexus finality and SQLite semantics. Arithmetic and SQL claims were executed in isolation to confirm them. **No live run was possible** — the runtime dependencies (`solana`, `solders`, `python-dotenv`) and RPC/Nexus access are unavailable in this environment.
 
@@ -77,6 +86,25 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 > configured heartbeat field names, and that Helius honours `commitment` on
 > `getTransactionsForAddress`. Treat the correct claim as **"no known defects remain"**,
 > not "verified correct". See §9.
+
+> ### Current independent status (2026-09-02, reviewed `8f9a30f`)
+>
+> The suite is green, and `e810e5d` locally closes the completed-mint
+> source/contract matching defect and adds a confirmation threshold to direct txid
+> resolution. This does **not** clear production. High release gates remain:
+>
+> 1. `NEXUS_TRANSFER_MIN_CONFIRMATIONS` is not constrained above zero, so a
+>    non-positive configuration can terminalize zero-confirmation evidence;
+> 2. reference-only unknown outcomes have no complete stable-range/finality evidence
+>    path and must remain held;
+> 3. completed-mint validation accepts zero Solana input with positive Nexus output,
+>    allowing internally consistent but economically unbacked evidence to reconcile;
+> 4. one-page/live-offset history semantics, equal timestamps, concurrent inserts,
+>    malformed target responses and both-chain finality have not passed the target-node
+>    matrix.
+>
+> No automated Nexus refund or quarantine transfer should be enabled, and no real funds
+> should be admitted, until `DEVELOPMENT_REVIEW_2026-09-02.md` exit criteria pass.
 
 | Tier | Theme | Count |
 |------|-------|-------|

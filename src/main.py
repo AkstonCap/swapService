@@ -109,10 +109,22 @@ def validate_production_controls() -> bool:
         missing.append("USDC_QUARANTINE_ACCOUNT")
     if not str(getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "") or "").strip():
         missing.append("NEXUS_USDD_QUARANTINE_ACCOUNT")
+    # A ticker is presentation metadata: it is mutable and can collide.  Nexus debit
+    # confirmation and reconciliation compare this configured immutable register address,
+    # so production cannot safely run without it.
+    if not str(getattr(config, "NEXUS_TOKEN_REGISTER_ADDRESS", "") or "").strip():
+        missing.append("NEXUS_TOKEN_REGISTER_ADDRESS")
     # The CLI accepts PIN/session only as argv parameters. Production must use the
     # equivalent HTTPS POST transport, which keeps these spending credentials out of
     # process listings while preserving Nexus' Basic API authentication boundary.
     missing.extend(nexus_api_transport_errors())
+    # A multiuser Nexus node rejects every session-scoped finance/assets call without
+    # the session returned by sessions/create/local. Treat that as a production
+    # admission failure rather than discovering it only after SQLite is opened and a
+    # poller has begun processing Solana-side deposits.
+    if (getattr(config, "NEXUS_MULTIUSER", False)
+            and not str(getattr(config, "NEXUS_SESSION", "") or "").strip()):
+        missing.append("NEXUS_SESSION (required when NEXUS_MULTIUSER=true)")
 
     if not missing:
         return True

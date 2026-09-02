@@ -12,7 +12,8 @@ Configuration reference: **`CONFIG.md`**.
 | Document | Status | Read it for |
 |----------|--------|-------------|
 | [`docs/EVALUATION.md`](docs/EVALUATION.md) | **Current remediation plan** | Authoritative issue register, severity, repair priority, exit criteria and deployment definition. |
-| [`docs/DEVELOPMENT_REVIEW_2026-08-29.md`](docs/DEVELOPMENT_REVIEW_2026-08-29.md) | **Current weekly review** | Review of committed controls through `5e7d3b8` and the separate, not-commit-ready staged reconciliation proposal. |
+| [`docs/DEVELOPMENT_REVIEW_2026-08-31.md`](docs/DEVELOPMENT_REVIEW_2026-08-31.md) | **Current weekly review** | Independent review through `cc175cb`; production remains hard-blocked by checkpoint and exact-debit evidence gaps. |
+| [`docs/DEVELOPMENT_REVIEW_2026-08-29.md`](docs/DEVELOPMENT_REVIEW_2026-08-29.md) | Review history | Review of committed controls through `5e7d3b8` and the separate staged reconciliation proposal. |
 | [`docs/DEVELOPMENT_REVIEW_2026-08-28.md`](docs/DEVELOPMENT_REVIEW_2026-08-28.md) | Review history | Evidence-backed review of the preceding repair series through `f614897`. |
 | [`docs/POST_CHANGE_REVIEW_2026-08-24.md`](docs/POST_CHANGE_REVIEW_2026-08-24.md) | Review evidence | Independent/static review evidence for commit `1e4f20c` that feeds the current evaluation. |
 | [`docs/DEVELOPMENT_REVIEW_2026-08-24.md`](docs/DEVELOPMENT_REVIEW_2026-08-24.md) | Fix history | Original review, Critical findings, and the repair sequence that led to `1e4f20c`. |
