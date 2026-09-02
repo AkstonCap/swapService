@@ -344,8 +344,9 @@ def get_nexus_send_amount_units(amount_solana_units: int) -> int:
     Nexus-unit domain.
     """
     gross_nexus_units = config.solana_units_to_nexus(int(amount_solana_units), round_up=False)
-    dynamic_fee = _dynamic_fee_units(gross_nexus_units, config.DYNAMIC_FEE_BPS)
-    return max(0, gross_nexus_units - int(config.FLAT_FEE_TO_NEXUS_UNITS) - dynamic_fee)
+    fee_policy = config.SWAP_PAIR.fees
+    dynamic_fee = _dynamic_fee_units(gross_nexus_units, fee_policy.basis_points)
+    return max(0, gross_nexus_units - int(fee_policy.flat_to_nexus_units) - dynamic_fee)
 
 
 def get_solana_send_amount_units(amount_nexus_units: int) -> int:
@@ -356,8 +357,9 @@ def get_solana_send_amount_units(amount_nexus_units: int) -> int:
     decimal mismatch can never cause an overpayment.
     """
     gross_solana_units = config.nexus_units_to_solana(int(amount_nexus_units), round_up=False)
-    dynamic_fee = _dynamic_fee_units(gross_solana_units, config.DYNAMIC_FEE_BPS)
-    return max(0, gross_solana_units - int(config.FLAT_FEE_TO_SOLANA_UNITS) - dynamic_fee)
+    fee_policy = config.SWAP_PAIR.fees
+    dynamic_fee = _dynamic_fee_units(gross_solana_units, fee_policy.basis_points)
+    return max(0, gross_solana_units - int(fee_policy.flat_to_solana_units) - dynamic_fee)
 
 
 def get_nexus_send_amount(amount_solana: int) -> Decimal:
@@ -1703,9 +1705,17 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         "version": str(getattr(config, "SERVICE_VERSION", "1.0.0")),
         "contact": str(getattr(config, "SERVICE_CONTACT", "") or "-"),
         # Terms, so a client can compute what they will receive before sending anything.
-        "fee_flat_to_nexus": str(config.FLAT_FEE_USDD),
-        "fee_flat_to_solana": str(config.FLAT_FEE_USDC),
-        "fee_bps": str(int(config.DYNAMIC_FEE_BPS)),
+        # These must share the exact immutable policy used by the payout functions above;
+        # legacy flat-fee aliases remain inputs only during the compatibility migration.
+        "fee_flat_to_nexus": _format_amount_units(
+            config.SWAP_PAIR.fees.flat_to_nexus_units,
+            config.SWAP_PAIR.nexus.decimals,
+        ),
+        "fee_flat_to_solana": _format_amount_units(
+            config.SWAP_PAIR.fees.flat_to_solana_units,
+            config.SWAP_PAIR.solana.decimals,
+        ),
+        "fee_bps": str(int(config.SWAP_PAIR.fees.basis_points)),
         "min_to_nexus": format_solana_units(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
         "min_to_solana": format_nexus_units(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }

@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from typing import cast
 from unittest.mock import call, patch
@@ -70,6 +71,47 @@ from src import (  # noqa: E402
 
 
 class CriticalSafetyTests(unittest.TestCase):
+    def test_canonical_fee_policy_controls_bidirectional_payout_math(self):
+        """Payout math must consume the immutable pair policy, not legacy aliases."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_nexus_units=250,
+                flat_to_solana_units=350,
+                basis_points=100,
+            ),
+        )
+
+        with patch.object(config, "SWAP_PAIR", pair):
+            self.assertEqual(
+                nexus_client.get_nexus_send_amount_units(10_000_000),
+                9_899_750,
+            )
+            self.assertEqual(
+                nexus_client.get_solana_send_amount_units(10_000_000),
+                9_899_650,
+            )
+
+    def test_service_record_terms_use_canonical_pair_fee_policy(self):
+        """Nexus heartbeat terms must advertise the same policy that pays Solana users."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_nexus_units=250,
+                flat_to_solana_units=350,
+                basis_points=100,
+            ),
+        )
+
+        with patch.object(config, "SWAP_PAIR", pair):
+            record = nexus_client.build_service_record(last_poll=1)
+
+        self.assertEqual(record["fee_flat_to_nexus"], "0.00025")
+        self.assertEqual(record["fee_flat_to_solana"], "0.00035")
+        self.assertEqual(record["fee_bps"], "100")
+
     def test_solana_poll_money_path_summaries_are_structured_events(self):
         """A Nexus→Solana payout operator must not have to parse console prose."""
         with patch.object(swap_solana.nexus_client, "get_heartbeat_asset", return_value={
