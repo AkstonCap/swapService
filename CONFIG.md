@@ -77,6 +77,7 @@ Legend:
 | SOLANA_MAX_TX_FETCH_PER_POLL | int | 120 | Upper bound; tune with spam. |
 | NEXUS_CLI_TIMEOUT_SEC | int | 20 | CLI process timeout. |
 | NEXUS_POLL_TIME_BUDGET_SEC | int | 15 | Soft cap per Nexus loop. |
+| NEXUS_TRANSFER_MIN_CONFIRMATIONS | int | 10 | Shared minimum for direct Nexus transaction read-back before mint or transfer evidence can become terminal. **Must be > 0.** Current startup code does not enforce that bound, so zero/negative values are a release blocker and forbidden in production. Validate the production value against target-node finality semantics. |
 | METRICS_BUDGET_SEC | int | 5 | Budget for metrics gathering. |
 | METRICS_INTERVAL_SEC | int | 30 | Emit frequency. |
 | REFUND_TIMEOUT_SEC | int | 3600 | Seconds to wait for mapping (USDD→USDC) before refund path. |

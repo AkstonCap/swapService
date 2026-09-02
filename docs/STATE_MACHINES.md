@@ -59,6 +59,14 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > stable-range path; and completed-mint reconciliation does not consume the stored
 > contract id or require the configured token-register source. Production remains
 > hard-blocked; see `DEVELOPMENT_REVIEW_2026-09-01.md`.
+>
+> **Follow-up review (2026-09-02, `8f9a30f`):** completed-mint reconciliation
+> now consumes the persisted contract id and configured token-register source,
+> and direct txid lookup holds below the configured confirmation threshold. The
+> threshold is not constrained positive, reference-only evidence has no finality
+> field, zero-input/positive-output terminal mints can reconcile healthy, and the
+> target-node matrix remains unrun. Production remains hard-blocked; see
+> `DEVELOPMENT_REVIEW_2026-09-02.md`.
 
 ---
 
@@ -159,7 +167,7 @@ flowchart TD
 
     RefundHold -->|"operator prepares, confirms reference and authorizes"| IntentAuthorized["durable transfer intent authorized"]
     IntentAuthorized -->|"one CLI attempt"| IntentOutcome["submitted / outcome_unknown"]
-    IntentOutcome -->|"submitted txid: direct exact contract match<br/>(confirmation count not enforced)"| IntentCompleted["completed"]
+    IntentOutcome -->|"submitted txid: direct exact contract match<br/>at configured confirmation threshold"| IntentCompleted["completed"]
     IntentOutcome -->|"outcome_unknown: bounded reference scan"| IntentOutcome
     IntentCompleted -->|"named operator confirms remote txid"| Disposition["refunded or quarantined ✓"]
 
@@ -183,8 +191,8 @@ flowchart TD
 | **RefundPending** | Legacy refund state converted to a hold | `unprocessed_txids` | `"refund pending"` |
 | **RefundHold** | Refund/quarantine requires operator review; no automatic Nexus debit | `unprocessed_txids` | `"refund held for operator review"` |
 | **IntentAuthorized** | Operator has confirmed the immutable reference and authorized exactly one CLI debit | `nexus_transfer_intents` | `"authorized"` |
-| **IntentOutcome** | CLI result is submitted or unknown. A submitted txid can resolve from one exact direct transaction contract; an `outcome_unknown` reference-only row remains held because the live-offset history scan cannot prove a complete range. | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
-| **IntentCompleted** | Exact txid/contract/reference/endpoints/units are stored, but current code does not require a confirmation count before this state. | `nexus_transfer_intents` | `"completed"` |
+| **IntentOutcome** | CLI result is submitted or unknown. A submitted txid can resolve from one exact direct transaction contract only after the configured confirmation threshold; an `outcome_unknown` reference-only row remains held because the live-offset history scan cannot prove a complete range. | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
+| **IntentCompleted** | Exact txid/contract/reference/endpoints/units are stored after direct lookup reaches the configured threshold. The setting is not yet constrained positive, so production must reject zero/negative values before this is a valid finality guarantee. | `nexus_transfer_intents` | `"completed"` |
 | **Disposition** | A named operator confirms the exact remote txid, then the source moves to its terminal archive | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
 | **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
 
@@ -297,7 +305,7 @@ The Nexus poller applies the same proof rule:
 | Full page budget or processing budget exhausted | held (`pagination_truncated`), even when active rows exist |
 | Unprocessed credits exist after a complete poll | poller may pin behind the oldest |
 | Complete scan with persisted page data | may advance to the oldest scanned timestamp minus safety |
-| Empty successful unfiltered response | implementation advances to `now − safety`; **deployment-blocked until the target endpoint proves this is a complete stable range** |
+| Empty successful unfiltered response | **held** (`empty_result`); absence from a live endpoint is not proof of a complete stable range |
 | Processing pass | always held; it has no scan evidence and never proposes a waterline |
 
 A missing Nexus transaction or reference is **never** an automatic proof of
