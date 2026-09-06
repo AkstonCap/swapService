@@ -84,17 +84,17 @@ def poll_solana_deposits(paused: bool = False):
             alerts.warning("heartbeat_unreadable_fallback",
                            "heartbeat asset unreadable; using last known-good local waterline",
                            waterline=local_wl)
-            heartbeat = {getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD",
-                                 "last_safe_timestamp_solana"): local_wl}
-        # Read via the configured field name (tolerating the legacy one).
-        wline_sol = heartbeat.get(getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana"))
-        if wline_sol is None:
-            wline_sol = heartbeat.get("last_safe_timestamp_solana")
-        if wline_sol is None:
-            alerts.critical("heartbeat_missing_waterline",
-                            "heartbeat asset has no Solana waterline field; ingestion HALTED",
-                            expected_field=getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", None))
-            return
+            wline_sol = local_wl
+        else:
+            try:
+                wline_sol = nexus_client.parse_heartbeat_waterlines(heartbeat).solana
+            except ValueError as exc:
+                alerts.critical(
+                    "heartbeat_schema_incompatible",
+                    "Solana ingestion halted: heartbeat waterline schema is incompatible",
+                    error=str(exc),
+                )
+                return
 
         poll_start = _time.time()
 

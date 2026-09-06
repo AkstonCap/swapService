@@ -87,24 +87,26 @@ This review nonetheless found **five Critical defects that cause silent, unrecov
 > `getTransactionsForAddress`. Treat the correct claim as **"no known defects remain"**,
 > not "verified correct". See §9.
 
-> ### Current independent status (2026-09-02, reviewed `8f9a30f`)
+> ### Current independent status (2026-09-03, reviewed `8769dcf`)
 >
-> The suite is green, and `e810e5d` locally closes the completed-mint
-> source/contract matching defect and adds a confirmation threshold to direct txid
-> resolution. This does **not** clear production. High release gates remain:
+> The suite is green. Positive Nexus finality, strictly positive completed-mint
+> inputs/outputs and canonical fee-policy validation are now enforced locally.
+> This does **not** clear production. High release gates remain:
 >
-> 1. `NEXUS_TRANSFER_MIN_CONFIRMATIONS` is not constrained above zero, so a
->    non-positive configuration can terminalize zero-confirmation evidence;
-> 2. reference-only unknown outcomes have no complete stable-range/finality evidence
->    path and must remain held;
-> 3. completed-mint validation accepts zero Solana input with positive Nexus output,
->    allowing internally consistent but economically unbacked evidence to reconcile;
-> 4. one-page/live-offset history semantics, equal timestamps, concurrent inserts,
->    malformed target responses and both-chain finality have not passed the target-node
->    matrix.
+> 1. startup reconstruction does not preserve the live Nexus-credit
+>    dust/minimum/cap/fee classifier, so credits that live polling would book as
+>    fees or hold over-cap can be queued for payout after database recovery;
+> 2. fee-only recovery omits exact-unit and fee-ledger evidence required by
+>    reconciliation;
+> 3. reference-only unknown outcomes have no complete stable-range/finality
+>    evidence path and must remain held;
+> 4. provider-v2 custody identity and one-page/live-offset history semantics,
+>    equal timestamps, concurrent inserts, malformed target responses and
+>    both-chain finality have not passed the target-node matrix.
 >
-> No automated Nexus refund or quarantine transfer should be enabled, and no real funds
-> should be admitted, until `DEVELOPMENT_REVIEW_2026-09-02.md` exit criteria pass.
+> No automated Nexus refund or quarantine transfer should be enabled, and no real
+> funds should be admitted, until `DEVELOPMENT_REVIEW_2026-09-03.md` exit criteria
+> pass.
 
 | Tier | Theme | Count |
 |------|-------|-------|

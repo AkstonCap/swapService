@@ -153,9 +153,11 @@ def _fetch_processed_txids_for_account(
 def reconcile_account_trades(
     nexus_account: str, waterline_ts: int, include_remote_balance: bool = False
 ) -> Dict:
-    treasury = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+    # Reconciliation is a financial authorization path: it must bind to the immutable
+    # startup pair, not a mutable legacy compatibility alias.
+    treasury = str(config.SWAP_PAIR.nexus.treasury_account or "").strip()
     if not treasury:
-        raise ValueError("NEXUS_USDD_TREASURY_ACCOUNT not configured")
+        raise ValueError("canonical Nexus treasury account is not configured")
 
     mint_rows = _fetch_processed_sigs_for_account(nexus_account, waterline_ts)
     credits, external_debits = _fetch_processed_txids_for_account(
@@ -379,7 +381,7 @@ def _reconcile_remote_mint_history(
     verified_mint_sources: set[str] = set()
     incomplete: List[str] = []
     completed = completed_rows if completed_rows is not None else _completed_mint_rows(waterline_ts)
-    configured_token_register = str(getattr(config, "NEXUS_TOKEN_REGISTER_ADDRESS", "") or "").strip()
+    configured_token_register = str(config.SWAP_PAIR.nexus.register_address or "").strip()
     if not configured_token_register:
         return {}, ["configured Nexus token register address is missing"]
     for row in completed:

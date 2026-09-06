@@ -782,7 +782,7 @@ def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -
                 continue
             
             # 4. Check refund net amount
-            net_amount = amount_usdc_units - config.FLAT_FEE_REFUND_SOLANA_UNITS
+            net_amount = amount_usdc_units - int(config.SWAP_PAIR.fees.refund_solana_units)
             if net_amount <= 0:
                 # Bug #12 fix: Track the fee (entire deposit amount is kept as fee for failed refunds)
                 state_db.add_fee_entry(
@@ -894,7 +894,7 @@ def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0)
                 continue
             
             # 4. Check quarantine net amount
-            net_amount = amount_usdc_units - config.FLAT_FEE_REFUND_SOLANA_UNITS
+            net_amount = amount_usdc_units - int(config.SWAP_PAIR.fees.refund_solana_units)
 
             # 4b. Nothing left after the fee: there is nothing to move, so finalise here.
             # Without this, send_solana_token() returns (True, None) for a non-positive amount and

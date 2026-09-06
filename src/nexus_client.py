@@ -350,16 +350,48 @@ def get_nexus_send_amount_units(amount_solana_units: int) -> int:
 
 
 def get_solana_send_amount_units(amount_nexus_units: int) -> int:
-    """Net Solana output for a Nexus credit, in Solana base units.
+    """Return the exact Solana output units after canonical Nexus→Solana fees.
 
-    This mirrors ``get_nexus_send_amount_units`` with the opposite input and
-    output scales.  A conversion remainder is rounded down before fees, so a
-    decimal mismatch can never cause an overpayment.
+    The Nexus input is converted down to the Solana scale before the Solana-output fee
+    is charged.  This ordering prevents an unrepresentable Nexus remainder from becoming
+    a Solana payout unit.
     """
     gross_solana_units = config.nexus_units_to_solana(int(amount_nexus_units), round_up=False)
     fee_policy = config.SWAP_PAIR.fees
     dynamic_fee = _dynamic_fee_units(gross_solana_units, fee_policy.basis_points)
     return max(0, gross_solana_units - int(fee_policy.flat_to_solana_units) - dynamic_fee)
+
+
+@dataclass(frozen=True)
+class NexusCreditClassification:
+    """One exact, fail-closed disposition for a Nexus credit entering the bridge."""
+
+    disposition: str
+    amount_nexus_units: int
+    net_solana_units: int = 0
+
+
+def classify_nexus_credit(amount: object) -> NexusCreditClassification:
+    """Classify Nexus credits identically for live polling and startup recovery.
+
+    Only exact Nexus base units are admitted.  The returned disposition is one of
+    ``invalid``, ``dust``, ``below_minimum``, ``over_cap``, ``fee_only`` or ``payable``.
+    Callers own durable state writes but must never invent a separate threshold policy.
+    """
+    amount_nexus_units = _parse_exact_nexus_units(amount)
+    if amount_nexus_units is None or amount_nexus_units <= 0:
+        return NexusCreditClassification("invalid", 0)
+    if amount_nexus_units < int(config.DUST_CREDIT_NEXUS_UNITS):
+        return NexusCreditClassification("dust", amount_nexus_units)
+    if amount_nexus_units < int(config.MIN_CREDIT_NEXUS_UNITS):
+        return NexusCreditClassification("below_minimum", amount_nexus_units)
+    max_swap_nexus = int(getattr(config, "MAX_SWAP_NEXUS_UNITS", 0) or 0)
+    if max_swap_nexus > 0 and amount_nexus_units > max_swap_nexus:
+        return NexusCreditClassification("over_cap", amount_nexus_units)
+    net_solana_units = get_solana_send_amount_units(amount_nexus_units)
+    if net_solana_units <= 0:
+        return NexusCreditClassification("fee_only", amount_nexus_units)
+    return NexusCreditClassification("payable", amount_nexus_units, net_solana_units)
 
 
 def get_nexus_send_amount(amount_solana: int) -> Decimal:
@@ -1078,8 +1110,8 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
     It stays held until a separately authorized caller executes and resolves the durable
     intent through ``execute_nexus_transfer_intent``.
     """
-    dest = getattr(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", None)
-    treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+    dest = config.SWAP_PAIR.nexus.quarantine_account
+    treas = config.SWAP_PAIR.nexus.treasury_account
     if (not dest or not treas or not txid or
             type(amount_usdd_units) is not int or amount_usdd_units <= 0):
         _log("nexus_quarantine_intent_held", level=logging.WARNING, reason="invalid_intent_input")
@@ -1112,7 +1144,7 @@ def _refund_source_txid(reason: str) -> str | None:
 def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
     """Prepare a refund intent and hold; automatic Nexus refunds remain disabled."""
     source_txid = _refund_source_txid(reason)
-    treas = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+    treas = config.SWAP_PAIR.nexus.treasury_account
     # Preserve the exact integer amount all the way to the durable state boundary.
     # Coercing here would silently turn e.g. 1.9 Nexus base units into a one-unit
     # operator disposition despite create_nexus_transfer_intent correctly rejecting it.
@@ -1415,11 +1447,15 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
         return BatchLookup(out, True)
 
     page_size = max(1, int(limit))
+    try:
+        minimum_confirmations = config.get_nexus_transfer_min_confirmations()
+    except ValueError:
+        return BatchLookup({}, False, "invalid_finality_policy")
     max_pages = max(1, int(getattr(config, "NEXUS_LOOKUP_MAX_PAGES", 5)))
     for page in range(max_pages):
         cmd = [
             config.NEXUS_CLI,
-            "finance/transactions/token/txid,timestamp,contracts.id,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
+            "finance/transactions/token/txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.reference,contracts.from,contracts.to,contracts.amount",
             f"name={config.NEXUS_TOKEN_NAME}",
             "sort=timestamp",
             "order=desc",
@@ -1454,6 +1490,14 @@ def find_nexus_transfer_debits_by_references(references, limit: int = 100) -> Ba
                     key = str(reference).strip()
                     if key not in wanted:
                         continue
+                    confirmations = tx.get("confirmations")
+                    if (isinstance(confirmations, bool) or not isinstance(confirmations, int)
+                            or confirmations < minimum_confirmations):
+                        # A bounded reference lookup is already insufficient to prove global
+                        # uniqueness. It also must not let a candidate below the configured
+                        # finality depth become durable transfer evidence for a future complete
+                        # lookup implementation.
+                        return BatchLookup({}, False, "insufficient_confirmations")
                     amount_usdd_units = _parse_exact_nexus_units(contract.get("amount"))
                     from_address = _parse_nexus_contract_address(contract.get("from"))
                     to_address = _parse_nexus_contract_address(contract.get("to"))
@@ -1667,7 +1711,7 @@ def get_nexus_local_balance_units() -> int:
 
 SERVICE_RECORD_IMMUTABLE = (
     "distordiaType", "provider", "memo_prefix",
-    "nexus_token", "nexus_treasury_address",
+    "nexus_token", "nexus_treasury_address", "nexus_token_register_address",
     "solana_token", "solana_vault_address", "solana_vault_mint",
 )
 SERVICE_RECORD_MUTABLE = (
@@ -1681,22 +1725,79 @@ SERVICE_RECORD_FIELDS = SERVICE_RECORD_IMMUTABLE + SERVICE_RECORD_MUTABLE
 SERVICE_RECORD_MAX_BYTES = 1024
 
 
+@dataclass(frozen=True)
+class HeartbeatWaterlines:
+    """Validated current-schema heartbeat custody checkpoints."""
+
+    nexus: int
+    solana: int
+
+
+def heartbeat_waterline_field_names() -> tuple[str, str]:
+    """Return two distinct, non-empty configured top-level heartbeat fields."""
+    nexus_field = getattr(config, "HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
+    solana_field = getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
+    if not isinstance(nexus_field, str) or not isinstance(solana_field, str):
+        raise ValueError("heartbeat waterline field names must be non-empty strings")
+    nexus_field = nexus_field.strip()
+    solana_field = solana_field.strip()
+    if not nexus_field or not solana_field:
+        raise ValueError("heartbeat waterline field names must be non-empty strings")
+    if nexus_field == solana_field:
+        raise ValueError("Nexus and Solana heartbeat waterline fields must be distinct")
+    return nexus_field, solana_field
+
+
+def _parse_heartbeat_timestamp(value: Any, field: str) -> int:
+    """Accept only non-negative integer wire values for a custody checkpoint."""
+    if isinstance(value, bool):
+        raise ValueError(f"heartbeat field {field!r} must be a non-negative integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.isascii() and value.isdecimal():
+        parsed = int(value)
+    else:
+        raise ValueError(f"heartbeat field {field!r} must be a non-negative integer")
+    if parsed < 0:
+        raise ValueError(f"heartbeat field {field!r} must be a non-negative integer")
+    return parsed
+
+
+def parse_heartbeat_waterlines(asset: dict[str, Any]) -> HeartbeatWaterlines:
+    """Parse the one supported, top-level heartbeat waterline schema.
+
+    Nexus basic assets expose their fields at the top level.  Deliberately do not accept
+    the obsolete nested ``data.nexus_waterline`` / ``data.solana_waterline`` payload:
+    treating an incompatible record as an empty checkpoint skips wipeout reconstruction.
+    """
+    if not isinstance(asset, dict):
+        raise ValueError("heartbeat asset must be an object")
+    nexus_field, solana_field = heartbeat_waterline_field_names()
+    missing = [field for field in (nexus_field, solana_field) if field not in asset]
+    if missing:
+        raise ValueError(f"heartbeat asset is missing required waterline fields: {missing}")
+    return HeartbeatWaterlines(
+        nexus=_parse_heartbeat_timestamp(asset[nexus_field], nexus_field),
+        solana=_parse_heartbeat_timestamp(asset[solana_field], solana_field),
+    )
+
+
 def build_service_record(status: str = "online", last_poll: int | None = None,
                          wline_sol: int | None = None, wline_nxs: int | None = None) -> dict:
     """The complete public description of this bridge, derived from config."""
     import time as _t
-    sol_field = getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
-    nxs_field = getattr(config, "HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
+    nxs_field, sol_field = heartbeat_waterline_field_names()
     rec = {
         # identity + pair (immutable)
         "distordiaType": "nexusBridgeHeartbeat",
         "provider": str(getattr(config, "SERVICE_PROVIDER", "") or "unnamed-operator"),
         "memo_prefix": str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:")),
-        "nexus_token": str(config.NEXUS_TOKEN_NAME),
-        "nexus_treasury_address": str(config.NEXUS_USDD_TREASURY_ACCOUNT or ""),
-        "solana_token": str(getattr(config, "SOLANA_TOKEN_SYMBOL", "USDC")),
-        "solana_vault_address": str(config.VAULT_USDC_ACCOUNT),
-        "solana_vault_mint": str(config.USDC_MINT),
+        "nexus_token": str(config.SWAP_PAIR.nexus.symbol),
+        "nexus_treasury_address": str(config.SWAP_PAIR.nexus.treasury_account or ""),
+        "nexus_token_register_address": str(config.SWAP_PAIR.nexus.register_address or ""),
+        "solana_token": str(config.SWAP_PAIR.solana.symbol),
+        "solana_vault_address": str(config.SWAP_PAIR.solana.vault_account),
+        "solana_vault_mint": str(config.SWAP_PAIR.solana.mint),
         # liveness + terms (mutable)
         "last_poll_timestamp": int(last_poll if last_poll is not None else _t.time()),
         sol_field: int(wline_sol or 0),
@@ -1744,8 +1845,7 @@ def publish_service_record(status: str = "online", last_poll: int | None = None,
         return False
     rec = build_service_record(status=status, last_poll=last_poll,
                                wline_sol=wline_sol, wline_nxs=wline_nxs)
-    sol_field = getattr(config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "last_safe_timestamp_solana")
-    nxs_field = getattr(config, "HEARTBEAT_WATERLINE_NEXUS_FIELD", "last_safe_timestamp_nexus")
+    nxs_field, sol_field = heartbeat_waterline_field_names()
     mutable = set(SERVICE_RECORD_MUTABLE) | {sol_field, nxs_field}
     cmd = [config.NEXUS_CLI, "assets/update/asset", f"name={name}", "format=basic",
            f"pin={config.NEXUS_PIN}"]
@@ -1798,13 +1898,14 @@ def update_heartbeat_asset(last_poll: int, wline_nxs: int | None, wline_sol: int
     if last_poll is not None:
         cmd.append(f"last_poll_timestamp={last_poll}")
 
-    # Use the CONFIGURED field names. Hardcoding them here meant a config/asset mismatch
-    # silently failed every update, freezing the heartbeat and both waterlines.
+    # Use the same configured top-level names that creation, validation, polling, and
+    # wipeout recovery consume.  A basic asset cannot add a missing field atomically.
+    nxs_field, sol_field = heartbeat_waterline_field_names()
     if wline_nxs is not None:
-        cmd.append(f"{config.HEARTBEAT_WATERLINE_NEXUS_FIELD}={wline_nxs}")
+        cmd.append(f"{nxs_field}={wline_nxs}")
 
     if wline_sol is not None:
-        cmd.append(f"{config.HEARTBEAT_WATERLINE_SOLANA_FIELD}={wline_sol}")
+        cmd.append(f"{sol_field}={wline_sol}")
 
     try:
         code, out, err = _run(cmd, timeout=5)
@@ -1866,17 +1967,17 @@ def validate_heartbeat_asset() -> tuple[bool, str]:
     asset = get_heartbeat_asset()
     if not asset:
         return (False, f"heartbeat asset '{config.NEXUS_HEARTBEAT_ASSET_NAME}' not readable")
-    required = [
-        "last_poll_timestamp",
-        config.HEARTBEAT_WATERLINE_NEXUS_FIELD,
-        config.HEARTBEAT_WATERLINE_SOLANA_FIELD,
-    ]
+    required = ["last_poll_timestamp", *heartbeat_waterline_field_names()]
     missing = [f for f in required if f not in asset]
     if missing:
         return (False,
                 f"heartbeat asset is missing {missing}; every update will fail atomically. "
                 f"Recreate the asset with these fields, or set HEARTBEAT_WATERLINE_*_FIELD "
                 f"to the names it actually has: {sorted(k for k in asset.keys())}")
+    try:
+        parse_heartbeat_waterlines(asset)
+    except ValueError as exc:
+        return (False, f"heartbeat asset has incompatible waterline values: {exc}")
     return (True, f"heartbeat asset OK ({', '.join(required)})")
 
 
@@ -1898,99 +1999,138 @@ def get_heartbeat_asset() -> Optional[Dict[str, Any]]:
         return None
 
 
-def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: int = 50) -> list[dict]:
-    """Fetch all Nexus credits to treasury since given timestamp.
-    
-    Args:
-        treasury_addr: Nexus treasury account address
-        since_timestamp: Unix timestamp to start from
-        max_pages: Maximum pages to fetch (default 50)
-    
-    Returns:
-        List of transaction dicts with CREDIT contracts to treasury
+@dataclass(frozen=True)
+class DepositScan:
+    """Result of a bounded Nexus deposit enumeration.
+
+    Recovery can advance durable state only when ``complete`` is true.  Partial pages are
+    evidence, never proof that no older matching credit exists.
     """
-    results = []
-    limit = 100
-    
-    # Build base command
-    base_cmd = [config.NEXUS_CLI]
+
+    deposits: list[dict]
+    complete: bool
+    reason: str | None = None
+
+
+def treasury_credit_contracts(transaction: dict, treasury_addr: str) -> list[dict]:
+    """Return CREDIT contracts addressed to one canonical treasury account.
+
+    A Nexus transaction can carry multiple independently payable treasury credits.  Callers
+    that still persist legacy txid-only rows must treat more than one returned contract as
+    incomplete evidence rather than collapsing siblings into a single liability.
+    """
+    contracts = transaction.get("contracts")
+    if not isinstance(contracts, list):
+        return []
+    return [
+        contract for contract in contracts
+        if isinstance(contract, dict)
+        and str(contract.get("OP") or "").upper() == "CREDIT"
+        and _parse_nexus_contract_address(contract.get("to")) == treasury_addr
+    ]
+
+
+def treasury_deposit_history_command(treasury_addr: str) -> list[str]:
+    """Build the public register-history query for the configured treasury account.
+
+    A token-register history omits ordinary account-to-account credits because neither
+    side of those CREDIT contracts is the token supply register.  Deposit admission and
+    wipeout recovery must instead enumerate the immutable treasury account itself.
+    """
+    treasury = str(treasury_addr or "").strip()
+    if not treasury:
+        raise ValueError("canonical Nexus treasury account is required for deposit enumeration")
     projection = (
-        "register/transactions/finance:token/"
+        "register/transactions/finance:account/"
         "txid,timestamp,confirmations,contracts.id,contracts.OP,contracts.from,contracts.to,contracts.amount"
     )
-    base_cmd.append(projection)
-    base_cmd.append(f"name={config.NEXUS_TOKEN_NAME}")
-    base_cmd.append("sort=timestamp")
-    base_cmd.append("order=desc")  # Newest first
-    
-    # Do not apply a server-side amount filter to nested contracts.  A target node may
-    # accept the expression but omit matching credits, which makes restart recovery lossy.
-    # Callers apply their policy after receiving the complete transaction enumeration.
-    
-    for page in range(max_pages):
+    return [
+        config.NEXUS_CLI,
+        projection,
+        f"address={treasury}",
+        "sort=timestamp",
+        "order=desc",
+    ]
+
+
+def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: int = 50) -> DepositScan:
+    """Enumerate Nexus transactions containing CREDITs to one canonical treasury.
+
+    ``complete`` is true only when the scan reaches a transaction below the requested
+    waterline or a short/empty terminal page.  CLI, parse, and pagination-budget failures
+    are deliberately incomplete so wipeout recovery cannot advance beyond unseen credits.
+    """
+    results: list[dict] = []
+    limit = 100
+
+    try:
+        base_cmd = treasury_deposit_history_command(treasury_addr)
+    except ValueError:
+        return DepositScan(results, False, "missing_treasury_account")
+
+    for page in range(max(1, int(max_pages))):
         cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
         try:
             code, out, err = _run(cmd, timeout=getattr(config, "NEXUS_CLI_TIMEOUT_SEC", 12))
-            if code != 0:
-                _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
-                     error=redact(err or out))
-                break
-            
-            txs = _parse_json_lenient(out)
-            if not isinstance(txs, list):
-                txs = [txs] if txs else []
-            
-            if not txs:
-                break  # No more results
-            
-            page_has_old_txs = False
-            for tx in txs:
-                if not isinstance(tx, dict):
-                    continue
-                
-                ts = int(tx.get("timestamp") or 0)
-                
-                # Stop if we've gone past the waterline
-                if ts < since_timestamp:
-                    page_has_old_txs = True
-                    continue
-                
-                # Check if this tx has CREDIT to treasury
-                contracts = tx.get("contracts") or []
-                has_credit_to_treasury = False
-                for c in contracts:
-                    if not isinstance(c, dict):
-                        continue
-                    if str(c.get("OP") or "").upper() != "CREDIT":
-                        continue
-                    
-                    # Extract 'to' address
-                    to = c.get("to")
-                    to_addr = ""
-                    if isinstance(to, dict):
-                        to_addr = str(to.get("address") or to.get("name") or "")
-                    elif isinstance(to, str):
-                        to_addr = to
-                    
-                    if to_addr == treasury_addr:
-                        has_credit_to_treasury = True
-                        break
-                
-                if has_credit_to_treasury:
-                    results.append(tx)
-            
-            # Stop conditions
-            if page_has_old_txs:
-                break  # Reached below waterline
-            if len(txs) < limit:
-                break  # No more pages
-        
-        except Exception as e:
+        except Exception as exc:
             _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
-                 error=redact(str(e)))
-            break
-    
-    return results
+                 error=redact(str(exc)))
+            return DepositScan(results, False, "exception")
+        if code != 0:
+            _log("nexus_deposit_page_fetch_failed", level=logging.ERROR, page=page,
+                 error=redact(err or out))
+            return DepositScan(results, False, "cli_error")
+
+        txs = _parse_json_lenient(out)
+        if not isinstance(txs, list):
+            return DepositScan(results, False, "invalid_response")
+        if not txs:
+            return DepositScan(results, True)
+
+        page_has_old_txs = False
+        for tx in txs:
+            if not isinstance(tx, dict):
+                return DepositScan(results, False, "invalid_transaction")
+            txid = tx.get("txid")
+            if not isinstance(txid, str) or not txid.strip():
+                return DepositScan(results, False, "invalid_txid")
+            timestamp = tx.get("timestamp")
+            if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp <= 0:
+                return DepositScan(results, False, "invalid_timestamp")
+            confirmations = tx.get("confirmations")
+            if (isinstance(confirmations, bool) or not isinstance(confirmations, int)
+                    or confirmations < 0):
+                return DepositScan(results, False, "invalid_confirmations")
+            if timestamp < since_timestamp:
+                page_has_old_txs = True
+                continue
+
+            contracts = tx.get("contracts")
+            if not isinstance(contracts, list):
+                return DepositScan(results, False, "invalid_contracts")
+            for contract in contracts:
+                if not isinstance(contract, dict):
+                    return DepositScan(results, False, "invalid_contract")
+                if str(contract.get("OP") or "").upper() != "CREDIT":
+                    continue
+                to_address = _parse_nexus_contract_address(contract.get("to"))
+                if to_address != treasury_addr:
+                    continue
+                contract_id = contract.get("id")
+                from_address = _parse_nexus_contract_address(contract.get("from"))
+                if isinstance(contract_id, bool) or not isinstance(contract_id, int) or contract_id < 0:
+                    return DepositScan(results, False, "invalid_contract_id")
+                if not from_address:
+                    return DepositScan(results, False, "invalid_credit_source")
+                if classify_nexus_credit(contract.get("amount")).disposition == "invalid":
+                    return DepositScan(results, False, "invalid_credit_amount")
+                results.append(tx)
+                break
+
+        if page_has_old_txs or len(txs) < limit:
+            return DepositScan(results, True)
+
+    return DepositScan(results, False, "pagination_truncated")
     
 
 ## Reference integer fetching

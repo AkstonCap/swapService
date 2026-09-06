@@ -93,6 +93,500 @@ class CriticalSafetyTests(unittest.TestCase):
                 9_899_650,
             )
 
+    def test_backing_maintenance_uses_canonical_pair_vault(self):
+        """Backing checks must read the configured pair custody account, not a legacy alias."""
+        pair = replace(
+            config.SWAP_PAIR,
+            solana=replace(config.SWAP_PAIR.solana, vault_account="canonical-vault"),
+        )
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "VAULT_USDC_ACCOUNT", "legacy-vault"
+        ), patch.object(
+            solana_client, "get_token_account_balance", return_value=1_000
+        ) as get_balance, patch.object(
+            state_db, "get_unresolved_solana_liability_units", return_value=0
+        ), patch.object(
+            nexus_client, "get_circulating_nexus_units", return_value=0
+        ):
+            self.assertFalse(fees.maintain_backing_and_bounds())
+
+        get_balance.assert_called_once_with("canonical-vault", max_age_sec=5)
+
+    def test_reconciliation_uses_canonical_pair_treasury(self):
+        """Reconciliation must not route accounting through a mutable legacy alias."""
+        pair = replace(
+            config.SWAP_PAIR,
+            nexus=replace(config.SWAP_PAIR.nexus, treasury_account="canonical-treasury"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", pair
+            ), patch.object(config, "NEXUS_USDD_TREASURY_ACCOUNT", "legacy-treasury"):
+                state_db.init_db()
+                state_db.mark_processed_txid(
+                    txid="canonical-treasury-credit",
+                    timestamp=1_000,
+                    amount_usdd=0.000123,
+                    amount_usdd_units=123,
+                    from_address="recipient",
+                    to_address="canonical-treasury",
+                    owner="owner",
+                    sig="",
+                    status="processed as fees",
+                )
+                summary = balance_reconciler.reconcile_account_trades("recipient", 0)
+
+        self.assertEqual(summary["treasury_in_nexus_units"], 123)
+
+    def test_nexus_credit_classifier_has_exact_branch_parity_inputs(self):
+        """Live polling and recovery must share every durable Nexus-credit disposition."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(config.SWAP_PAIR.fees, flat_to_solana_units=100, basis_points=0),
+        )
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "DUST_CREDIT_NEXUS_UNITS", 10
+        ), patch.object(config, "MIN_CREDIT_NEXUS_UNITS", 50), patch.object(
+            config, "MAX_SWAP_NEXUS_UNITS", 200
+        ):
+            dispositions = [
+                nexus_client.classify_nexus_credit(value).disposition
+                for value in ("0.000001", "0.000025", "0.000100", "0.000150", "0.000201")
+            ]
+
+        self.assertEqual(
+            dispositions,
+            ["dust", "below_minimum", "fee_only", "payable", "over_cap"],
+        )
+
+    def test_admission_and_publication_use_canonical_pair_identity(self):
+        """Public identity and live admission use canonical custody, not token history."""
+        pair = replace(
+            config.SWAP_PAIR,
+            nexus=replace(
+                config.SWAP_PAIR.nexus,
+                symbol="CANON",
+                register_address="canonical-register",
+                treasury_account="canonical-treasury",
+            ),
+        )
+        credit = {
+            "txid": "canonical-admission", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [{
+                "id": 0,
+                "OP": "CREDIT", "from": "sender", "to": "canonical-treasury", "amount": "3",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", pair
+            ), patch.object(config, "NEXUS_USDD_TREASURY_ACCOUNT", "legacy-treasury"), patch.object(
+                config, "NEXUS_TOKEN_NAME", "LEGACY"
+            ), patch.object(
+                nexus_client, "get_account_info", return_value={"owner": "owner"}
+            ), patch.object(nexus_client, "_run", return_value=(0, json.dumps([credit]), "")) as run:
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+                admitted = state_db.is_unprocessed_txid("canonical-admission")
+                record = nexus_client.build_service_record(last_poll=1)
+
+        self.assertTrue(admitted)
+        command = run.call_args.args[0]
+        self.assertTrue(command[1].startswith("register/transactions/finance:account/"))
+        self.assertIn("address=canonical-treasury", command)
+        self.assertNotIn("name=LEGACY", command)
+        self.assertEqual(record["nexus_token"], "CANON")
+        self.assertEqual(record["nexus_treasury_address"], "canonical-treasury")
+        self.assertEqual(record["nexus_token_register_address"], "canonical-register")
+
+    def test_recovery_scans_canonical_treasury_account_history(self):
+        """Wipeout recovery must not fall back to the token register's lossy history."""
+        credit = {
+            "txid": "treasury-account-credit", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [{
+                "id": 0, "OP": "CREDIT", "from": "sender",
+                "to": "canonical-treasury", "amount": "3",
+            }],
+        }
+        with patch.object(config, "NEXUS_TOKEN_NAME", "LEGACY"), patch.object(
+            nexus_client, "_run", return_value=(0, json.dumps([credit]), "")
+        ) as run:
+            scan = nexus_client.fetch_deposits_since("canonical-treasury", 0)
+
+        self.assertTrue(scan.complete)
+        self.assertEqual(scan.deposits, [credit])
+        command = run.call_args.args[0]
+        self.assertTrue(command[1].startswith("register/transactions/finance:account/"))
+        self.assertIn("address=canonical-treasury", command)
+        self.assertNotIn("name=LEGACY", command)
+
+    def test_deposit_history_requires_canonical_treasury_account(self):
+        """An absent canonical treasury is incomplete evidence, never an empty scan."""
+        with patch.object(nexus_client, "_run") as run:
+            scan = nexus_client.fetch_deposits_since("", 0)
+
+        self.assertFalse(scan.complete)
+        self.assertEqual(scan.reason, "missing_treasury_account")
+        self.assertEqual(scan.deposits, [])
+        run.assert_not_called()
+
+    @patch.object(swap_nexus.alerts, "critical")
+    @patch.object(nexus_client, "_run")
+    def test_live_admission_holds_when_canonical_treasury_is_missing(self, run, critical):
+        """Admission must not replace a missing custody account with a legacy alias."""
+        pair = replace(
+            config.SWAP_PAIR,
+            nexus=replace(config.SWAP_PAIR.nexus, treasury_account=""),
+        )
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "NEXUS_USDD_TREASURY_ACCOUNT", "legacy-treasury"
+        ):
+            swap_nexus.poll_nexus_deposits()
+
+        run.assert_not_called()
+        critical.assert_called_once_with(
+            "nexus_treasury_history_unavailable",
+            "Nexus deposit enumeration requires the canonical treasury account",
+        )
+
+    def test_nexus_credit_admission_uses_canonical_output_math(self):
+        """A credit that cannot fund canonical Solana output is fee-only, never queued."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_solana_units=500_000,
+                basis_points=0,
+            ),
+        )
+        credit = {
+            "txid": "canonical-fee-only-credit",
+            "timestamp": 1_000,
+            "confirmations": 2,
+            "contracts": [{
+                "id": 0,
+                "OP": "CREDIT",
+                "from": "sender",
+                "to": "TREASURY",
+                "amount": "0.3",
+            }],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", pair
+            ), patch.object(config, "DUST_CREDIT_NEXUS_UNITS", 1), patch.object(
+                config, "MIN_CREDIT_NEXUS_UNITS", 1
+            ), patch.object(config, "FLAT_FEE_USDD", "0"), patch.object(
+                config, "DYNAMIC_FEE_BPS", 0
+            ), patch.object(
+                nexus_client, "_run", return_value=(0, json.dumps([credit]), "")
+            ), patch.object(
+                nexus_client, "get_account_info", return_value={"owner": "owner"}
+            ):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+
+                self.assertTrue(state_db.is_processed_txid(credit["txid"]))
+                self.assertFalse(state_db.is_unprocessed_txid(credit["txid"]))
+
+    def test_recovery_nexus_credit_admission_uses_canonical_output_math(self):
+        """Database recovery must apply the same fee-only admission rule as the poller."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_solana_units=500_000,
+                basis_points=0,
+            ),
+        )
+        credit = {
+            "txid": "recovery-canonical-fee-only-credit",
+            "timestamp": 1_000,
+            "confirmations": 2,
+            "contracts": [{
+                "id": 0,
+                "OP": "CREDIT",
+                "from": "sender",
+                "to": "TREASURY",
+                "amount": "0.3",
+            }],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", pair
+            ), patch.object(config, "DUST_CREDIT_NEXUS_UNITS", 1), patch.object(
+                config, "FLAT_FEE_USDD", "0"
+            ), patch.object(config, "DYNAMIC_FEE_BPS", 0), patch.object(
+                nexus_client, "fetch_deposits_since", return_value=nexus_client.DepositScan([credit], True)
+            ), patch.object(
+                nexus_client, "get_account_info", return_value={"owner": "owner"}
+            ):
+                state_db.init_db()
+                startup_recovery._rebuild_nexus_from_waterline(0)
+
+                self.assertTrue(state_db.is_processed_txid(credit["txid"]))
+                self.assertFalse(state_db.is_unprocessed_txid(credit["txid"]))
+
+    def test_recovery_uses_the_full_shared_nexus_credit_classifier(self):
+        """Recovery persists every non-dust credit exactly as live classification requires."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(config.SWAP_PAIR.fees, flat_to_solana_units=100, basis_points=0),
+        )
+        def credit(txid, amount):
+            return {"txid": txid, "timestamp": 1_000, "confirmations": 2, "contracts": [{
+                "id": 0,
+                "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": amount,
+            }]}
+        credits = [
+            credit("dust", "0.000001"),
+            credit("below", "0.000025"),
+            credit("fee-only", "0.000100"),
+            credit("payable", "0.000150"),
+            credit("over-cap", "0.000201"),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", pair
+            ), patch.object(config, "DUST_CREDIT_NEXUS_UNITS", 10), patch.object(
+                config, "MIN_CREDIT_NEXUS_UNITS", 50
+            ), patch.object(config, "MAX_SWAP_NEXUS_UNITS", 200), patch.object(
+                nexus_client, "fetch_deposits_since", return_value=nexus_client.DepositScan(credits, True)
+            ), patch.object(nexus_client, "get_account_info", return_value={"owner": "owner"}):
+                state_db.init_db()
+                startup_recovery._rebuild_nexus_from_waterline(0)
+                pending = {row["txid"]: row for row in state_db.get_unprocessed_txids_as_dicts()}
+                # (id, sig, txid, kind, amount_usdc_units, amount_usdd_units, timestamp)
+                fees = {row[2]: row for row in state_db.get_fee_entries()}
+                conn = state_db.sqlite3.connect(db_path)
+                processed = dict(conn.execute(
+                    "SELECT txid, amount_usdd_units FROM processed_txids"
+                ).fetchall())
+                conn.close()
+                dust_processed = state_db.is_processed_txid("dust")
+
+        self.assertFalse(dust_processed)
+        self.assertEqual(fees["below"][5], 25)
+        self.assertEqual(fees["fee-only"][5], 100)
+        self.assertEqual(processed["below"], 25)
+        self.assertEqual(processed["fee-only"], 100)
+        self.assertEqual(pending["payable"]["amount_usdd_units"], 150)
+        self.assertEqual(pending["payable"]["comment"], "pending_receival")
+        self.assertEqual(pending["over-cap"]["amount_usdd_units"], 201)
+        self.assertEqual(pending["over-cap"]["comment"], "refund pending")
+
+    def test_recovery_holds_positive_inexact_nexus_credit_for_manual_resolution(self):
+        """A positive inexact credit must survive recovery instead of falling beyond the waterline."""
+        credit = {
+            "txid": "inexact-credit", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [{
+                "id": 0,
+                "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": "1.0000001",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", replace(
+                    config.SWAP_PAIR,
+                    nexus=replace(config.SWAP_PAIR.nexus, treasury_account="TREASURY"),
+                )
+            ), patch.object(
+                nexus_client, "fetch_deposits_since",
+                return_value=nexus_client.DepositScan([credit], True),
+            ), patch.object(nexus_client, "get_account_info", return_value={"owner": "owner"}):
+                state_db.init_db()
+                summary = startup_recovery._rebuild_nexus_from_waterline(0)
+                pending = {row["txid"]: row for row in state_db.get_unprocessed_txids_as_dicts()}
+
+        self.assertEqual(summary["nexus_deposits_added"], 0)
+        self.assertEqual(pending["inexact-credit"]["comment"], "quarantined")
+        self.assertEqual(pending["inexact-credit"]["hold_reason"], "invalid_exact_nexus_amount")
+        self.assertIsNone(pending["inexact-credit"]["amount_usdd_units"])
+
+    def test_recovery_revalidates_each_credit_destination_in_a_sibling_transaction(self):
+        """A treasury sibling cannot authorize recovery of a CREDIT sent elsewhere."""
+        tx = {
+            "txid": "sibling-credits", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [
+                {"id": 0, "OP": "CREDIT", "from": "attacker", "to": "OTHER", "amount": "2"},
+                {"id": 0, "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": "3"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", replace(
+                    config.SWAP_PAIR,
+                    nexus=replace(config.SWAP_PAIR.nexus, treasury_account="TREASURY"),
+                )
+            ), patch.object(
+                nexus_client, "fetch_deposits_since",
+                return_value=nexus_client.DepositScan([tx], True),
+            ), patch.object(nexus_client, "get_account_info", return_value={"owner": "owner"}):
+                state_db.init_db()
+                startup_recovery._rebuild_nexus_from_waterline(0)
+                row = state_db.get_unprocessed_txids_as_dicts()[0]
+
+        self.assertEqual(row["from"], "sender")
+        self.assertEqual(row["to"], "TREASURY")
+        self.assertEqual(row["amount_usdd_units"], 3_000_000)
+
+    def test_live_admission_persists_each_treasury_credit_by_contract_identity(self):
+        """Two payable CREDITS in one transaction are separate durable liabilities."""
+        tx = {
+            "txid": "two-treasury-credits", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [
+                {"id": 0, "OP": "CREDIT", "from": "sender-a", "to": "TREASURY", "amount": "3"},
+                {"id": 1, "OP": "CREDIT", "from": "sender-b", "to": "TREASURY", "amount": "4"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "_run", return_value=(0, json.dumps([tx]), "")
+            ), patch.object(nexus_client, "get_account_info", return_value={"owner": "owner"}):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+                queued = state_db.get_unprocessed_txids_as_dicts()
+
+        self.assertEqual(
+            {(row["txid"], row["contract_id"], row["from"], row["amount_usdd_units"])
+             for row in queued},
+            {("two-treasury-credits", 0, "sender-a", 3_000_000),
+             ("two-treasury-credits", 1, "sender-b", 4_000_000)},
+        )
+
+    def test_recovery_persists_each_treasury_credit_by_contract_identity(self):
+        """Wipeout recovery restores every sibling CREDIT independently."""
+        tx = {
+            "txid": "two-recovery-credits", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [
+                {"id": 0, "OP": "CREDIT", "from": "sender-a", "to": "TREASURY", "amount": "3"},
+                {"id": 1, "OP": "CREDIT", "from": "sender-b", "to": "TREASURY", "amount": "4"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                nexus_client, "fetch_deposits_since", return_value=nexus_client.DepositScan([tx], True)
+            ), patch.object(nexus_client, "get_account_info", return_value={"owner": "owner"}):
+                state_db.init_db()
+                summary = startup_recovery._rebuild_nexus_from_waterline(0)
+                queued = state_db.get_unprocessed_txids_as_dicts()
+
+        self.assertEqual(summary["nexus_deposits_added"], 2)
+        self.assertEqual(
+            {(row["txid"], row["contract_id"], row["from"], row["amount_usdd_units"])
+             for row in queued},
+            {("two-recovery-credits", 0, "sender-a", 3_000_000),
+             ("two-recovery-credits", 1, "sender-b", 4_000_000)},
+        )
+
+    def test_credit_identity_migration_preserves_legacy_rows_without_colliding(self):
+        """Legacy txid-only rows stay explicitly unresolvable while new siblings persist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE unprocessed_txids (
+                txid TEXT PRIMARY KEY, timestamp INTEGER, amount_usdd REAL,
+                from_address TEXT, to_address TEXT, owner_from_address TEXT,
+                confirmations_credit INTEGER, status TEXT, receival_account TEXT
+            )""")
+            conn.execute("""CREATE TABLE processed_txids (
+                txid TEXT PRIMARY KEY, timestamp INTEGER, amount_usdd REAL,
+                from_address TEXT, to_address TEXT, owner TEXT, sig TEXT, status TEXT
+            )""")
+            conn.execute("""CREATE TABLE refunded_txids (
+                txid TEXT PRIMARY KEY, timestamp INTEGER, amount_usdd REAL,
+                from_address TEXT, to_address TEXT, owner_from_address TEXT,
+                confirmations_credit INTEGER, status TEXT, sig TEXT
+            )""")
+            conn.execute("""CREATE TABLE quarantined_txids (
+                txid TEXT PRIMARY KEY, timestamp INTEGER, amount_usdd REAL,
+                from_address TEXT, to_address TEXT, owner TEXT, sig TEXT, status TEXT
+            )""")
+            conn.execute("INSERT INTO unprocessed_txids VALUES ('legacy-credit', 1, 3.0, 'from', 'to', 'owner', 2, 'pending_receival', NULL)")
+            conn.commit()
+            conn.close()
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.add_unprocessed_txid(
+                    txid="legacy-credit", contract_id=0, timestamp=2, amount_usdd=4.0,
+                    from_address="from-2", to_address="to", owner_from_address="owner-2",
+                    confirmations_credit=2, status="pending_receival", amount_usdd_units=4_000_000,
+                )
+                rows = state_db.get_unprocessed_txids_as_dicts()
+
+        self.assertEqual(
+            {(row["txid"], row["contract_id"], row["amount_usdd_units"]) for row in rows},
+            {("legacy-credit", -1, None), ("legacy-credit", 0, 4_000_000)},
+        )
+
+    def test_recovery_does_not_admit_deposits_from_an_incomplete_enumeration(self):
+        """A page failure or page budget exhaust must not advance recovery state."""
+        credit = {
+            "txid": "incomplete-scan-credit", "timestamp": 1_000, "confirmations": 2,
+            "contracts": [{"id": 0, "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": "3"}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path), patch.object(
+                config, "SWAP_PAIR", replace(
+                    config.SWAP_PAIR,
+                    nexus=replace(config.SWAP_PAIR.nexus, treasury_account="TREASURY"),
+                )
+            ), patch.object(
+                nexus_client, "fetch_deposits_since",
+                return_value=nexus_client.DepositScan([credit], False, "page_fetch_failed"),
+            ):
+                state_db.init_db()
+                summary = startup_recovery._rebuild_nexus_from_waterline(0)
+                self.assertEqual(state_db.get_unprocessed_txids_as_dicts(), [])
+
+        self.assertEqual(summary["error"], "nexus_deposit_scan_incomplete:page_fetch_failed")
+
+    def test_recovery_deposit_producer_rejects_malformed_treasury_credit_evidence(self):
+        """Recovery must not call a malformed treasury CREDIT scan complete."""
+        valid = {
+            "txid": "credit-tx",
+            "timestamp": 1_000,
+            "confirmations": 2,
+            "contracts": [{
+                "id": 0,
+                "OP": "CREDIT",
+                "from": "sender",
+                "to": "TREASURY",
+                "amount": "3",
+            }],
+        }
+        malformed = {
+            "missing_txid": lambda tx: tx.pop("txid"),
+            "boolean_timestamp": lambda tx: tx.__setitem__("timestamp", True),
+            "boolean_confirmations": lambda tx: tx.__setitem__("confirmations", True),
+            "string_contract_id": lambda tx: tx["contracts"][0].__setitem__("id", "0"),
+            "missing_sender": lambda tx: tx["contracts"][0].pop("from"),
+            "inexact_amount": lambda tx: tx["contracts"][0].__setitem__("amount", "3.0000001"),
+        }
+        for name, mutate in malformed.items():
+            with self.subTest(field=name):
+                tx = json.loads(json.dumps(valid))
+                mutate(tx)
+                with patch.object(
+                    nexus_client, "_run", return_value=(0, json.dumps([tx]), "")
+                ):
+                    scan = nexus_client.fetch_deposits_since("TREASURY", 0, max_pages=1)
+
+                self.assertFalse(scan.complete)
+                self.assertEqual(scan.deposits, [])
+
     def test_service_record_terms_use_canonical_pair_fee_policy(self):
         """Nexus heartbeat terms must advertise the same policy that pays Solana users."""
         pair = replace(
@@ -112,9 +606,94 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(record["fee_flat_to_solana"], "0.00035")
         self.assertEqual(record["fee_bps"], "100")
 
+    def test_nexus_disposition_fee_uses_canonical_pair_policy(self):
+        """The policy's Nexus scale—not a legacy fee or Solana scale—controls deduction."""
+        pair = replace(
+            config.SWAP_PAIR,
+            nexus=replace(config.SWAP_PAIR.nexus, decimals=9),
+            fees=replace(config.SWAP_PAIR.fees, nexus_disposition_units=2_500),
+        )
+
+        with patch.object(config, "SWAP_PAIR", pair):
+            self.assertEqual(
+                swap_nexus._apply_congestion_fee(Decimal("1")),
+                Decimal("0.9999975"),
+            )
+
+    def test_solana_refund_uses_canonical_pair_refund_fee(self):
+        """Refund output must use the immutable pair fee, not a legacy module alias."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(config.SWAP_PAIR.fees, refund_solana_units=7),
+        )
+        row = ("deposit-sig", 1, "memo", "sender", 100, "to be refunded", None)
+
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "FLAT_FEE_REFUND_SOLANA_UNITS", 29
+        ), patch.object(
+            solana_client.state_db, "filter_unprocessed_sigs", return_value=[row]
+        ), patch.object(
+            solana_client.state_db, "get_unprocessed_sig_status", return_value="to be refunded"
+        ), patch.object(solana_client.state_db, "is_processed_sig", return_value=False), patch.object(
+            solana_client.state_db, "is_quarantined_sig", return_value=False
+        ), patch.object(solana_client.state_db, "refund_attempt_key", return_value="refund-key"), patch.object(
+            solana_client.state_db, "get_attempt_count", return_value=0
+        ), patch.object(solana_client.state_db, "record_attempt"), patch.object(
+            solana_client, "_is_token_account_for_mint", return_value=True
+        ), patch.object(solana_client.state_db, "add_fee_entry"
+        ), patch.object(solana_client.state_db, "mark_processed_sig"), patch.object(
+            solana_client.state_db, "remove_unprocessed_sig"
+        ), patch.object(solana_client.state_db, "update_unprocessed_sig_status"), patch.object(
+            solana_client.state_db, "mark_refunded_sig"
+        ), patch.object(
+            solana_client, "send_solana_token", return_value=(True, "refund-tx")
+        ) as send:
+            processed = solana_client.process_solana_deposits_refunding(limit=1)
+
+        self.assertEqual(processed, 1)
+        send.assert_called_once_with("sender", 93, memo="refundSig:deposit-sig")
+
+    def test_solana_quarantine_uses_canonical_pair_refund_fee(self):
+        """Quarantine output must use the same immutable pair refund fee."""
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(config.SWAP_PAIR.fees, refund_solana_units=7),
+        )
+        row = ("deposit-sig", 1, "memo", "sender", 100, "to be quarantined", None)
+
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "FLAT_FEE_REFUND_SOLANA_UNITS", 29
+        ), patch.object(
+            solana_client.state_db, "filter_unprocessed_sigs", return_value=[row]
+        ), patch.object(
+            solana_client.state_db, "get_unprocessed_sig_status", return_value="to be quarantined"
+        ), patch.object(solana_client.state_db, "should_attempt", return_value=True), patch.object(
+            solana_client.state_db, "quarantine_send_attempt_key", return_value="quarantine-key"
+        ), patch.object(solana_client.state_db, "get_attempt_count", return_value=0), patch.object(
+            solana_client.state_db, "record_attempt"), patch.object(
+            solana_client, "_is_token_account_for_mint", return_value=True
+        ), patch.object(
+            solana_client.state_db, "is_processed_sig", return_value=False
+        ), patch.object(solana_client.state_db, "is_refunded_sig", return_value=False), patch.object(
+            solana_client.state_db, "add_fee_entry"
+        ), patch.object(solana_client.state_db, "mark_processed_sig"), patch.object(
+            solana_client.state_db, "remove_unprocessed_sig"
+        ), patch.object(solana_client.state_db, "update_unprocessed_sig_status"), patch.object(
+            solana_client.state_db, "mark_quarantined_sig"
+        ), patch.object(
+            solana_client, "send_solana_token", return_value=(True, "quarantine-tx")
+        ) as send:
+            processed = solana_client.process_solana_deposits_quarantine(limit=1)
+
+        self.assertEqual(processed, 1)
+        send.assert_called_once_with(
+            config.USDC_QUARANTINE_ACCOUNT, 93, memo="quarantinedSig:deposit-sig"
+        )
+
     def test_solana_poll_money_path_summaries_are_structured_events(self):
         """A Nexus→Solana payout operator must not have to parse console prose."""
         with patch.object(swap_solana.nexus_client, "get_heartbeat_asset", return_value={
+            "last_safe_timestamp_nexus": 100,
             "last_safe_timestamp_solana": 100,
         }), patch.object(
             swap_solana.solana_client, "fetch_incoming_deposits_via_helius", return_value=[]
@@ -811,6 +1390,7 @@ class CriticalSafetyTests(unittest.TestCase):
                         refund.assert_not_called()
                         update_txid.assert_any_call(
                             txid=f"credit-{reason}",
+                            contract_id=-1,
                             status=swap_nexus.NEXUS_STATUS_REFUND_HOLD,
                             hold_reason=reason,
                         )
@@ -972,7 +1552,8 @@ class CriticalSafetyTests(unittest.TestCase):
         run.assert_called_once()
         command = run.call_args.args[0]
         self.assertEqual(command[0], config.NEXUS_CLI)
-        self.assertTrue(command[1].startswith("register/transactions/finance:token/"))
+        self.assertTrue(command[1].startswith("register/transactions/finance:account/"))
+        self.assertIn(f"address={config.SWAP_PAIR.nexus.treasury_account}", command)
         self.assertIn("limit=100", command)
         self.assertIn("offset=0", command)
         self.assertEqual(
@@ -1055,7 +1636,7 @@ class CriticalSafetyTests(unittest.TestCase):
         return_value=(0, json.dumps([{
             "txid": "credit-tx",
             "timestamp": 1_000,
-            "contracts": [{"OP": "CREDIT", "from": "sender", "to": "TREASURY"}],
+            "contracts": [{"id": 0, "OP": "CREDIT", "from": "sender", "to": "TREASURY"}],
         }]), ""),
     )
     def test_malformed_credit_contract_holds_waterline(self, _run, propose_waterline):
@@ -1064,6 +1645,78 @@ class CriticalSafetyTests(unittest.TestCase):
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
                 swap_nexus.poll_nexus_deposits()
+
+        propose_waterline.assert_not_called()
+
+    @patch.object(swap_nexus.alerts, "critical")
+    @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
+    @patch.object(swap_nexus.nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch.object(
+        nexus_client,
+        "_run",
+        return_value=(0, json.dumps([
+            {
+                "txid": "valid-sibling", "timestamp": 1_001,
+                "contracts": [{
+                    "id": 0,
+                    "OP": "CREDIT", "from": "valid-sender", "to": "TREASURY",
+                    "amount": "3",
+                }],
+            },
+            {
+                "txid": "inexact-credit", "timestamp": 1_000,
+                "contracts": [{
+                    "id": 0,
+                    "OP": "CREDIT", "from": "sender", "to": "TREASURY",
+                    "amount": "1.0000001",
+                }],
+            },
+        ]), ""),
+    )
+    def test_inexact_positive_treasury_credit_holds_waterline_and_alerts(
+        self, _run, _heartbeat, propose_waterline, critical
+    ):
+        """An inexact positive credit is unresolved evidence, never dust or a safe scan."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                swap_nexus.poll_nexus_deposits()
+                queued = state_db.get_unprocessed_txids_as_dicts()
+
+        propose_waterline.assert_not_called()
+        self.assertEqual(queued, [])
+        critical.assert_called_once_with(
+            "nexus_credit_invalid_exact_amount",
+            "Positive Nexus treasury credit cannot be represented exactly; scan held",
+            txid="inexact-credit",
+            amount="1.0000001",
+        )
+
+    @patch.object(swap_nexus.state_db, "propose_nexus_waterline")
+    @patch.object(swap_nexus.nexus_client, "get_heartbeat_asset", return_value=None)
+    @patch.object(nexus_client, "_run")
+    def test_nonfinite_or_malformed_treasury_credit_holds_waterline(
+        self, run, _heartbeat, propose_waterline
+    ):
+        """Non-finite and malformed amounts cannot turn a scan into a safe checkpoint."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                for amount in ("NaN", "Infinity", "not-a-number"):
+                    with self.subTest(amount=amount):
+                        run.return_value = (0, json.dumps([{
+                            "txid": f"invalid-{amount}", "timestamp": 1_000,
+                            "contracts": [{
+                                "id": 0,
+                    "OP": "CREDIT", "from": "sender", "to": "TREASURY",
+                                "amount": amount,
+                            }],
+                        }]), "")
+                        swap_nexus.poll_nexus_deposits()
+
+                self.assertEqual(state_db.get_unprocessed_txids_as_dicts(), [])
 
         propose_waterline.assert_not_called()
 
@@ -2383,6 +3036,7 @@ class CriticalSafetyTests(unittest.TestCase):
         """Current LLL-TAO contract filters return endpoint objects, not flat strings."""
         response = json.dumps([{
             "txid": "nested-endpoints-tx",
+            "confirmations": config.NEXUS_TRANSFER_MIN_CONFIRMATIONS,
             "contracts": [{
                 "id": 7, "OP": "DEBIT", "reference": "bridge-xfer:nested",
                 "from": {"address": "TREASURY-REGISTER"},
@@ -2399,6 +3053,27 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(evidence.from_address, "TREASURY-REGISTER")
         self.assertEqual(evidence.to_address, "RECIPIENT-REGISTER")
         self.assertEqual(evidence.contract_id, 7)
+
+    def test_reference_transfer_lookup_holds_unfinal_debit_evidence(self):
+        """A reference match cannot finalize a transfer before the configured depth."""
+        response = json.dumps([{
+            "txid": "reference-unfinal-tx",
+            "confirmations": config.NEXUS_TRANSFER_MIN_CONFIRMATIONS - 1,
+            "contracts": [{
+                "id": 7, "OP": "DEBIT", "reference": "bridge-xfer:unfinal-reference",
+                "from": {"address": "TREASURY-REGISTER"},
+                "to": {"address": "RECIPIENT-REGISTER"},
+                "amount": "1.000000",
+            }],
+        }])
+        with patch.object(nexus_client, "_run", return_value=(0, response, "")):
+            lookup = nexus_client.find_nexus_transfer_debits_by_references(
+                ["bridge-xfer:unfinal-reference"]
+            )
+
+        self.assertFalse(lookup.complete)
+        self.assertEqual(lookup.reason, "insufficient_confirmations")
+        self.assertEqual(lookup.values, {})
 
     def test_transfer_resolution_holds_two_exact_contracts_in_one_transaction(self):
         """A pair of exact contracts sharing a txid must never complete one transfer intent."""
@@ -2663,6 +3338,85 @@ class CriticalSafetyTests(unittest.TestCase):
             "prepared_refund", "authorized_execution", "execution_requested", "finalized_refund",
         ])
         self.assertTrue(all(event["actor"] == "alice" for event in events))
+
+    @patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99)
+    @patch.object(startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True})
+    @patch.object(startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True})
+    @patch.object(startup_recovery, "_fallback_recent_scan")
+    @patch.object(state_db, "recover_interrupted_nexus_transfer_intents", return_value=0)
+    @patch.object(
+        startup_recovery.nexus_client,
+        "get_heartbeat_asset",
+        return_value={
+            "address": "heartbeat-address",
+            "last_poll_timestamp": "2000000000",
+            "last_safe_timestamp_nexus": "1999999000",
+            "last_safe_timestamp_solana": "1999999500",
+        },
+    )
+    def test_startup_recovery_reads_runtime_top_level_heartbeat_waterlines(
+        self, _heartbeat, _recover, fallback, rebuild_nexus, rebuild_solana, _reference
+    ):
+        """A standard runtime heartbeat must rebuild both chains, never take the legacy fallback."""
+        stats = startup_recovery.perform_startup_recovery()
+
+        self.assertTrue(stats["waterline_mode"])
+        self.assertEqual(stats["nexus_waterline"], 1_999_999_000)
+        self.assertEqual(stats["solana_waterline"], 1_999_999_500)
+        rebuild_nexus.assert_called_once_with(1_999_999_000)
+        rebuild_solana.assert_called_once_with(1_999_999_500)
+        fallback.assert_not_called()
+
+    def test_refunded_nexus_credit_identity_does_not_suppress_a_sibling(self):
+        """Refund terminal state must be keyed by the exact CREDIT contract, not txid alone."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "state.db")
+            with patch.object(state_db, "DB_PATH", db_path):
+                state_db.init_db()
+                state_db.mark_refunded_txid("shared-credit-tx", contract_id=0)
+                refunded_first = state_db.is_refunded_txid("shared-credit-tx", contract_id=0)
+                refunded_sibling = state_db.is_refunded_txid("shared-credit-tx", contract_id=1)
+
+        self.assertTrue(refunded_first)
+        self.assertFalse(refunded_sibling)
+
+    def test_startup_recovery_never_clamps_a_custody_waterline_forward(self):
+        """A wipeout rebuild must scan the published checkpoint, however old it is."""
+        heartbeat = {
+            "address": "heartbeat-address",
+            "last_poll_timestamp": "2000000000",
+            "last_safe_timestamp_nexus": "1000000000",
+            "last_safe_timestamp_solana": "1000000500",
+        }
+        with patch.object(startup_recovery.state_db, "recover_interrupted_nexus_transfer_intents", return_value=0), patch.object(
+            startup_recovery.nexus_client, "get_heartbeat_asset", return_value=heartbeat
+        ), patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99), patch.object(
+            startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True}
+        ) as rebuild_nexus, patch.object(
+            startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True}
+        ) as rebuild_solana, patch.object(startup_recovery.time, "time", return_value=2_000_000_000):
+            stats = startup_recovery.perform_startup_recovery()
+
+        self.assertEqual(stats["nexus_waterline"], 1_000_000_000)
+        self.assertEqual(stats["solana_waterline"], 1_000_000_500)
+        rebuild_nexus.assert_called_once_with(1_000_000_000)
+        rebuild_solana.assert_called_once_with(1_000_000_500)
+
+    def test_heartbeat_waterline_parser_rejects_duplicate_configured_field_names(self):
+        """Two independent custody checkpoints must never be read from one asset field."""
+        with patch.object(config, "HEARTBEAT_WATERLINE_NEXUS_FIELD", "shared_waterline"), patch.object(
+            config, "HEARTBEAT_WATERLINE_SOLANA_FIELD", "shared_waterline"
+        ):
+            with self.assertRaises(ValueError):
+                nexus_client.parse_heartbeat_waterlines({"shared_waterline": "1000"})
+
+    def test_heartbeat_waterline_parser_rejects_legacy_nested_schema(self):
+        """Recovery must not reinterpret a legacy nested payload as a current heartbeat."""
+        with self.assertRaises(ValueError):
+            nexus_client.parse_heartbeat_waterlines({
+                "address": "heartbeat-address",
+                "data": '{"nexus_waterline": 1000, "solana_waterline": 1500}',
+            })
 
 
 if __name__ == "__main__":

@@ -12,11 +12,11 @@ Design notes:
  - We intentionally do NOT mutate historical database records except to add missing processed markers;
    reconstruction is additive and idempotent.
  - Waterline-based scanning allows full recovery from complete database loss.
- - Falls back to recent-only scan if waterlines unavailable or very old.
+ - Falls back to recent-only scan only if waterlines are unavailable or unset.
  - Reference seeding heuristic: choose max(reference found in database OR Nexus) + 1.
 """
 from __future__ import annotations
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from . import config, solana_client, nexus_client, state_db
 import time
 
@@ -41,24 +41,36 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
     
     Returns dict with stats about deposits added.
     """
-    treasury_addr = getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", None)
+    # Startup recovery is a custody boundary: never let the legacy mutable alias choose
+    # which account is treated as the bridge treasury.
+    treasury_addr = config.SWAP_PAIR.nexus.treasury_account
     if not treasury_addr:
         return {'nexus_deposits_added': 0, 'error': 'no_treasury_configured'}
-    
+
     print(f"   Rebuilding Nexus deposits from waterline {waterline_timestamp}...")
-    
-    # Fetch all deposits since waterline
-    deposits = nexus_client.fetch_deposits_since(treasury_addr, waterline_timestamp)
-    
-    # Get existing sets from database
+
+    # A partial history page is never a safe basis for a wipeout reconstruction.  In
+    # particular, it must not create markers which could be mistaken for a complete
+    # recovery after a pagination budget or transport failure.
+    scan = nexus_client.fetch_deposits_since(treasury_addr, waterline_timestamp)
+    if not scan.complete:
+        return {
+            'nexus_deposits_added': 0,
+            'nexus_deposits_scanned': 0,
+            'error': f'nexus_deposit_scan_incomplete:{scan.reason or "unknown"}',
+        }
+    deposits = scan.deposits
+
+    # Get existing identities from database.  A transaction can fund more than one
+    # independently payable treasury CREDIT, so txid alone is never a duplicate key.
     conn = state_db.sqlite3.connect(state_db.DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT txid FROM processed_txids")
-    processed_txids = {row[0] for row in cursor.fetchall()}
-    cursor.execute("SELECT txid FROM refunded_txids")
-    refunded_txids = {row[0] for row in cursor.fetchall()}
-    cursor.execute("SELECT txid FROM unprocessed_txids")
-    unprocessed_txids = {row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT txid, contract_id FROM processed_txids")
+    processed_txids = {(row[0], row[1]) for row in cursor.fetchall()}
+    cursor.execute("SELECT txid, contract_id FROM refunded_txids")
+    refunded_txids = {(row[0], row[1]) for row in cursor.fetchall()}
+    cursor.execute("SELECT txid, contract_id FROM unprocessed_txids")
+    unprocessed_txids = {(row[0], row[1]) for row in cursor.fetchall()}
     conn.close()
     
     added_count = 0
@@ -71,80 +83,87 @@ def _rebuild_nexus_from_waterline(waterline_timestamp: int) -> dict:
         conf = int(tx.get("confirmations") or 0)
         
         if not txid:
-            continue
+            return {
+                'nexus_deposits_added': 0,
+                'nexus_deposits_scanned': 0,
+                'error': 'nexus_deposit_scan_incomplete:missing_txid',
+            }
         
-        # Skip if already in database
-        if txid in processed_txids or txid in refunded_txids or txid in unprocessed_txids:
-            skipped_processed += 1
-            continue
-        
-        # Extract contract details
+        # Extract contract details. A transaction may carry multiple CREDITS; every
+        # individual contract must independently prove that it targets the canonical
+        # treasury. A sibling CREDIT never authorizes this one.
         contracts = tx.get("contracts") or []
         for c in contracts:
-            if not isinstance(c, dict):
+            if not isinstance(c, dict) or str(c.get("OP") or "").upper() != "CREDIT":
                 continue
-            if str(c.get("OP") or "").upper() != "CREDIT":
+            to_address = nexus_client._parse_nexus_contract_address(c.get("to"))
+            if to_address != treasury_addr:
                 continue
-            
-            # Get sender
-            from_field = c.get("from")
-            sender = ""
-            if isinstance(from_field, dict):
-                sender = str(from_field.get("address") or from_field.get("name") or "")
-            elif isinstance(from_field, str):
-                sender = from_field
-            
-            # Get amount
+            contract_id = c.get("id")
+            if isinstance(contract_id, bool) or not isinstance(contract_id, int) or contract_id < 0:
+                return {
+                    'nexus_deposits_added': 0,
+                    'nexus_deposits_scanned': 0,
+                    'error': 'nexus_deposit_scan_incomplete:invalid_contract_id',
+                }
+            identity = (txid, contract_id)
+            if identity in processed_txids or identity in refunded_txids or identity in unprocessed_txids:
+                skipped_processed += 1
+                continue
+            sender = nexus_client._parse_nexus_contract_address(c.get("from")) or ""
+
             amount_dec = _parse_decimal_amount(c.get("amount"))
-            if amount_dec <= 0:
+            classification = nexus_client.classify_nexus_credit(c.get("amount"))
+            if classification.disposition == "invalid":
+                if amount_dec.is_finite() and amount_dec > 0:
+                    owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+                    state_db.add_unprocessed_txid(
+                        txid=txid, contract_id=contract_id, timestamp=ts, amount_usdd=float(amount_dec),
+                        from_address=sender, to_address=to_address,
+                        owner_from_address=owner, confirmations_credit=conf,
+                        status="quarantined", amount_usdd_units=None,
+                        hold_reason="invalid_exact_nexus_amount",
+                    )
+                    unprocessed_txids.add(identity)
                 continue
-            
-            # Check minimum threshold
-            # Dust floor, matching poll_nexus_deposits: credits above dust but below
-            # the swap minimum are recorded (as fees) rather than skipped without trace.
-            min_threshold = config.DUST_CREDIT_NEXUS_UNITS / (10 ** config.USDD_DECIMALS)
-            if amount_dec < min_threshold:
+            if classification.disposition == "dust":
                 continue
-            
-            # Check if fees only
-            flat_fee = _parse_decimal_amount(getattr(config, "FLAT_FEE_USDD", "0.1"))
-            dyn_bps = int(getattr(config, "DYNAMIC_FEE_BPS", 0))
-            dyn_fee = (amount_dec * Decimal(dyn_bps)) / Decimal(10000)
-            
-            if amount_dec <= (flat_fee + dyn_fee):
-                # Mark as processed fees
-                owner = (nexus_client.get_account_info(sender) or {}).get("owner")
-                state_db.mark_processed_txid(
-                    txid=txid,
-                    timestamp=ts,
-                    amount_usdd=float(amount_dec),
-                    from_address=sender,
-                    to_address=treasury_addr,
-                    owner=owner or "",
-                    sig="",
-                    status="processed as fees"
-                )
-                processed_txids.add(txid)
-                skipped_fees += 1
-                break
-            
-            # Add to unprocessed
+            credit_units = classification.amount_nexus_units
             owner = (nexus_client.get_account_info(sender) or {}).get("owner")
+
+            if classification.disposition in {"below_minimum", "fee_only"}:
+                kind = (
+                    "below_min_credit_nexus"
+                    if classification.disposition == "below_minimum"
+                    else "fee_only_nexus_credit"
+                )
+                state_db.add_fee_entry(
+                    sig=None, txid=txid, kind=kind, amount_usdc_units=None,
+                    amount_usdd_units=credit_units,
+                )
+                state_db.mark_processed_txid(
+                    txid=txid, contract_id=contract_id, timestamp=ts, amount_usdd=float(amount_dec),
+                    from_address=sender, to_address=treasury_addr, owner=owner or "", sig="",
+                    status="processed as fees", amount_usdd_units=credit_units,
+                )
+                processed_txids.add(identity)
+                skipped_fees += 1
+                continue
+
+            status = "refund pending" if classification.disposition == "over_cap" else "pending_receival"
             state_db.add_unprocessed_txid(
-                txid=txid,
+                txid=txid, contract_id=contract_id,
                 timestamp=ts,
                 amount_usdd=float(amount_dec),
                 from_address=sender,
                 to_address=treasury_addr,
                 owner_from_address=owner,
                 confirmations_credit=conf,
-                status="pending_receival",
-                # Exact base units: refunds are derived from this, not the REAL column.
-                amount_usdd_units=int((amount_dec * (Decimal(10) ** config.USDD_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)),
+                status=status,
+                amount_usdd_units=credit_units,
             )
-            unprocessed_txids.add(txid)
+            unprocessed_txids.add(identity)
             added_count += 1
-            break
     
     return {
         'nexus_deposits_added': added_count,
@@ -373,34 +392,28 @@ def perform_startup_recovery() -> dict:
             **stats,
         }
     
-    # Extract waterlines from heartbeat data field
+    # Every runtime heartbeat is a top-level Nexus basic-asset record.  Never interpret
+    # legacy nested ``data`` payloads as an empty checkpoint: that would bypass Nexus
+    # wipeout reconstruction and silently continue with only a recent Solana memo scan.
     try:
-        data_field = heartbeat.get("data") or "{}"
-        if isinstance(data_field, str):
-            import json
-            data = json.loads(data_field)
-        else:
-            data = data_field
-        
-        nexus_waterline = int(data.get("nexus_waterline") or 0)
-        solana_waterline = int(data.get("solana_waterline") or 0)
-    except Exception:
-        nexus_waterline = 0
-        solana_waterline = 0
-    
-    # Safety: Don't scan too far back (avoid overwhelming recovery)
-    max_lookback_sec = int(getattr(config, "MAX_WATERLINE_LOOKBACK_SEC", 7 * 24 * 3600))  # 7 days
-    current_ts = int(time.time())
-    min_allowed_waterline = current_ts - max_lookback_sec
-    
-    if nexus_waterline and nexus_waterline < min_allowed_waterline:
-        print(f"   ⚠ Nexus waterline too old ({nexus_waterline}), limiting to {max_lookback_sec}s lookback")
-        nexus_waterline = min_allowed_waterline
-    
-    if solana_waterline and solana_waterline < min_allowed_waterline:
-        print(f"   ⚠ Solana waterline too old ({solana_waterline}), limiting to {max_lookback_sec}s lookback")
-        solana_waterline = min_allowed_waterline
-    
+        waterlines = nexus_client.parse_heartbeat_waterlines(heartbeat)
+    except ValueError as exc:
+        print(f"   ⚠ Incompatible heartbeat waterline schema: {exc}")
+        seeded = nexus_client.get_last_reference()
+        return {
+            'reference_seeded': seeded,
+            'interrupted_nexus_transfers_held': interrupted_nexus_transfers_held,
+            'recovery_incomplete': True,
+            'error': f'heartbeat_waterline_schema_incompatible:{exc}',
+        }
+    nexus_waterline = waterlines.nexus
+    solana_waterline = waterlines.solana
+
+    # The heartbeat waterlines are custody checkpoints, not workload hints.  Advancing an
+    # old checkpoint would make liabilities in the omitted interval unrecoverable after a
+    # database wipe.  Recovery must enumerate the entire published range (or return an
+    # explicit incomplete result); callers decide how to schedule the work, never which
+    # credits may be skipped.
     # If no waterlines set, use fallback
     if not nexus_waterline and not solana_waterline:
         print("   ⚠ No waterlines set in heartbeat, using fallback scan")

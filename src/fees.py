@@ -140,7 +140,9 @@ def maintain_backing_and_bounds() -> bool:
     """
     try:
         from . import solana_client, nexus_client
-        vault_solana = solana_client.get_token_account_balance(str(config.VAULT_USDC_ACCOUNT), max_age_sec=5)
+        vault_solana = solana_client.get_token_account_balance(
+            str(config.SWAP_PAIR.solana.vault_account), max_age_sec=5
+        )
         unresolved_liability = state_db.get_unresolved_solana_liability_units()
         available_vault_solana = max(0, int(vault_solana) - int(unresolved_liability))
         # Compare like with like: circulating supply is a Nexus-side liability, the vault a

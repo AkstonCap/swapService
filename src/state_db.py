@@ -140,7 +140,8 @@ def init_db():
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS unprocessed_txids (
-            txid TEXT PRIMARY KEY,
+            txid TEXT NOT NULL,
+            contract_id INTEGER NOT NULL DEFAULT -1,
             timestamp INTEGER,
             amount_usdd REAL,
             from_address TEXT,
@@ -151,12 +152,14 @@ def init_db():
             receival_account TEXT,
             sig TEXT,
             amount_usdd_units INTEGER,
-            hold_reason TEXT
+            hold_reason TEXT,
+            PRIMARY KEY (txid, contract_id)
         )
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_txids (
-            txid TEXT PRIMARY KEY,
+            txid TEXT NOT NULL,
+            contract_id INTEGER NOT NULL DEFAULT -1,
             timestamp INTEGER,
             amount_usdd REAL,
             amount_usdd_units INTEGER,
@@ -164,12 +167,14 @@ def init_db():
             to_address TEXT,
             owner TEXT,
             sig TEXT,
-            status TEXT
+            status TEXT,
+            PRIMARY KEY (txid, contract_id)
         )
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS refunded_txids (
-            txid TEXT PRIMARY KEY,
+            txid TEXT NOT NULL,
+            contract_id INTEGER NOT NULL DEFAULT -1,
             timestamp INTEGER,
             amount_usdd REAL,
             from_address TEXT,
@@ -177,19 +182,22 @@ def init_db():
             owner_from_address TEXT,
             confirmations_credit INTEGER,
             status TEXT,
-            sig TEXT
+            sig TEXT,
+            PRIMARY KEY (txid, contract_id)
         )
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS quarantined_txids (
-            txid TEXT PRIMARY KEY,
+            txid TEXT NOT NULL,
+            contract_id INTEGER NOT NULL DEFAULT -1,
             timestamp INTEGER,
             amount_usdd REAL,
             from_address TEXT,
             to_address TEXT,
             owner TEXT,
             sig TEXT,
-            status TEXT
+            status TEXT,
+            PRIMARY KEY (txid, contract_id)
         )
     """)
     cursor.execute("""
@@ -417,6 +425,59 @@ def init_db():
     _ptx_cols = {row[1] for row in cursor.fetchall()}
     if "amount_usdd_units" not in _ptx_cols:
         cursor.execute("ALTER TABLE processed_txids ADD COLUMN amount_usdd_units INTEGER")
+
+    # SQLite cannot add a composite primary key in place.  Legacy rows have no
+    # authoritative contract id, so preserve them under the explicit -1 sentinel
+    # rather than inventing a chain identity.  New custody evidence always uses a
+    # non-negative contract id, and cannot collide with those legacy rows.
+    def _migrate_credit_identity(table: str, columns: tuple[str, ...], ddl: str) -> None:
+        existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+        if "contract_id" in existing:
+            return
+        legacy_columns = tuple(column for column in columns if column != "contract_id")
+        temp = f"{table}_contract_identity_v2"
+        cursor.execute(f"CREATE TABLE {temp} ({ddl})")
+        cursor.execute(
+            f"INSERT INTO {temp} ({', '.join(columns)}) "
+            f"SELECT {legacy_columns[0]}, -1, {', '.join(legacy_columns[1:])} FROM {table}"
+        )
+        cursor.execute(f"DROP TABLE {table}")
+        cursor.execute(f"ALTER TABLE {temp} RENAME TO {table}")
+
+    _migrate_credit_identity(
+        "unprocessed_txids",
+        ("txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
+         "owner_from_address", "confirmations_credit", "status", "receival_account", "sig",
+         "amount_usdd_units", "hold_reason"),
+        "txid TEXT NOT NULL, contract_id INTEGER NOT NULL DEFAULT -1, timestamp INTEGER, "
+        "amount_usdd REAL, from_address TEXT, to_address TEXT, owner_from_address TEXT, "
+        "confirmations_credit INTEGER, status TEXT, receival_account TEXT, sig TEXT, "
+        "amount_usdd_units INTEGER, hold_reason TEXT, PRIMARY KEY (txid, contract_id)",
+    )
+    _migrate_credit_identity(
+        "processed_txids",
+        ("txid", "contract_id", "timestamp", "amount_usdd", "amount_usdd_units",
+         "from_address", "to_address", "owner", "sig", "status"),
+        "txid TEXT NOT NULL, contract_id INTEGER NOT NULL DEFAULT -1, timestamp INTEGER, "
+        "amount_usdd REAL, amount_usdd_units INTEGER, from_address TEXT, to_address TEXT, "
+        "owner TEXT, sig TEXT, status TEXT, PRIMARY KEY (txid, contract_id)",
+    )
+    _migrate_credit_identity(
+        "refunded_txids",
+        ("txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
+         "owner_from_address", "confirmations_credit", "status", "sig"),
+        "txid TEXT NOT NULL, contract_id INTEGER NOT NULL DEFAULT -1, timestamp INTEGER, "
+        "amount_usdd REAL, from_address TEXT, to_address TEXT, owner_from_address TEXT, "
+        "confirmations_credit INTEGER, status TEXT, sig TEXT, PRIMARY KEY (txid, contract_id)",
+    )
+    _migrate_credit_identity(
+        "quarantined_txids",
+        ("txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
+         "owner", "sig", "status"),
+        "txid TEXT NOT NULL, contract_id INTEGER NOT NULL DEFAULT -1, timestamp INTEGER, "
+        "amount_usdd REAL, from_address TEXT, to_address TEXT, owner TEXT, sig TEXT, "
+        "status TEXT, PRIMARY KEY (txid, contract_id)",
+    )
 
     conn.commit()
     conn.close()
@@ -1344,10 +1405,17 @@ def mark_unprocessed_txid(
     conn.commit()
     conn.close()
 
-def is_unprocessed_txid(txid: str) -> bool:
+def is_unprocessed_txid(txid: str, contract_id: int | None = None) -> bool:
+    """Check whether any (or one exact) Nexus credit is still queued."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM unprocessed_txids WHERE txid = ?", (txid,))
+    if contract_id is None:
+        cursor.execute("SELECT 1 FROM unprocessed_txids WHERE txid = ?", (txid,))
+    else:
+        cursor.execute(
+            "SELECT 1 FROM unprocessed_txids WHERE txid = ? AND contract_id = ?",
+            (txid, contract_id),
+        )
     result = cursor.fetchone()
     conn.close()
     return result is not None
@@ -1365,17 +1433,18 @@ def mark_processed_txid(
     status: str | None = None,
     *,
     amount_usdd_units: int | None = None,
+    contract_id: int = -1,
 ):
-    """Insert/update processed txid. Status optional (e.g. 'credited', 'skipped')."""
+    """Insert/update processed credit evidence by immutable Nexus contract identity."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         """
         INSERT OR REPLACE INTO processed_txids
-        (txid, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (txid, contract_id, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (txid, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status),
+        (txid, contract_id, timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner, sig, status),
     )
     conn.commit()
     conn.close()
@@ -1394,6 +1463,8 @@ def mark_refunded_txid(
     owner_from_address: str | None = None,
     confirmations_credit: int | None = None,
     status: str | None = None,
+    *,
+    contract_id: int = -1,
 ):
     """Insert/update refunded txid.
 
@@ -1405,18 +1476,24 @@ def mark_refunded_txid(
     cursor.execute(
         """
         INSERT OR REPLACE INTO refunded_txids (
-            txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, sig
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, sig
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, sig),
+        (txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, sig),
     )
     conn.commit()
     conn.close()
 
-def is_refunded_txid(txid: str) -> bool:
+def is_refunded_txid(txid: str, contract_id: int | None = None) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM refunded_txids WHERE txid = ?", (txid,))
+    if contract_id is None:
+        cursor.execute("SELECT 1 FROM refunded_txids WHERE txid = ?", (txid,))
+    else:
+        cursor.execute(
+            "SELECT 1 FROM refunded_txids WHERE txid = ? AND contract_id = ?",
+            (txid, contract_id),
+        )
     result = cursor.fetchone()
     conn.close()
     return result is not None
@@ -1433,6 +1510,8 @@ def mark_quarantined_txid(
     to_address: str | None = None,
     owner: str | None = None,
     status: str | None = None,
+    *,
+    contract_id: int = -1,
 ):
     """Record a quarantined Nexus txid.
 
@@ -1445,16 +1524,17 @@ def mark_quarantined_txid(
     cursor = conn.cursor()
     # Preserve any previously-recorded detail if this is a re-mark with fewer fields.
     cursor.execute("SELECT timestamp, amount_usdd, from_address, to_address, owner, status "
-                   "FROM quarantined_txids WHERE txid = ?", (txid,))
+                   "FROM quarantined_txids WHERE txid = ? AND contract_id = ?", (txid, contract_id))
     prev = cursor.fetchone() or (None, None, None, None, None, None)
     cursor.execute(
         """
         INSERT OR REPLACE INTO quarantined_txids
-        (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             txid,
+            contract_id,
             timestamp if timestamp is not None else (prev[0] if prev[0] is not None else int(_time.time())),
             amount_usdd if amount_usdd is not None else prev[1],
             from_address if from_address is not None else prev[2],
@@ -1494,10 +1574,16 @@ def payouts_since(seconds: int) -> int:
     conn.close()
     return int(row[0]) if row and row[0] else 0
 
-def is_quarantined_txid(txid: str) -> bool:
+def is_quarantined_txid(txid: str, contract_id: int | None = None) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM quarantined_txids WHERE txid = ?", (txid,))
+    if contract_id is None:
+        cursor.execute("SELECT 1 FROM quarantined_txids WHERE txid = ?", (txid,))
+    else:
+        cursor.execute(
+            "SELECT 1 FROM quarantined_txids WHERE txid = ? AND contract_id = ?",
+            (txid, contract_id),
+        )
     result = cursor.fetchone()
     conn.close()
     return result is not None
@@ -2050,6 +2136,7 @@ def is_refunded(sig: str) -> bool:
 
 def add_unprocessed_txid(
     txid: str,
+    contract_id: int = -1,
     timestamp: int | None = None,
     amount_usdd: float | None = None,
     from_address: str | None = None,
@@ -2067,9 +2154,9 @@ def add_unprocessed_txid(
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO unprocessed_txids
-        (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason))
+        (txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason))
     conn.commit()
     conn.close()
 
@@ -2083,7 +2170,7 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT txid, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason
+        SELECT txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason
         FROM unprocessed_txids
         ORDER BY timestamp ASC
         LIMIT ?
@@ -2095,6 +2182,7 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
 
 def update_unprocessed_txid(
     txid: str,
+    contract_id: int = -1,
     timestamp: int | None = None,
     amount_usdd: float | None = None,
     from_address: str | None = None,
@@ -2147,27 +2235,33 @@ def update_unprocessed_txid(
         conn.close()
         return
     
-    values.append(txid)
-    sql = f"UPDATE unprocessed_txids SET {', '.join(fields)} WHERE txid = ?"
+    values.extend((txid, contract_id))
+    sql = f"UPDATE unprocessed_txids SET {', '.join(fields)} WHERE txid = ? AND contract_id = ?"
     cursor.execute(sql, tuple(values))
     conn.commit()
     conn.close()
 
 
-def remove_unprocessed_txid(txid: str):
+def remove_unprocessed_txid(txid: str, contract_id: int = -1):
     """Remove an unprocessed txid."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM unprocessed_txids WHERE txid = ?", (txid,))
+    cursor.execute("DELETE FROM unprocessed_txids WHERE txid = ? AND contract_id = ?", (txid, contract_id))
     conn.commit()
     conn.close()
 
 
-def is_processed_txid(txid: str) -> bool:
-    """Check if txid has been processed."""
+def is_processed_txid(txid: str, contract_id: int | None = None) -> bool:
+    """Check terminal evidence by exact identity, or any legacy txid when omitted."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM processed_txids WHERE txid = ?", (txid,))
+    if contract_id is None:
+        cursor.execute("SELECT 1 FROM processed_txids WHERE txid = ?", (txid,))
+    else:
+        cursor.execute(
+            "SELECT 1 FROM processed_txids WHERE txid = ? AND contract_id = ?",
+            (txid, contract_id),
+        )
     result = cursor.fetchone()
     conn.close()
     return result is not None
@@ -2216,17 +2310,18 @@ def get_unprocessed_txids_as_dicts(limit: int = 1000) -> list[dict]:
     return [
         {
             "txid": t[0],
-            "ts": t[1],
-            "amount_usdd": t[2],
-            "from": t[3],  # from_address
-            "to": t[4],  # to_address
-            "owner": t[5],  # owner_from_address
-            "confirmations": t[6],  # confirmations_credit
-            "comment": t[7],  # status
-            "receival_account": t[8] if len(t) > 8 else None,
-            "sig": t[9] if len(t) > 9 else None,
-            "amount_usdd_units": t[10] if len(t) > 10 else None,
-            "hold_reason": t[11] if len(t) > 11 else None,
+            "contract_id": t[1],
+            "ts": t[2],
+            "amount_usdd": t[3],
+            "from": t[4],  # from_address
+            "to": t[5],  # to_address
+            "owner": t[6],  # owner_from_address
+            "confirmations": t[7],  # confirmations_credit
+            "comment": t[8],  # status
+            "receival_account": t[9] if len(t) > 9 else None,
+            "sig": t[10] if len(t) > 10 else None,
+            "amount_usdd_units": t[11] if len(t) > 11 else None,
+            "hold_reason": t[12] if len(t) > 12 else None,
         }
         for t in tuples
     ]

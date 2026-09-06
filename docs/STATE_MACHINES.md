@@ -67,6 +67,24 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > field, zero-input/positive-output terminal mints can reconcile healthy, and the
 > target-node matrix remains unrun. Production remains hard-blocked; see
 > `DEVELOPMENT_REVIEW_2026-09-02.md`.
+>
+> **Follow-up review (2026-09-03, `8769dcf`):** positive finality, strictly
+> positive completed-mint inputs and canonical fee policy are now enforced and
+> covered by the green suite. Startup reconstruction, however, does not preserve
+> the live Nexus-credit dust/minimum/cap/fee transitions: positive-output
+> below-minimum or over-cap credits can be queued for payout, and fee-only
+> recovery omits exact-unit/fee-ledger evidence. Live polling and recovery must
+> share one classifier. Production remains hard-blocked; see
+> `DEVELOPMENT_REVIEW_2026-09-03.md`.
+>
+> **Follow-up review (2026-09-05, `c2d07aa`):** live and recovery Nexus
+> enumeration now target the canonical treasury account, one strict top-level
+> heartbeat DTO is shared by runtime and recovery, and old custody waterlines are
+> no longer moved forward. Incoming state is still keyed by `txid`, so a transaction
+> with multiple treasury CREDIT contracts is rejected atomically and holds the
+> waterline rather than being silently truncated. Malformed qualifying recovery
+> evidence, mutable offset pagination and non-latching startup failure remain open.
+> Production remains hard-blocked; see `DEVELOPMENT_REVIEW_2026-09-05.md`.
 
 ---
 
@@ -275,9 +293,17 @@ SQLite runs in **WAL** mode (set in `init_db()`).
 - Refund/quarantine sends carry `refundSig:<sig>` / `quarantinedSig:<sig>` memos, checked on-chain before a retry re-sends.
 
 **USDD → USDC**
-- Nexus txid is the primary key; mapping validated on (`txid_toService`, `owner`).
-- USDC sends carry `nexus_txid:<txid>`; the resulting signature is stored in `unprocessed_txids.sig`.
+- Nexus txid is currently the primary key; this cannot represent multiple treasury
+  CREDIT contracts in one transaction. Live and recovery paths therefore reject such
+  a transaction and hold the waterline. The required durable identity is
+  `(txid, contract_id)` throughout pending, terminal, fee and disposition state.
+- Mapping is validated on (`txid_toService`, `owner`). USDC sends currently carry
+  `nexus_txid:<txid>`; the resulting signature is stored in `unprocessed_txids.sig`.
 - Startup recovery rebuilds markers from `nexus_txid:`, `refundSig:` and `quarantinedSig:` memos.
+
+These are containment semantics, not a production-ready identity model. Until the
+contract-id migration lands, a valid multi-CREDIT transaction is deliberately
+unprocessible rather than silently reduced to one liability.
 
 ---
 

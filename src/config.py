@@ -280,6 +280,13 @@ FLAT_FEE_TO_NEXUS = _compat_env("FEE_FLAT_TO_NEXUS", "FLAT_FEE_USDD", default="0
 FEE_REFUND_SOLANA = _compat_env(
     "FEE_REFUND_SOLANA", "FLAT_FEE_USDD", default=FLAT_FEE_TO_NEXUS
 )
+# Nexus congestion/disposition fee for an explicitly authorized Nexus transfer. Automatic
+# refunds remain disabled; this term still belongs in the canonical fee policy so the
+# eventual durable operator workflow cannot read a separate legacy-only setting.
+FEE_NEXUS_DISPOSITION = _compat_env(
+    "FEE_NEXUS_DISPOSITION", "NEXUS_CONGESTION_FEE_USDD", default="0"
+)
+NEXUS_CONGESTION_FEE_USDD = FEE_NEXUS_DISPOSITION  # compatibility attribute
 # Compatibility attributes for existing callers. New code should consume SWAP_PAIR.
 FLAT_FEE_USDC = FLAT_FEE_TO_SOLANA
 FLAT_FEE_USDD = FLAT_FEE_TO_NEXUS
@@ -293,25 +300,45 @@ def _to_units(s: str, decimals: int) -> int:
         raise ValueError(f"{s!r} cannot be represented with {decimals} decimals")
     return int(integral)
 
+
+def _non_negative_fee_units(name: str, value: str, decimals: int) -> int:
+    """Parse a fee amount without permitting it to increase a user payout."""
+    units = _to_units(value, decimals)
+    if units < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return units
+
 # Fee charged on an output sent to Nexus, in Nexus base units.
-FLAT_FEE_TO_NEXUS_UNITS = _to_units(FLAT_FEE_TO_NEXUS, USDD_DECIMALS)
+FLAT_FEE_TO_NEXUS_UNITS = _non_negative_fee_units(
+    "FEE_FLAT_TO_NEXUS", FLAT_FEE_TO_NEXUS, USDD_DECIMALS
+)
 # Fee charged on an output sent to Solana, in Solana base units.
-FLAT_FEE_TO_SOLANA_UNITS = _to_units(FLAT_FEE_TO_SOLANA, USDC_DECIMALS)
+FLAT_FEE_TO_SOLANA_UNITS = _non_negative_fee_units(
+    "FEE_FLAT_TO_SOLANA", FLAT_FEE_TO_SOLANA, USDC_DECIMALS
+)
 # A failed Solana deposit is returned on Solana, so its USDD-denominated refund fee
 # must be represented in Solana base units, not Nexus base units.
-FLAT_FEE_REFUND_SOLANA_UNITS = _to_units(FEE_REFUND_SOLANA, USDC_DECIMALS)
+FLAT_FEE_REFUND_SOLANA_UNITS = _non_negative_fee_units(
+    "FEE_REFUND_SOLANA", FEE_REFUND_SOLANA, USDC_DECIMALS
+)
+# Authorized Nexus refund/disposition fee in Nexus base units. It is currently not
+# applied automatically, but its unit representation is immutable inside SWAP_PAIR.
+FEE_NEXUS_DISPOSITION_UNITS = _non_negative_fee_units(
+    "FEE_NEXUS_DISPOSITION", FEE_NEXUS_DISPOSITION, USDD_DECIMALS
+)
 # The Solana-output fee re-expressed in Nexus base units for Nexus-side input thresholds.
-FLAT_FEE_TO_SOLANA_NEXUS_UNITS = _to_units(FLAT_FEE_TO_SOLANA, USDD_DECIMALS)
+FLAT_FEE_TO_SOLANA_NEXUS_UNITS = _non_negative_fee_units(
+    "FEE_FLAT_TO_SOLANA", FLAT_FEE_TO_SOLANA, USDD_DECIMALS
+)
 
 # A single bps rate is deliberately applied to the input of each direction.  Callers use
 # direction-named helpers/inputs so the source scale is explicit: Nexus units for a
 # Nexus->Solana payout and Solana units for a Solana->Nexus payout.
 FEE_BPS = int(_compat_env("FEE_BPS", "DYNAMIC_FEE_BPS", default="10"))
+if not 0 <= FEE_BPS < 5_000:
+    raise ValueError("FEE_BPS must be between 0 and 4999")
 DYNAMIC_FEE_BPS = FEE_BPS  # compatibility attribute for existing callers
 FEES_STATE_FILE = os.getenv("FEES_STATE_FILE", "fees_state.json")
-
-# Nexus congestion fee for Nexus refunds (token units)
-NEXUS_CONGESTION_FEE_USDD = os.getenv("NEXUS_CONGESTION_FEE_USDD", "0.001")
 
 # Anti-DoS protections
 # Default is DERIVED from the flat fee (2x), not a fixed dollar figure: a hardcoded "0.2"
@@ -457,6 +484,7 @@ class FeePolicy:
     flat_to_nexus_units: int
     flat_to_solana_units: int
     refund_solana_units: int
+    nexus_disposition_units: int
     basis_points: int
 
 
@@ -489,6 +517,7 @@ SWAP_PAIR = SwapPairConfig(
         flat_to_nexus_units=FLAT_FEE_TO_NEXUS_UNITS,
         flat_to_solana_units=FLAT_FEE_TO_SOLANA_UNITS,
         refund_solana_units=FLAT_FEE_REFUND_SOLANA_UNITS,
+        nexus_disposition_units=FEE_NEXUS_DISPOSITION_UNITS,
         basis_points=FEE_BPS,
     ),
     deposit_memo_prefix=DEPOSIT_MEMO_PREFIX,

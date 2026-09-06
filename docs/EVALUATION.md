@@ -1,10 +1,11 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Date:** 2026-08-31
-**Evaluated code:** `cc175cb595ebe7d1fedd8173020e2a133627906a`
+**Date:** 2026-09-05
+**Evaluated code:** `c2d07aa990627da758f10be6c765a59039b05d4d`
 **Status:** Current issue register and repair priority for `swapService`
+**Architecture-plan update:** 2026-09-05 (recovery repairs reviewed; provider-v2 target remains planned)
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-08-31.md`](DEVELOPMENT_REVIEW_2026-08-31.md); earlier reviews remain historical evidence.
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-09-05.md`](DEVELOPMENT_REVIEW_2026-09-05.md); earlier reviews remain historical evidence.
 
 ## 1. Executive verdict
 
@@ -18,7 +19,7 @@ The repair work through the evaluated head materially improved the bridge:
 - unresolved Solana deposits are deducted from backing and spendable surplus;
 - backing and circulating-supply errors fail closed;
 - non-idempotent automatic surplus actions are disabled;
-- incomplete, malformed, truncated and empty Nexus enumeration holds the waterline;
+- recognized CLI, parse, page-budget and empty-response failures hold the Nexus waterline;
 - the processing pass never proposes a Nexus checkpoint;
 - every unsafe automatic Nexus refund path now holds and alerts for operator review;
 - the heuristic Nexus server-side amount filter has been removed from normal and recovery scans;
@@ -34,37 +35,36 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command exists and is green locally.
 
 Those controls are valuable. They do not make the service production-ready.
-Debit lookup requires an explicitly complete range before a unique candidate can terminalize. It
-normalizes current LLL-TAO nested DEBIT endpoint objects and compares their immutable `address`
-values to the configured token-register address rather than to the display token name. Terminal
-transfer and mint records retain both `txid` and `contract_id`. These local controls remain
-fail-closed: a missing/mismatched configured register address or unstable remote range holds the
-record. Remote reconciliation intentionally fails closed beyond one page, so it cannot clear the
-exposure pause once history outgrows that bounded view. Production admission also omits the
-required multiuser session prerequisite. Automatic Nexus refunds remain disabled while the durable
-intent protocol awaits crash-boundary and target-node evidence. The standing live-chain acceptance
-matrix has not been run. See
-`DEVELOPMENT_REVIEW_2026-08-31_1616.md`.
+The 2026-09-05 review verifies three local repairs: deposit enumeration now targets the canonical
+treasury account, runtime and recovery share one strict top-level heartbeat parser, and recovery no
+longer moves an old custody waterline forward. Nexus can still place multiple CREDIT contracts in
+one transaction, while every incoming Nexus queue/archive table remains keyed only by `txid`.
+Current code rejects such a transaction and holds the page rather than silently losing a sibling;
+that is fail-closed containment, not the required `(txid, contract_id)` repair. Malformed recovery
+evidence can still be called complete, mutable offset pagination can omit a boundary transaction,
+and startup does not latch or abort exposure on recovery failure. The canonical treasury query also
+lacks target-node acceptance evidence. Automatic Nexus refunds remain disabled and the live-chain
+matrix has not been run. See `DEVELOPMENT_REVIEW_2026-09-05.md`.
 
 ### Current severity summary
 
 | Severity | Count | Meaning |
 |---|---:|---|
-| Critical release gate | 0 | — |
-| High release blocker | 1 | Bounded remote-history availability / stable-range evidence |
-| Medium / operational | 3 | Session admission, logging isolation and live acceptance gaps |
-| Low / hygiene | 2 | Transport-wrapper exception and whitespace gate |
+| Critical release gate | 1 | Incoming Nexus contract identity remains txid-only; multi-CREDIT transactions are contained but unrepresentable |
+| High release blocker | 3 | Malformed recovery, mutable pagination and non-latching startup failure |
+| Medium / operational | 5 | Fee atomicity, hidden discrepancy amount, finality coercion, regression gaps and live acceptance |
+| Locally repaired, externally gated | 3 | Treasury scan scope, heartbeat schema and exact old-waterline preservation |
 
 ### Release gates
 
 | Gate | Status |
 |---|---|
 | No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
-| No checkpoint advances from incomplete/lossy enumeration | **CONTAINED locally** — explicit failures, malformed responses, truncation and empty successful Nexus pages hold; target-node stable-range/pagination evidence remains required |
+| No checkpoint advances from incomplete/lossy enumeration | **FAILED in recovery** — missing/malformed contract identity can be skipped under `complete=True`; target-node stable-range/pagination evidence also remains required |
 | Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **CONTAINED locally** — only complete lookup evidence with normalized immutable endpoint addresses can terminalize, and terminal records retain `(txid, contract_id)`; target-node stable-range evidence remains required |
-| One composable automated test command | **PASS locally** — 99 tests plus 14 subtests on `368b064` |
-| CI enforces tests and static checks | **PASS on reviewed head** — GitHub Actions run 33400416736 succeeded for `368b064`; live acceptance and independent safety gates remain open |
+| Durable completed-state data supports reconciliation | **PARTIAL** — outbound terminal records retain `(txid, contract_id)`, but incoming Nexus deposits still collapse all contracts under `txid` |
+| One composable automated test command | **PASS locally** — 145 tests plus 19 subtests on `7208f8b` |
+| CI enforces tests and static checks | **PASS on reviewed head** — GitHub Actions run 33908593661 succeeded for `7208f8b`; the Critical fixtures and live acceptance gates remain open |
 | Live devnet/testnet matrix | **NOT RUN** |
 
 ---
@@ -478,6 +478,65 @@ resolve ambiguous outcome against chain -> finalize local state
 
 A timeout is not failure, an empty bounded scan is not absence, and a warning is not a safety control. This rule already protects the repaired Solana→Nexus debit path; it must also govern Nexus refunds, quarantine transfers, fee movements and any future automated maintenance action.
 
+### Target deployment configuration (partially implemented; incomplete)
+
+The existing generic token variables are only a partial compatibility layer. Runtime and
+operator surfaces still contain USDC/USDD-specific aliases, defaults, labels and account names,
+and the fee policy is spread across direction-specific values, micro-amount percentages and an
+inert congestion-fee setting. A fork therefore cannot yet be called completely token-pair or
+fee-policy configurable.
+
+The current code now has an immutable `SwapPairConfig` foundation, conflict-detecting aliases and
+several canonical fee/custody consumers. The target architecture requires that object to be passed
+to every money, reconciliation, dashboard and publication path. It must contain, for each
+chain side, the network/cluster, canonical token identity (Nexus register address or Solana mint),
+display symbol, decimals, custody accounts and quarantine/fee destinations. Symbols are display
+metadata only; no authorization, reconciliation or routing decision may compare a ticker such as
+`USDD` or `USDC` when an immutable address is available.
+
+The same configuration object must own the complete fee policy:
+
+- independent flat output fee and proportional basis-point fee for each direction;
+- configurable minimum, dust and sub-minimum retention policy for each input side;
+- explicit refund, quarantine/disposition and Nexus congestion-cost policy (zero is valid);
+- fee destination/account and accounting treatment;
+- exact base-unit representation, effective timestamp and a terms/configuration version.
+
+Production startup must reject missing token identities, implicit mainnet token defaults,
+negative or inexact fees, fees that can consume an otherwise accepted minimum swap, mismatched
+mint/account ownership, and unpublished terms. Public terms, payout math, refund math, fee-ledger
+entries, dashboard labels and reconciliation must all be derived from the same validated object so
+the service cannot advertise one schedule and execute another. Legacy `USDC_*`/`USDD_*` variables
+may remain temporarily as migration aliases, but conflicting legacy and canonical values must fail
+startup. Existing database column names and persisted lifecycle values remain frozen until an
+explicit, tested migration is provided; generic configuration does not justify rewriting in-flight
+fund records.
+
+### Provider asset identity and discovery (planned; not implemented)
+
+Using the local asset name as the heartbeat identity is the wrong long-term boundary. A local name
+is scoped to a Nexus signature chain and forces name coordination, while a provider may operate
+multiple swapService instances or token pairs from that chain. The target provider record therefore
+uses the exact immutable attribute `"distordia-type": "swapService"` for type discovery and the
+Nexus asset **address** as the canonical runtime identity. The local name becomes an optional human
+alias only.
+
+The type attribute is necessary but not sufficient for uniqueness: discovery can legitimately
+return several swapService assets. Every record must also carry an immutable `service_id`, provider
+owner, schema version and complete pair/custody identity. The running instance is configured with
+the selected asset address, then verifies the asset owner, `distordia-type`, `service_id`, token
+identities and custody addresses before reading a waterline or publishing a heartbeat. It must
+never update the first type match.
+
+One provider asset should give a user or auditor a complete, non-secret overview of the deployment:
+provider/contact/source and terms links; software and schema versions; Nexus network, token register,
+decimals and treasury; Solana cluster, mint, decimals and vault; enabled directions; memo/mapping
+contract; all fee, minimum and cap terms; quarantine/fee destinations; status/pause reason;
+liveness timestamps and per-chain safe waterlines. Volatile balances need not be copied into the
+asset because the published custody addresses are independently queryable. Secrets, private RPC
+URLs, PINs, sessions and key material must never be published. The proposed v2 field contract and
+migration are defined in [`../ASSET_STANDARD.md`](../ASSET_STANDARD.md#provider-swapservice-asset-standard-v2-planned).
+
 ---
 
 ## 7. Prioritized development plan
@@ -485,14 +544,17 @@ A timeout is not failure, an empty bounded scan is not absence, and a warning is
 The plan is sequenced by expected fund-safety value from the evaluated head. Completed
 containment and engineering-gate work stays visible because every later batch depends on it.
 
-### Batch 0 — Immediate containment ✅
+### Batch 0 — Immediate containment **PARTIAL / REOPENED**
 
 1. Disable automatic Nexus refunds; hold and alert instead.
 2. Remove heuristic Nexus server filtering from normal and recovery enumeration.
 3. Surface every held state with chain references, reason, age and safe operator guidance.
+4. Bind deposit admission/recovery to canonical treasury history and `(txid, contract_id)`.
 
-**Exit met:** no ambiguous Nexus refund is retried automatically and no heuristic amount
-filter can authorize a checkpoint. This is containment, not permission to deploy.
+**Exit not met:** refunds remain contained and canonical treasury-account history is now used
+locally, but target-node account-history semantics are unproven and txid-only state cannot represent
+sibling credits. Multi-CREDIT transactions are rejected atomically and hold the waterline rather
+than being silently truncated.
 
 ### Batch 1 — Engineering and exact-money gate ✅
 
@@ -618,6 +680,60 @@ hold-resolution, incident-response and key-rotation procedures.
    before deployment. Refresh this evaluation against the final reviewed commit before a production
    candidate is considered.
 
+### Batch 7 — Complete configurability and provider asset v2 **(in progress; provider v2 remains documentation only)**
+
+**Goal:** make one binary safely deployable for an arbitrary Nexus-token/Solana-mint pair and allow
+several independently discoverable swapService instances under one Nexus signature chain.
+
+**Expected implementation surfaces:** `src/config.py`, `src/nexus_client.py`,
+`src/solana_client.py`, `src/swap_solana.py`, `src/swap_nexus.py`, `src/fees.py`,
+`src/startup_recovery.py`, `src/dashboard.py`, `register_service.py`,
+`create_heartbeat_asset.py`, `.env.example`, `CONFIG.md`, `SETUP.md`, `README.md` and new focused
+tests under `tests/`. Treat `src/state_db.py` and existing SQLite/status identifiers as frozen
+compatibility surfaces unless a separate append-only migration and upgrade test are part of the
+same change.
+
+1. ✅ Inventory every USDC/USDD literal, legacy config attribute, account name, database label,
+   dashboard label, helper script default and public example. Classify each as runtime semantics,
+   display-only metadata, migration alias or frozen persisted compatibility state.
+2. Introduce canonical chain-neutral token, custody and fee-policy configuration. Require explicit
+   production token identities and fee terms; retain legacy names only through one conflict-detecting
+   compatibility adapter.
+3. Route payout, refund, micro-amount handling, fee collection, fee accounting, thresholds,
+   reconciliation, alerts, dashboard and public terms through the same validated configuration.
+   Remove or implement the currently inert congestion-fee setting rather than continuing to publish
+   a setting that does not affect execution.
+4. Add startup validation for exact representability at both token precisions, non-negative fee
+   values, coherent minima/dust/caps, correct mint/account ownership and a deterministic
+   configuration/terms fingerprint.
+5. Replace name-based provider-record reads and updates with address-based access. On every startup,
+   verify asset owner, exact `distordia-type=swapService`, schema version, `service_id`, canonical
+   token identities and custody addresses before trusting its waterlines.
+6. Update `register_service.py` and retire `create_heartbeat_asset.py` behind a migration path that
+   creates the complete v2 record from validated config. Because `format=basic` fixes the field set,
+   do not relabel an incomplete v1 heartbeat as v2; create a new asset and record its address.
+7. Support a compatibility release that can read the old named v1 heartbeat only when explicitly
+   enabled, while writing/advertising the selected v2 address. Remove the name requirement after
+   operators and monitors have migrated.
+8. Add tests for two or more records owned by one signature chain, multiple token pairs, duplicate
+   type matches, wrong-owner/type/service-id records, address/name disagreement, altered on-chain
+   terms, every zero/non-zero fee component and legacy/canonical configuration conflicts.
+9. Update `.env.example`, `CONFIG.md`, `SETUP.md`, `README.md`, the dashboard and inspection output
+   only when the implementation exists; until then, label the v2 contract as planned.
+
+**Required verification:** focused configuration tests must cover every fee component and conflict
+case; provider-record tests must cover schema completeness, size budget, address-only updates and
+multiple assets per owner; `tests/legacy_token_pair.py` must continue to prove all mixed-decimal
+cases; `tests/legacy_frozen_names.py` must prove upgrade compatibility; and the final local gate is
+`python -m pytest -q` plus the Batch 4 target-chain matrix.
+
+**Exit:** no runtime financial decision or user-facing label depends on a USDC/USDD literal; a test
+matrix proves independently configurable fee components in both directions and exact mixed-decimal
+behavior; two services on one signature chain update only their configured asset addresses; and an
+external reader can derive the complete current pair, custody, fee, limit and liveness contract from
+each v2 provider asset. Target-node acceptance must also prove that Nexus supports the exact
+hyphenated `distordia-type` field and address-based read/update calls before v1 is retired.
+
 ---
 
 ## 8. Verification snapshot
@@ -629,13 +745,13 @@ hold-resolution, incident-response and key-rotation procedures.
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | 88 passed plus 14 subtests passed on `368b064` |
+| `python -m pytest -q tests/test_critical_safety.py` | Covered by the green full suite on `c2d07aa`; exact focused count is not asserted here |
 | Python byte-compilation | Passed |
 | Dependency consistency | Passed |
 | Local Markdown links | Passed |
-| Current-tree whitespace | Passed |
-| Full `python -m pytest -q` | 99 passed, 14 subtests passed locally on `368b064` (Python 3.11) |
-| CI workflow | Passed on reviewed head `368b064` — [run 33400416736](https://github.com/distordialabs-brutus/swapService/actions/runs/33400416736) |
+| Current-tree whitespace | Passed after removing four trailing-whitespace defects in the review commit |
+| Full `python -m pytest -q` | 154 passed, 19 subtests passed locally on `c2d07aa` (Python 3.11) |
+| CI workflow | Passed on reviewed implementation head `c2d07aa` — [run 33961339438](https://github.com/distordialabs-brutus/swapService/actions/runs/33961339438); the review commit requires its own exact-head read-back |
 | `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
 | `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
 | Live integration | Not run |
@@ -653,3 +769,38 @@ Deployment may be reconsidered only when:
 - known dependency advisories are fixed or explicitly accepted with documented applicability
   and compensating controls;
 - an independent reviewer approves the resulting diff.
+
+## 10. Independent review update — 2026-09-04 21:05 CEST
+
+The current evidence review at [`DEVELOPMENT_REVIEW_2026-09-04_2105.md`](DEVELOPMENT_REVIEW_2026-09-04_2105.md)
+supersedes the prior severity summary. Four P0 repairs precede every other batch:
+
+1. enumerate the canonical treasury account rather than token-register history;
+2. persist and process each incoming CREDIT by `(txid, contract_id)`;
+3. make heartbeat read/write/recovery use one schema and never clamp a custody waterline forward;
+4. pause or exit non-zero on any incomplete startup recovery.
+
+Executed probes demonstrated a two-contract 7,000,000-unit liability becoming one 3,000,000-unit
+row, the standard top-level heartbeat schema bypassing both rebuild functions, and a 30-day-old
+checkpoint silently omitting 23 days under the default cap. A separate malformed-response probe
+returned `complete=True` and no durable row for a treasury credit without a txid. The full suite and
+exact-head CI remain green, proving that these fixtures are missing rather than that the release
+gate has passed. Medium follow-up also requires crash-atomic fee classification, direct reporting of
+unmatched canonical token emissions, strict built-in-integer timestamp/confirmation validation, and
+producer-level enumeration regressions rather than only injected `DepositScan` results.
+
+## 11. Independent review update — 2026-09-05 CEST
+
+The current evidence review at [`DEVELOPMENT_REVIEW_2026-09-05.md`](DEVELOPMENT_REVIEW_2026-09-05.md)
+verifies that C-1, C-3 and C-4 are repaired in local code: both admission and recovery query the
+canonical treasury account; one strict top-level heartbeat DTO is shared across producers and
+consumers; and old custody checkpoints are preserved exactly. The target Nexus node has not yet
+validated account-history coverage or stable pagination, so these local repairs do not clear the
+external acceptance gate.
+
+C-2 remains Critical. Current txid-only state rejects a transaction with multiple treasury CREDITs
+and holds the waterline, preventing silent sibling loss but making the transaction unrepresentable.
+H-1 through H-3 also remain open: malformed qualifying evidence can pass producer completeness and
+be silently skipped, mutable offset pagination can omit a boundary item, and startup only logs
+recovery errors instead of aborting or latching a recovery-specific exposure pause. Production and
+real-fund admission remain hard-blocked.

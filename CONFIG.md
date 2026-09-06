@@ -99,7 +99,7 @@ Legend:
 | DUST_CREDIT_USDD | decimal | 0.01 | Nexus-side anti-DoS floor (default = one tenth of the Nexus-equivalent `FLAT_FEE_USDC`). Credits below it are ignored; credits up to `MIN_CREDIT_USDD` remain traceable. |
 | MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
 | MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
-| NEXUS_CONGESTION_FEE_USDD | decimal | 0.001 | **Currently inert.** Intended to cover the on-chain cost of a Nexus refund, but no code path deducts it: all four refund sites return the full credited amount, so the operator absorbs the Nexus transaction cost. Set it if you like — nothing reads it beyond the unused `_apply_congestion_fee()` helper. |
+| FEE_NEXUS_DISPOSITION | decimal | 0 | Canonical fee in decimal Nexus token units for an explicitly authorized durable refund/quarantine disposition. Alias: `NEXUS_CONGESTION_FEE_USDD`; conflicting values fail startup. **Currently not applied automatically:** automatic Nexus dispositions remain disabled pending target-node and fault-injection acceptance. |
 
 ## Production Admission, Exposure Caps & Alerting
 

@@ -340,7 +340,236 @@ After creation and one swap:
 
 ---
 
-## Provider Heartbeat Asset Standard
+## Provider swapService Asset Standard v2 (Planned)
+
+> **Implementation status:** This is the target architecture and migration contract. The current
+> service still uses the legacy, name-addressed v1 heartbeat described below. Do not configure a v2
+> record as the live waterline source until Batch 7 in
+> [`docs/EVALUATION.md`](docs/EVALUATION.md#batch-7--complete-configurability-and-provider-asset-v2-in-progress-provider-v2-remains-documentation-only)
+> is implemented and accepted on the target Nexus build.
+
+### Design decision
+
+The provider record SHALL carry the exact field/value:
+
+```json
+{"distordia-type": "swapService"}
+```
+
+This is better than treating a signature-chain-local asset name as the service identity. A Nexus
+signature chain can own any number of swapService provider assets, so one operator can run several
+token pairs or isolated deployments without competing for one local name. Type discovery and
+instance identity are intentionally separate:
+
+- `distordia-type=swapService` identifies the class of asset and can return many records;
+- the asset's Nexus register address is the canonical identity used for reads and updates;
+- immutable `service_id` identifies the logical deployment across monitoring/indexing systems;
+- the built-in Nexus `owner` identifies the provider signature chain;
+- a local asset name, if present, is only a human-friendly alias and MUST NOT be required or assumed
+  unique across providers or service instances.
+
+The type field alone MUST NOT be used to select a writable asset. A service that discovers two type
+matches and updates the first one could corrupt another instance's waterlines or advertised terms.
+
+### Provider-record goals
+
+A single v2 asset gives users and auditors a complete, non-secret overview of the deployment:
+
+1. provider identity, contact, source and terms;
+2. exact chain/network and token identities, not just display tickers;
+3. custody, quarantine and fee-account addresses needed to verify backing and fund flows;
+4. enabled directions and the deposit/mapping contract;
+5. the complete effective fee, minimum, dust and cap policy;
+6. software/schema versions, public-terms hash and effective timestamp;
+7. service status, pause reason, liveness and safe waterlines.
+
+Do not publish PINs, sessions, API credentials, signer paths, private RPC URLs, webhook URLs, internal
+database paths or any other secret/operational capability. Balances remain chain-derived: clients
+query the published treasury and vault addresses instead of trusting copied balance fields.
+
+### Canonical fields
+
+#### Immutable identity and pair contract
+
+These values define one deployment. Changing one creates a new service record/address rather than
+silently changing the meaning of an existing service.
+
+| Field | Required value / meaning | Example |
+|-------|--------------------------|---------|
+| `distordia-type` | Exact type discriminator | `swapService` |
+| `schema_version` | Provider-record schema | `2` |
+| `service_id` | Provider-chosen globally stable identifier | `distordia-usdd-usdc-mainnet-01` |
+| `nexus_network` | Nexus network identifier | `mainnet` |
+| `nexus_token_name` | Display/API token name; never the sole security identity | `USDD` |
+| `nexus_token_address` | Immutable Nexus token register address | `8ABC...` |
+| `nexus_token_decimals` | Nexus token precision | `6` |
+| `nexus_treasury_address` | Nexus account receiving input liquidity | `8Cuy...` |
+| `nexus_quarantine_address` | Nexus disposition/quarantine account, or `-` if unsupported | `8Qrt...` |
+| `nexus_fee_address` | Nexus fee destination/accounting address, or `treasury` | `treasury` |
+| `solana_cluster` | Solana cluster or genesis identifier | `mainnet-beta` |
+| `solana_token_symbol` | Display ticker only | `USDC` |
+| `solana_token_mint` | Canonical SPL mint address | `EPjF...` |
+| `solana_token_decimals` | SPL mint precision | `6` |
+| `solana_vault_address` | SPL token account holding service liquidity | `Bg1M...` |
+| `solana_quarantine_address` | Self-owned quarantine token account, or `-` | `7Qrt...` |
+| `solana_fee_address` | Fee destination/accounting address, or `vault` | `vault` |
+| `enabled_directions` | Explicit comma-separated directions | `solana-to-nexus,nexus-to-solana` |
+| `user_mapping_type` | User asset protocol/type for Nexus→external routing | `nexusBridge` |
+
+The Nexus token register address and Solana mint are the authorization/reconciliation identities.
+Tickers are untrusted presentation metadata and may collide.
+
+#### Mutable provider and protocol metadata
+
+| Field | Purpose | Example |
+|-------|---------|---------|
+| `provider` | Operator/provider name | `distordia` |
+| `contact` | Public support/security contact | `https://example.org/contact` |
+| `source_url` | Source repository/release provenance | `https://github.com/.../swapService` |
+| `terms_url` | Human-readable terms and incident policy | `https://example.org/swap/terms` |
+| `software_version` | Running service release | `1.2.0` |
+| `memo_prefix` | Solana deposit memo prefix | `nexus:` |
+| `mapping_schema_version` | Supported user mapping-asset schema | `1` |
+
+#### Mutable fee, threshold and exposure terms
+
+All decimal values are canonical non-scientific token-unit strings and must be exactly representable
+at the published precision. Basis points are non-negative integers. Zero explicitly disables a fee;
+an omitted field does not.
+
+| Field | Units / semantics | Example |
+|-------|-------------------|---------|
+| `fee_flat_to_nexus` | Nexus output token units deducted from Solana→Nexus output | `0.1` |
+| `fee_bps_to_nexus` | Basis points applied to Solana input | `10` |
+| `fee_flat_to_solana` | Solana output token units deducted from Nexus→Solana output | `0.5` |
+| `fee_bps_to_solana` | Basis points applied to Nexus input | `10` |
+| `fee_refund_solana` | Solana token units retained from a Solana-side refund | `0.1` |
+| `fee_nexus_disposition` | Nexus token units retained from an authorized refund/disposition | `0` |
+| `micro_fee_pct_solana_input` | Percent retained when Solana input is below the process minimum | `100` |
+| `micro_fee_pct_nexus_input` | Percent retained when Nexus input is below the process minimum | `100` |
+| `min_input_solana` | Minimum processed Solana-side input | `0.2` |
+| `dust_input_solana` | Solana input below which policy ignores/rejects the item | `0` |
+| `min_input_nexus` | Minimum processed Nexus-side input | `1.0` |
+| `dust_input_nexus` | Nexus input below which policy ignores the item | `0.01` |
+| `max_input_solana` | Maximum accepted Solana-side input; `0` means no configured cap | `1000` |
+| `max_input_nexus` | Maximum accepted Nexus-side input; `0` means no configured cap | `1000` |
+| `daily_payout_cap_solana` | Rolling 24-hour Solana-output cap; `0` means no configured cap | `5000` |
+| `terms_version` | Monotonic public fee/limit revision | `7` |
+| `terms_effective_at` | Unix timestamp at which this revision became effective | `1706012000` |
+| `terms_hash` | Hash of canonical **public** pair/fee/limit fields only | `sha256:ab12...` |
+
+The service must compute execution terms and this published table from the same validated fee-policy
+object. A monitor can therefore detect a stale or tampered record, and a user can calculate the
+expected output before sending funds. `terms_hash` must never include secrets.
+
+#### Mutable operational state
+
+| Field | Purpose | Example |
+|-------|---------|---------|
+| `status` | `online`, `paused`, `maintenance`, `retired` or `starting` | `online` |
+| `pause_reason` | Public non-secret reason code; `-` when not paused | `backing-deficit` |
+| `last_poll_timestamp` | Unix timestamp of the last completed service poll cycle | `1706012456` |
+| `last_safe_timestamp_solana` | Fail-closed Solana scan waterline | `1706012300` |
+| `last_safe_timestamp_nexus` | Fail-closed Nexus scan waterline | `1706012200` |
+| `record_updated_at` | Unix timestamp of the terms/status publication | `1706012456` |
+
+Field names for the two waterlines may remain configurable during migration, but v2 writers and
+readers must publish/validate the selected names in one schema and must not infer a waterline from a
+missing field.
+
+### Identity, discovery and update rules
+
+1. **Discovery is read-only.** Index/list assets matching exact `distordia-type=swapService`, then
+   validate schema, owner, immutable identities and required fields client-side. The exact list
+   filter syntax must be proven against the target Nexus build; an unsupported filter is not an
+   empty authoritative result.
+2. **Selection is explicit.** Configure `NEXUS_SERVICE_ASSET_ADDRESS` (target variable name) and,
+   in production, expected `service_id` and owner. Never select the first type match.
+3. **Runtime access is by address.** Read and update the selected register address. A local name can
+   be printed by tooling but is not needed by the poller or writer.
+4. **Verify before trust.** Before reading a waterline or writing a heartbeat, compare owner, exact
+   type, schema, service ID, token identities and custody addresses with local validated config.
+   Any mismatch holds ingestion and alerts; it does not create or update another asset.
+5. **One record per instance.** Two processes under one signature chain must have distinct service
+   IDs, asset addresses, state databases and lock paths. Each process updates only its configured
+   address.
+6. **No silent field loss.** Creation must include the complete v2 field set and pass the Nexus
+   register-size budget check. Update failure is atomic and cannot advance local waterlines.
+
+### Example v2 provider record
+
+```json
+{
+  "owner": "a1b2c3d4e5f6...",
+  "address": "98Xbi3JoT5iNFYZ...",
+  "distordia-type": "swapService",
+  "schema_version": "2",
+  "service_id": "distordia-usdd-usdc-mainnet-01",
+  "provider": "distordia",
+  "contact": "https://example.org/contact",
+  "source_url": "https://github.com/distordialabs-brutus/swapService",
+  "software_version": "1.2.0",
+  "nexus_network": "mainnet",
+  "nexus_token_name": "USDD",
+  "nexus_token_address": "8ABC...",
+  "nexus_token_decimals": "6",
+  "nexus_treasury_address": "8Cuy...",
+  "solana_cluster": "mainnet-beta",
+  "solana_token_symbol": "USDC",
+  "solana_token_mint": "EPjF...",
+  "solana_token_decimals": "6",
+  "solana_vault_address": "Bg1M...",
+  "enabled_directions": "solana-to-nexus,nexus-to-solana",
+  "fee_flat_to_nexus": "0.1",
+  "fee_bps_to_nexus": "10",
+  "fee_flat_to_solana": "0.5",
+  "fee_bps_to_solana": "10",
+  "fee_refund_solana": "0.1",
+  "fee_nexus_disposition": "0",
+  "min_input_solana": "0.2",
+  "min_input_nexus": "1.0",
+  "dust_input_nexus": "0.01",
+  "terms_version": "7",
+  "terms_effective_at": "1706012000",
+  "terms_hash": "sha256:ab12...",
+  "status": "online",
+  "pause_reason": "-",
+  "last_poll_timestamp": "1706012456",
+  "last_safe_timestamp_solana": "1706012300",
+  "last_safe_timestamp_nexus": "1706012200",
+  "record_updated_at": "1706012456"
+}
+```
+
+The abbreviated example omits some required custody/fee/limit fields for readability; the creation
+tool must emit every canonical field from the tables above and reject an incomplete record.
+
+### Migration from the v1 named heartbeat
+
+1. Implement and test address-based Nexus read/update support and the complete generic pair/fee
+   configuration without changing live behavior.
+2. Create a **new** v2 asset from validated configuration. `format=basic` v1 records have a fixed
+   field set, so they cannot safely be relabeled or assumed complete.
+3. Record and independently verify the returned address, owner, `service_id`, exact
+   `distordia-type`, pair identities and custody addresses.
+4. Run one compatibility release that can read the old named v1 asset only behind an explicit
+   fallback flag while publishing the selected v2 address for monitors.
+5. Switch the service and monitors to `NEXUS_SERVICE_ASSET_ADDRESS`; verify two service instances on
+   one signature chain cannot read or update each other's waterlines.
+6. Retire the v1 fallback only after target-node tests prove the exact hyphenated field, address-based
+   reads/updates, atomic updates, size limits and multi-asset discovery behavior.
+
+---
+
+## Legacy Provider Heartbeat Asset Standards (v1; Current Implementations)
+
+> **Compatibility only:** the repository currently contains two incompatible `format=basic` v1
+> creators. This section documents the record emitted by `create_heartbeat_asset.py`.
+> `register_service.py` instead emits `src.nexus_client.SERVICE_RECORD_FIELDS`, including canonical
+> token, custody, fee, minimum, status, contact, memo and liveness fields. Because `format=basic`
+> fixes the field set, operators must not treat those assets as interchangeable. Both are addressed
+> by local name and neither implements v2. New architecture work should target v2 above, not extend
+> either v1 schema.
 
 Bridge service operators **should** maintain a public heartbeat asset on Nexus. This allows users and monitoring systems to verify the service is online and processing transactions.
 
