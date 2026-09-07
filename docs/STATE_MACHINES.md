@@ -85,8 +85,36 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 > waterline rather than being silently truncated. Malformed qualifying recovery
 > evidence, mutable offset pagination and non-latching startup failure remain open.
 > Production remains hard-blocked; see `DEVELOPMENT_REVIEW_2026-09-05.md`.
+>
+> **Follow-up review (2026-09-07, committed `6568446` plus one preserved red test):**
+> live/recovery admission and the four Nexus lifecycle tables now preserve
+> `(txid, contract_id)`, valid sibling CREDITs are admitted independently, and
+> malformed qualifying recovery evidence is rejected. Composite identity is not
+> end to end: operator intents/finalization remain txid-only and can delete a
+> sibling, while wipeout reconstruction misparses the composite Solana payout memo
+> and can requeue an already-paid credit. Mutable offset pagination and non-latching
+> startup recovery remain open. Production remains hard-blocked; see
+> `DEVELOPMENT_REVIEW_2026-09-07.md`.
 
 ---
+
+## Current safety repair — 2026-09-07 working tree
+
+The dated notes above are baseline history. The [post-change report](POST_CHANGE_REVIEW_2026-09-07.md)
+controls current implementation evidence. Both operator dispositions and payouts bind the exact
+Nexus source `(txid, contract_id)`. Legacy identity remains held. Startup requires complete recovery
+before entering the exposure-producing loop; missing/zero checkpoints and incomplete scans abort.
+Mutable multi-page offset enumeration cannot establish completeness, in recovery or live polling.
+Positive credits may be retained, but requesting any page beyond offset zero holds the checkpoint.
+
+Payout preparation atomically freezes output/fee units and claims the source before RPC. The send
+helper submits only: it cannot fabricate a terminal source row or a pseudo-txid idempotency marker.
+Finalization requires successful finalized transaction evidence binding the exact source memo,
+signature, vault signer/source, mint, recipient and integer output to the frozen intent. A confirmation
+status or memo alone is not settlement. Only then does one transaction archive terminal evidence,
+book its unique fee and remove that source. Missing/mismatched evidence, missing frozen terms,
+failed liquidity reads and ambiguous signatures hold rather than resubmit or refund.
+Only pending admission resolves a destination; it cannot reopen an operator hold.
 
 ## USDC → USDD State Machine (Solana to Nexus)
 
@@ -164,7 +192,7 @@ flowchart TD
     Pending -->|"lookup failed / malformed / incomplete"| Pending
     Pending -->|owner mismatch| Pending
     Pending -->|"complete mapping has invalid receival_account"| RefundPending
-    Pending -->|"complete absence after REFUND_TIMEOUT_SEC"| TradeBal["trade balance to be checked"]
+    Pending -->|"complete absence after REFUND_TIMEOUT_SEC"| RefundHold["refund held for operator review"]
 
     Ready -->|"vault cannot cover payout"| Ready
     Ready -->|"net ≤ 0"| FeesRecorded
@@ -172,14 +200,14 @@ flowchart TD
     Ready -.->|"paused (backing deficit)"| Ready
 
     Sending -->|"USDC sent, sig stored"| Awaiting["sig created, awaiting confirmations"]
-    Sending -->|"failed, attempts left"| Sending
-    Sending -->|"failed, attempts spent"| RefundPending
-    Sending -->|"crash recovery: memo found"| Awaiting
+    Sending -->|"unknown send outcome: hold, never blindly retry"| Sending
+    Sending -->|"legacy attempt cap reached: operator hold, no automatic debit"| RefundPending
+    Sending -->|"crash recovery: exact finalized payout evidence"| Awaiting
 
-    Awaiting -->|"stored sig finalized"| Processed["processed ✓"]
+    Awaiting -->|"exact successful finalized payout matches frozen terms"| Processed["processed ✓"]
     Awaiting -->|"not confirmed and age > SOLANA_CONFIRM_TIMEOUT_SEC"| Quarantined["quarantined — manual review ✗"]
 
-    TradeBal -->|asset appeared| Ready
+    TradeBal["trade balance to be checked (legacy)"] -->|asset appeared| Ready
     TradeBal -->|"lookup failed / malformed / incomplete"| TradeBal
     TradeBal -->|"complete lookup still absent"| RefundHold["refund held for operator review"]
 
@@ -198,20 +226,20 @@ flowchart TD
 | State | Description | Table | Status value |
 |-------|-------------|-------|--------------|
 | **Ignored** | Below `DUST_CREDIT_USDD` — spam floor, deliberately no trace | — | — |
-| **FeesRecorded** | Below `MIN_CREDIT_USDD` or ≤ fees; **recorded** so funds stay traceable | `processed_txids` | `"processed as fees"` |
-| **Pending** | Credit queued, awaiting asset mapping | `unprocessed_txids` | `"pending_receival"` |
+| **FeesRecorded** | Below `MIN_CREDIT_USDD` or ≤ fees; **recorded per `(txid, contract_id)`** so funds stay traceable; fee journal and terminal classification commit atomically per source contract | `processed_txids` | `"processed as fees"` |
+| **Pending** | Credit queued by exact `(txid, contract_id)`, awaiting asset mapping | `unprocessed_txids` | `"pending_receival"` |
 | **Ready** | Mapping resolved and owner-verified | `unprocessed_txids` | `"ready for processing"` |
-| **Sending** | USDC send attempted | `unprocessed_txids` | `"sending"` |
-| **Awaiting** | Signature stored, awaiting finality | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
-| **Processed** | USDC delivered | `processed_txids` | `"processed"` |
+| **Sending** | Exact payout/fee terms frozen and one-shot source claimed before RPC; ambiguous results never reopen READY | `unprocessed_txids` | `"sending"` |
+| **Awaiting** | Awaiting full finalized payout evidence matching the frozen terms; a stored signature alone is insufficient | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
+| **Processed** | Exact successful finalized payout evidence matches source identity, vault, mint, recipient and output; atomic fee journal and exact source removal | `processed_txids` | `"processed"` |
 | **TradeBal** | Legacy mapping-timeout recheck; complete absence now holds | `unprocessed_txids` | `"trade balance to be checked"` |
 | **Collecting** | Legacy refund state converted to a hold | `unprocessed_txids` | `"collecting refund"` |
 | **RefundPending** | Legacy refund state converted to a hold | `unprocessed_txids` | `"refund pending"` |
 | **RefundHold** | Refund/quarantine requires operator review; no automatic Nexus debit | `unprocessed_txids` | `"refund held for operator review"` |
-| **IntentAuthorized** | Operator has confirmed the immutable reference and authorized exactly one CLI debit | `nexus_transfer_intents` | `"authorized"` |
-| **IntentOutcome** | CLI result is submitted or unknown. A submitted txid can resolve from one exact direct transaction contract only after the configured confirmation threshold; an `outcome_unknown` reference-only row remains held because the live-offset history scan cannot prove a complete range. | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
-| **IntentCompleted** | Exact txid/contract/reference/endpoints/units are stored after direct lookup reaches the configured threshold. The setting is not yet constrained positive, so production must reject zero/negative values before this is a valid finality guarantee. | `nexus_transfer_intents` | `"completed"` |
-| **Disposition** | A named operator confirms the exact remote txid, then the source moves to its terminal archive | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
+| **IntentAuthorized** | Named operator authorizes one exact held `(source_txid, source_contract_id)` after source revalidation. Legacy source identities cannot authorize execution. | `nexus_transfer_intents` | `"authorized"` |
+| **IntentOutcome** | CLI result is submitted or unknown. A submitted outbound txid can resolve from one exact direct transaction contract only after the configured confirmation threshold; an `outcome_unknown` reference-only row remains held because the live-offset history scan cannot prove a complete range. | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
+| **IntentCompleted** | Exact outbound txid/contract/reference/endpoints/units and distinct source contract identity are retained. Finalization still requires explicit operator evidence. | `nexus_transfer_intents` | `"completed"` |
+| **Disposition** | Atomic exact-source terminal state, audit and queue deletion preserve sibling liabilities. Conflicting evidence or legacy source identity refuses finalization. | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
 | **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
 
 > **A USDC-confirmation timeout quarantines — it does not refund.** The USDC may in fact
@@ -222,8 +250,8 @@ flowchart TD
 | Priority | Status handled | Action | Skipped while paused |
 |----------|----------------|--------|----------------------|
 | 1 | `pending_receival` (confirmations > 1) | Resolve `receival_account` by (`txid_toService`, `owner`) | No |
-| 2 | `ready for processing` | Liquidity check, then send USDC with memo `nexus_txid:<txid>` | **Yes** |
-| 3 | `sig created, awaiting confirmations` | Confirm the stored signature; memo scan only as fallback | No |
+| 2 | `ready for processing` | Successful liquidity check, durable term/claim transaction, then send with memo `nexus_txid:<txid>:<contract_id>` | **Yes** |
+| 3 | `sending` / `sig created, awaiting confirmations` | Both stored and memo-discovered signatures require full finalized payout evidence matching frozen terms before atomic fee/terminal finalization; evidence-only recovery is allowed while paused | No |
 | 4 | `trade balance to be checked` | Retry lookup, else hold for operator review | No |
 | 5 | `collecting refund` | Convert legacy state to an operator hold | No |
 | 6 | `refund pending` | Convert legacy state to an operator hold | No |
@@ -239,7 +267,7 @@ It runs both pollers with `paused=True`:
 | Continues | Stops |
 |-----------|-------|
 | USDC refunds, quarantine, confirmation checks | New deposit ingestion |
-| USDD refunds, quarantine, ambiguity resolution | USDC→USDD debits |
+| USDD holds and evidence-only ambiguity resolution | USDC→USDD debits |
 | Waterline held (no fetch ⇒ no advance) | USDD→USDC USDC sends |
 
 A failure of the backing check itself also fails safe to paused. A `backing_deficit_pause`
@@ -272,9 +300,9 @@ audited durable-intent workflow.
 | Table | Purpose |
 |-------|---------|
 | `unprocessed_sigs` / `processed_sigs` / `refunded_sigs` / `quarantined_sigs` | USDC→USDD lifecycle |
-| `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | USDD→USDC lifecycle |
+| `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | USDD→USDC lifecycle, composite primary key `(txid, contract_id)`; legacy rows use `-1` |
 | `attempts` | Retry counters + `last_timestamp` (cooldown) |
-| `nexus_transfer_intents` / `nexus_transfer_audit_events` | Immutable Nexus debit inputs plus named operator authorization, execution-request and final-disposition evidence |
+| `nexus_transfer_intents` / `nexus_transfer_audit_events` | Immutable outbound Nexus debit inputs, exact `(source_txid, source_contract_id)` identity and operator evidence; legacy source identities remain held |
 | `reservations` | Cross-worker mutual exclusion on money actions |
 | `counters` | Atomic Nexus debit `reference` sequence |
 | `payouts` | Outbound USDC ledger for the rolling 24h cap |
@@ -293,17 +321,20 @@ SQLite runs in **WAL** mode (set in `init_db()`).
 - Refund/quarantine sends carry `refundSig:<sig>` / `quarantinedSig:<sig>` memos, checked on-chain before a retry re-sends.
 
 **USDD → USDC**
-- Nexus txid is currently the primary key; this cannot represent multiple treasury
-  CREDIT contracts in one transaction. Live and recovery paths therefore reject such
-  a transaction and hold the waterline. The required durable identity is
-  `(txid, contract_id)` throughout pending, terminal, fee and disposition state.
-- Mapping is validated on (`txid_toService`, `owner`). USDC sends currently carry
-  `nexus_txid:<txid>`; the resulting signature is stored in `unprocessed_txids.sig`.
-- Startup recovery rebuilds markers from `nexus_txid:`, `refundSig:` and `quarantinedSig:` memos.
-
-These are containment semantics, not a production-ready identity model. Until the
-contract-id migration lands, a valid multi-CREDIT transaction is deliberately
-unprocessible rather than silently reduced to one liability.
+- Live admission, wipeout Nexus admission and all four lifecycle tables use
+  `(txid, contract_id)`. Valid sibling CREDIT contracts can therefore be queued and normally
+  terminalized independently; legacy pre-migration rows retain `contract_id=-1`.
+- Mapping remains transaction-level on (`txid_toService`, `owner`), while new Solana sends carry
+  `nexus_txid:<txid>:<contract_id>` and the resulting signature is stored on the exact queue row.
+- Strict memo parsing and positive source/output reconstruction preserve the exact paid source;
+  sparse, legacy or ambiguous evidence cannot create a terminal marker or release a liability.
+- Transfer intents, operator selection and finalization bind the exact source contract. Finalization
+  archives and removes only that source, preserving siblings and rejecting conflicting evidence.
+- Mutable multi-page Nexus offsets hold live checkpoints and cannot establish recovery completeness.
+  Startup refuses incomplete recovery before exposure-producing loops begin.
+- Solana recovery transaction lookups and its pagination cursor use the installed SDK's `Signature`
+  value objects. Invalid signature/cursor values hold recovery with explicit incomplete reasons.
+  Offline real-SDK request-construction tests do not replace target-chain acceptance.
 
 ---
 
@@ -328,6 +359,7 @@ The Nexus poller applies the same proof rule:
 | Nexus enumeration state | Waterline |
 |---|---|
 | CLI exception/non-zero exit, API error, malformed response | **held entirely** |
+| A nonzero mutable offset was requested, even if the later page is short or empty | **held entirely**; positive persisted credits do not prove complete enumeration |
 | Full page budget or processing budget exhausted | held (`pagination_truncated`), even when active rows exist |
 | Unprocessed credits exist after a complete poll | poller may pin behind the oldest |
 | Complete scan with persisted page data | may advance to the oldest scanned timestamp minus safety |

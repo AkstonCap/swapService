@@ -427,8 +427,12 @@ python3 swapService.py
 ```
 Startup prints, in order: the singleton lock, heartbeat validation, any minimums that were
 raised above their fee, a warning if no alert channel is configured, vault/treasury
-balances, recovery results — then begins polling. **Read these lines**; each is a
-pre-flight result.
+balances, recovery results — polling begins **only after affirmative complete recovery**.
+Missing heartbeat, zero custody checkpoints, legacy/sparse payout evidence, incomplete enumeration
+or recovery exceptions cause a nonzero startup refusal. Repeated restarts do not override the gate.
+Bootstrap/recovery requires reviewed custody evidence; never set waterlines to the current time to
+skip history. See [the safety repair and upgrade checklist](docs/POST_CHANGE_REVIEW_2026-09-07.md).
+**Read the pre-flight results** before considering any operation.
 
 Only one instance may run per database — an exclusive `flock` (override with
 `SWAP_LOCK_PATH`) refuses a second start, because two instances can double-spend.
@@ -523,7 +527,7 @@ output. Do **not** rerun `execute` after a timeout, non-zero exit, or unparsable
 
 ```bash
 # 1. Create an immutable intent only for an existing `refund held for operator review` credit.
-python3 nexus_transfer_operator.py prepare --kind refund --txid <CREDIT_TXID> \
+python3 nexus_transfer_operator.py prepare --kind refund --txid <CREDIT_TXID> --contract-id <CREDIT_CONTRACT_ID> \
   --operator <NAME> --reason "asset mapping permanently absent"
 
 # 2. Inspect immutable intent inputs, reference, and previous operator events.

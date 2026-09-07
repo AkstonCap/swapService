@@ -13,7 +13,7 @@ from urllib.request import (
     build_opener,
 )
 from . import config
-from . import state_db, nexus_client, structured_logging
+from . import state_db, nexus_client, nexus_memo, structured_logging
 import time
 
 
@@ -1103,7 +1103,13 @@ def resolve_unverified_debits(limit: int = 200) -> int:
     return resolved
 
 
-def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") -> bool:
+def quarantine_nexus_token(
+    txid: str,
+    amount_usdd_units: int,
+    reason: str = "",
+    *,
+    source_contract_id: int | None = None,
+) -> bool:
     """Prepare (but never automatically execute) a treasury-to-quarantine transfer.
 
     Automatic quarantine movement has the same ambiguous debit semantics as a refund.
@@ -1112,14 +1118,16 @@ def quarantine_nexus_token(txid: str, amount_usdd_units: int, reason: str = "") 
     """
     dest = config.SWAP_PAIR.nexus.quarantine_account
     treas = config.SWAP_PAIR.nexus.treasury_account
-    if (not dest or not treas or not txid or
-            type(amount_usdd_units) is not int or amount_usdd_units <= 0):
+    if (not dest or not treas or not txid
+            or type(source_contract_id) is not int or source_contract_id < 0
+            or type(amount_usdd_units) is not int or amount_usdd_units <= 0):
         _log("nexus_quarantine_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
         intent = state_db.create_nexus_transfer_intent(
             kind="quarantine",
             source_txid=str(txid),
+            source_contract_id=source_contract_id,
             from_address=str(treas),
             to_address=str(dest),
             amount_usdd_units=amount_usdd_units,
@@ -1141,21 +1149,29 @@ def _refund_source_txid(reason: str) -> str | None:
     return value[0] if value else None
 
 
-def refund_nexus_token(to_addr: str, amount_usdd_units: int, reason: str) -> bool:
+def refund_nexus_token(
+    to_addr: str,
+    amount_usdd_units: int,
+    reason: str,
+    *,
+    source_contract_id: int | None = None,
+) -> bool:
     """Prepare a refund intent and hold; automatic Nexus refunds remain disabled."""
     source_txid = _refund_source_txid(reason)
     treas = config.SWAP_PAIR.nexus.treasury_account
     # Preserve the exact integer amount all the way to the durable state boundary.
     # Coercing here would silently turn e.g. 1.9 Nexus base units into a one-unit
     # operator disposition despite create_nexus_transfer_intent correctly rejecting it.
-    if (not source_txid or not treas or not to_addr or
-            type(amount_usdd_units) is not int or amount_usdd_units <= 0):
+    if (not source_txid or not treas or not to_addr
+            or type(source_contract_id) is not int or source_contract_id < 0
+            or type(amount_usdd_units) is not int or amount_usdd_units <= 0):
         _log("nexus_refund_intent_held", level=logging.WARNING, reason="invalid_intent_input")
         return False
     try:
         intent = state_db.create_nexus_transfer_intent(
             kind="refund",
             source_txid=source_txid,
+            source_contract_id=source_contract_id,
             from_address=str(treas),
             to_address=str(to_addr),
             amount_usdd_units=amount_usdd_units,
@@ -2085,6 +2101,8 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
         if not isinstance(txs, list):
             return DepositScan(results, False, "invalid_response")
         if not txs:
+            if page > 0:
+                return DepositScan([], False, "pagination_snapshot_unavailable")
             return DepositScan(results, True)
 
         page_has_old_txs = False
@@ -2092,8 +2110,6 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
             if not isinstance(tx, dict):
                 return DepositScan(results, False, "invalid_transaction")
             txid = tx.get("txid")
-            if not isinstance(txid, str) or not txid.strip():
-                return DepositScan(results, False, "invalid_txid")
             timestamp = tx.get("timestamp")
             if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp <= 0:
                 return DepositScan(results, False, "invalid_timestamp")
@@ -2116,6 +2132,8 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
                 to_address = _parse_nexus_contract_address(contract.get("to"))
                 if to_address != treasury_addr:
                     continue
+                if not nexus_memo.is_canonical_nexus_txid(txid):
+                    return DepositScan([], False, "invalid_txid")
                 contract_id = contract.get("id")
                 from_address = _parse_nexus_contract_address(contract.get("from"))
                 if isinstance(contract_id, bool) or not isinstance(contract_id, int) or contract_id < 0:
@@ -2128,9 +2146,16 @@ def fetch_deposits_since(treasury_addr: str, since_timestamp: int, max_pages: in
                 break
 
         if page_has_old_txs or len(txs) < limit:
+            if page > 0:
+                # The node's offset pagination has no immutable snapshot identifier.
+                # Once an offset has moved, concurrent history changes can shift unseen
+                # rows even if a repeated scan happens to look identical.
+                return DepositScan([], False, "pagination_snapshot_unavailable")
             return DepositScan(results, True)
 
-    return DepositScan(results, False, "pagination_truncated")
+    if max(1, int(max_pages)) > 1:
+        return DepositScan([], False, "pagination_snapshot_unavailable")
+    return DepositScan([], False, "pagination_truncated")
     
 
 ## Reference integer fetching

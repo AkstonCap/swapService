@@ -1,6 +1,6 @@
 import logging
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from . import config, state_db, solana_client, nexus_client, fees, alerts, structured_logging
+from . import config, state_db, solana_client, nexus_client, nexus_memo, fees, alerts, structured_logging
 import time
 
 _LOG = structured_logging.get_logger("swapService.nexus")
@@ -129,39 +129,45 @@ def _hold_nexus_refund(r: dict, reason: str) -> None:
          reason=reason, age_sec=age_sec)
 
 
-def _quarantine_txid(r: dict, reason: str = "") -> None:
-    """Quarantine a stuck Nexus credit: MOVE the funds, then record the full row.
+def _finalize_nexus_credit_or_raise(**evidence) -> None:
+    """A rejected durable transition must never authorize a checkpoint or success."""
+    if not state_db.finalize_nexus_credit(**evidence):
+        raise RuntimeError("Nexus credit finalization rejected conflicting evidence")
 
-    Two bugs are fixed here. The funds were never actually moved (only a status string
-    was written), so quarantined funds kept counting toward the backing ratio; and the
-    row was written with only (txid, sig), so every other column stayed NULL and the
-    operator's quarantine viewer always reported zero.
-    """
-    txid = r.get("txid")
-    try:
-        amt_units = _row_amount_units(r)
-    except Exception:
-        amt_units = 0
-    moved = False
-    try:
-        moved = nexus_client.quarantine_nexus_token(txid, amt_units, reason)
-    except Exception as e:
-        _log("NEXUS_QUARANTINE_MOVE_ERROR", txid=txid, error=str(e))
-    state_db.mark_quarantined_txid(
-        txid=txid,
-        sig="",
-        timestamp=r.get("ts"),
-        amount_usdd=float(r.get("amount_usdd") or 0),
-        from_address=r.get("from"),
-        to_address=r.get("to"),
-        owner=r.get("owner"),
-        status=NEXUS_STATUS_QUARANTINED if moved else "quarantined (funds NOT moved)",
+
+def _payout_evidence_matches_frozen_terms(
+    row: dict,
+    evidence: nexus_memo.NexusPayoutEvidence | None,
+    *,
+    candidate_signature: str | None = None,
+) -> bool:
+    """Compare authoritative chain evidence with every persisted payout term."""
+    if not isinstance(evidence, nexus_memo.NexusPayoutEvidence):
+        return False
+    payout_units = row.get("payout_solana_units")
+    fee_units = row.get("payout_fee_nexus_units")
+    return (
+        type(payout_units) is int
+        and payout_units > 0
+        and type(fee_units) is int
+        and fee_units >= 0
+        and fee_units <= _row_amount_units(row)
+        and evidence.txid == row.get("txid")
+        and evidence.contract_id == _row_contract_id(row)
+        and isinstance(evidence.solana_signature, str)
+        and bool(evidence.solana_signature)
+        and (
+            candidate_signature is None
+            or evidence.solana_signature == candidate_signature
+        )
+        and evidence.to_token_account == row.get("receival_account")
+        and evidence.amount_solana_units == payout_units
     )
-    alerts.warning(
-        "nexus_quarantined",
-        reason or "Nexus credit quarantined for manual review",
-        txid=txid, amount_units=amt_units, funds_moved=moved,
-    )
+
+
+def _quarantine_txid(r: dict, reason: str = "") -> None:
+    """Compatibility entry point: hold, never revive the unsafe automatic debit."""
+    _hold_nexus_refund(r, reason or "quarantine requires exact operator disposition")
 
 
 def _apply_congestion_fee(amount_dec: Decimal) -> Decimal:
@@ -218,9 +224,11 @@ def process_unprocessed_txids(paused: bool = False):
             cmt = r.get("comment") or ""
             if cmt and cmt not in _NEXUS_ALLOWED_STATUSES:
                 _log("NEXUS_STATUS_UNKNOWN", txid=r.get("txid"), comment=cmt)
-            if r.get("receival_account") or r.get("comment") == NEXUS_STATUS_READY:
+            # Only pending admission may resolve a new payout destination. Never
+            # reopen an operator hold, quarantine or an already-submitted intent.
+            if cmt != NEXUS_STATUS_PENDING:
                 continue
-            if r.get("comment") == NEXUS_STATUS_PENDING and int(r.get("confirmations") or 0) <= 1:
+            if int(r.get("confirmations") or 0) <= 1:
                 continue
             txid = r.get("txid")
             contract_id = _row_contract_id(r)
@@ -271,26 +279,6 @@ def process_unprocessed_txids(paused: bool = False):
                     _log("NEXUS_PROCESS_BUDGET_EXCEEDED", stage="solana_sending")
                     break
                     
-                # Recovery for entries stuck in SENDING with no recorded signature
-                # (e.g. a crash between send and DB write): recover via the txid memo.
-                if r.get("comment") == NEXUS_STATUS_SENDING and not r.get("sig"):
-                    try:
-                        found_sig = solana_client.find_signature_with_memo(
-                            f"nexus_txid:{r.get('txid')}:{_row_contract_id(r)}"
-                        )
-                        if found_sig:
-                            state_db.update_unprocessed_txid(
-                                txid=r.get("txid"),
-                                contract_id=_row_contract_id(r),
-                                status=NEXUS_STATUS_AWAITING,
-                                sig=found_sig
-                            )
-                            r["sig"] = found_sig
-                            r["comment"] = NEXUS_STATUS_AWAITING
-                            _log("NEXUS_RECOVERED_SIG", txid=r.get("txid"), sig=found_sig)
-                    except Exception:
-                        pass
-                
                 # Skip if not ready for sending
                 if r.get("comment") != NEXUS_STATUS_READY:
                     continue
@@ -312,18 +300,9 @@ def process_unprocessed_txids(paused: bool = False):
                 net_solana_units = nexus_client.get_solana_send_amount_units(amount_nexus_units)
 
                 if net_solana_units <= 0:
-                    # Track the whole input as an accounted Nexus-side fee when it cannot
-                    # fund even one output base unit after fees.
-                    if amount_nexus_units > 0:
-                        state_db.add_fee_entry(
-                            sig=None,
-                            txid=txid,
-                            kind="fee_only_nexus_process",
-                            amount_usdc_units=None,
-                            amount_usdd_units=amount_nexus_units
-                        )
-                    # Mark as fee-only processed
-                    state_db.mark_processed_txid(
+                    _finalize_nexus_credit_or_raise(
+                        fee_kind="fee_only_nexus_process",
+                        fee_nexus_units=amount_nexus_units,
                         txid=txid,
                         timestamp=r.get("ts"),
                         amount_usdd=float(amt_nexus),
@@ -335,7 +314,6 @@ def process_unprocessed_txids(paused: bool = False):
                         amount_usdd_units=amount_nexus_units,
                         contract_id=contract_id,
                     )
-                    state_db.remove_unprocessed_txid(txid, contract_id)
                     _log("NEXUS_FEE_ONLY", txid=txid, amount_usdd=str(amt_nexus))
                     continue
 
@@ -354,11 +332,9 @@ def process_unprocessed_txids(paused: bool = False):
                         continue  # stay READY; retry when the vault is topped up
                 except Exception as e:
                     _log("NEXUS_LIQUIDITY_CHECK_ERROR", txid=txid, error=str(e))
+                    continue  # Unknown backing is not permission to spend.
 
-                # Mark as sending before attempting
-                state_db.update_unprocessed_txid(txid=txid, contract_id=contract_id, status=NEXUS_STATUS_SENDING)
-
-                # Attempt to send the Solana-side token
+                # Cooldown checks precede the single-use durable payout claim.
                 send_key = state_db.payout_attempt_key(f"{txid}:{contract_id}")
                 if not state_db.should_attempt(send_key):
                     if state_db.attempts_exhausted(send_key):
@@ -369,6 +345,18 @@ def process_unprocessed_txids(paused: bool = False):
                         state_db.update_unprocessed_txid(txid=txid, contract_id=contract_id, status=NEXUS_STATUS_READY)
                     continue
 
+                total_fee_nexus_units = max(
+                    0, amount_nexus_units - config.solana_units_to_nexus(
+                        net_solana_units, round_up=False
+                    ),
+                )
+                if not state_db.prepare_nexus_payout(
+                    txid=txid, contract_id=contract_id, receival_account=recv_account,
+                    amount_usdd_units=amount_nexus_units,
+                    payout_solana_units=net_solana_units,
+                    payout_fee_nexus_units=total_fee_nexus_units,
+                ):
+                    continue  # Another worker already claimed this exact source credit.
                 state_db.record_attempt(send_key)
                 
                 try:
@@ -378,22 +366,8 @@ def process_unprocessed_txids(paused: bool = False):
                     ok, sig = solana_client.send_solana_token_to_account_with_sig(recv_account, net_solana_units, memo)
                     
                     if ok and sig:
-                        # Fee ledger stays in Nexus base units: the received credit minus
-                        # the exact Solana output re-expressed conservatively in Nexus units.
-                        total_fee_nexus_units = max(
-                            0,
-                            amount_nexus_units - config.solana_units_to_nexus(
-                                net_solana_units, round_up=False
-                            ),
-                        )
-                        if total_fee_nexus_units > 0:
-                            state_db.add_fee_entry(
-                                sig=None,
-                                txid=txid,
-                                kind="swap_nexus_to_solana",
-                                amount_usdc_units=None,
-                                amount_usdd_units=total_fee_nexus_units
-                            )
+                        # Submission is not settlement. Terms were persisted before RPC;
+                        # book the fee atomically with confirmed terminal source state.
                         state_db.update_unprocessed_txid(txid=txid, contract_id=contract_id, status=NEXUS_STATUS_AWAITING, sig=sig)
                         _log("NEXUS_SOLANA_SENT", txid=txid, sig=sig, amount=net_solana_units)
                     elif ok and not sig:
@@ -419,29 +393,43 @@ def process_unprocessed_txids(paused: bool = False):
                 if time.time() - process_start > PROCESS_BUDGET_SEC:
                     break
                     
-                if r.get("comment") != NEXUS_STATUS_AWAITING:
+                if r.get("comment") not in {NEXUS_STATUS_SENDING, NEXUS_STATUS_AWAITING}:
                     continue
                 
                 txid = r.get("txid")
                 contract_id = _row_contract_id(r)
                 
-                # Confirm the Solana send. Fast path: check the recorded signature directly
-                # (1 RPC, batchable) instead of scanning up to 50 txs by memo.
+                # A signature status is not payout proof. Read the finalized transaction
+                # itself and compare its exact source identity and transfer to frozen terms.
                 try:
-                    sent_sig = r.get("sig")
-                    if sent_sig:
-                        found_sig = sent_sig if solana_client.get_signatures_confirmation([sent_sig]).get(sent_sig) else None
-                    else:
-                        # Legacy/crash fallback: recover the signature by its memo.
-                        found_sig = solana_client.find_signature_with_memo(
+                    candidate_sig = r.get("sig")
+                    evidence = (
+                        solana_client.get_nexus_payout_evidence(
+                            candidate_sig, txid, contract_id
+                        )
+                        if candidate_sig
+                        else solana_client.find_nexus_payout_evidence(
                             f"nexus_txid:{txid}:{contract_id}"
                         )
-                    if found_sig:
-                        # Solana send confirmed - mark as processed. Same exact-column
-                        # derivation as the send path, so the archived amount matches the
-                        # one the payout was computed from.
+                    )
+                    if _payout_evidence_matches_frozen_terms(
+                        r, evidence, candidate_signature=candidate_sig
+                    ):
+                        found_sig = evidence.solana_signature
+                        fee_units = r["payout_fee_nexus_units"]
+                        if not candidate_sig:
+                            # Adopt a recovered signature only after the full evidence
+                            # comparison; the atomic finalizer then requires this exact sig.
+                            state_db.update_unprocessed_txid(
+                                txid=txid,
+                                contract_id=contract_id,
+                                status=NEXUS_STATUS_AWAITING,
+                                sig=found_sig,
+                            )
                         amt_nexus = Decimal(_row_amount_units(r)) / (Decimal(10) ** config.USDD_DECIMALS)
-                        state_db.mark_processed_txid(
+                        _finalize_nexus_credit_or_raise(
+                            fee_kind="swap_fee_nexus_to_solana" if fee_units else None,
+                            fee_nexus_units=fee_units,
                             txid=txid,
                             timestamp=r.get("ts"),
                             amount_usdd=float(amt_nexus),
@@ -453,9 +441,9 @@ def process_unprocessed_txids(paused: bool = False):
                             amount_usdd_units=_row_amount_units(r),
                             contract_id=contract_id,
                         )
-                        state_db.remove_unprocessed_txid(txid, contract_id)
                         _log("NEXUS_SOLANA_CONFIRMED", txid=txid, sig=found_sig)
                     else:
+                        _log("NEXUS_PAYOUT_EVIDENCE_HOLD", txid=txid, contract_id=contract_id)
                         # Check for timeout - but DON'T auto-refund!
                         # Bug #15 fix: Auto-refunding on confirmation timeout is dangerous
                         # because the payout may have actually been sent (memo search failed).
@@ -507,6 +495,7 @@ def process_unprocessed_txids(paused: bool = False):
                         if recv and solana_client.is_valid_solana_token_account(recv):
                             state_db.update_unprocessed_txid(
                                 txid=txid,
+                                contract_id=contract_id,
                                 receival_account=recv,
                                 status=NEXUS_STATUS_READY
                             )
@@ -618,9 +607,15 @@ def poll_nexus_deposits():
         page_ts_candidates: list[int] = []
         backlog_truncated = False
         enumeration_complete = True
+        offset_page_requested = False
         processed_count = 0
         # Step 1 & 2: fetch treasury credits with pagination
         for page in range(max_pages):
+            if page > 0:
+                # This endpoint supplies no immutable snapshot identifier.  Merely
+                # requesting a later mutable offset makes absence/completeness unprovable,
+                # even when that later page is short or empty.
+                offset_page_requested = True
             cmd = list(base_cmd) + [f"limit={limit}", f"offset={page * limit}"]
             try:
                 code, stdout, stderr = nexus_client._run(
@@ -796,15 +791,9 @@ def poll_nexus_deposits():
                     # accounted for and the sender is traceable for manual resolution.
                     if classification.disposition == "below_minimum":
                         owner = (nexus_client.get_account_info(sender) or {}).get("owner")
-                        if credit_units > 0:
-                            state_db.add_fee_entry(
-                                sig=None,
-                                txid=txid,
-                                kind="below_min_credit_nexus",
-                                amount_usdc_units=None,
-                                amount_usdd_units=credit_units,
-                            )
-                        state_db.mark_processed_txid(
+                        _finalize_nexus_credit_or_raise(
+                            fee_kind="below_min_credit_nexus",
+                            fee_nexus_units=credit_units,
                             txid=txid,
                             timestamp=ts,
                             amount_usdd=float(amount_dec),
@@ -848,16 +837,9 @@ def poll_nexus_deposits():
                     if classification.disposition == "fee_only":
                         # Add to processed as fees
                         owner = (nexus_client.get_account_info(sender) or {}).get("owner")
-                        # The exact credited base units are fully retained as a fee.
-                        if credit_units > 0:
-                            state_db.add_fee_entry(
-                                sig=None,
-                                txid=txid,
-                                kind="fee_only_nexus_credit",
-                                amount_usdc_units=None,
-                                amount_usdd_units=credit_units
-                            )
-                        state_db.mark_processed_txid(
+                        _finalize_nexus_credit_or_raise(
+                            fee_kind="fee_only_nexus_credit",
+                            fee_nexus_units=credit_units,
                             txid=txid,
                             timestamp=ts,
                             amount_usdd=float(amount_dec),
@@ -911,6 +893,8 @@ def poll_nexus_deposits():
                 _log("NEXUS_WATERLINE_HOLD", reason="enumeration_incomplete")
             elif backlog_truncated:
                 _log("NEXUS_WATERLINE_HOLD", reason="pagination_truncated")
+            elif offset_page_requested:
+                _log("NEXUS_WATERLINE_HOLD", reason="mutable_offset_pagination")
             elif rows:
                 ts_candidates = [int(x.get("ts") or 0) for x in rows if int(x.get("ts") or 0) > 0]
                 if ts_candidates:

@@ -1,11 +1,11 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Date:** 2026-09-05
-**Evaluated code:** `c2d07aa990627da758f10be6c765a59039b05d4d`
+**Date:** 2026-09-07
+**Repair baseline:** `6568446d551c785a2b96d16217b468e78a93defd`; current safety repair is an uncommitted working-tree candidate.
 **Status:** Current issue register and repair priority for `swapService`
-**Architecture-plan update:** 2026-09-05 (recovery repairs reviewed; provider-v2 target remains planned)
+**Architecture-plan update:** 2026-09-07 (source identity, atomic fees and recovery safety repaired locally; provider-v2 remains planned).
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The current independent evidence is in [`DEVELOPMENT_REVIEW_2026-09-05.md`](DEVELOPMENT_REVIEW_2026-09-05.md); earlier reviews remain historical evidence.
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The baseline independent evidence is in [`DEVELOPMENT_REVIEW_2026-09-07.md`](DEVELOPMENT_REVIEW_2026-09-07.md). The [post-change report](POST_CHANGE_REVIEW_2026-09-07.md) controls current repair status and verification; dated sections 10–12 below are historical snapshots, not current open-finding assertions.
 
 ## 1. Executive verdict
 
@@ -35,68 +35,83 @@ The repair work through the evaluated head materially improved the bridge:
 - one composable pytest command exists and is green locally.
 
 Those controls are valuable. They do not make the service production-ready.
-The 2026-09-05 review verifies three local repairs: deposit enumeration now targets the canonical
-treasury account, runtime and recovery share one strict top-level heartbeat parser, and recovery no
-longer moves an old custody waterline forward. Nexus can still place multiple CREDIT contracts in
-one transaction, while every incoming Nexus queue/archive table remains keyed only by `txid`.
-Current code rejects such a transaction and holds the page rather than silently losing a sibling;
-that is fail-closed containment, not the required `(txid, contract_id)` repair. Malformed recovery
-evidence can still be called complete, mutable offset pagination can omit a boundary transaction,
-and startup does not latch or abort exposure on recovery failure. The canonical treasury query also
-lacks target-node acceptance evidence. Automatic Nexus refunds remain disabled and the live-chain
-matrix has not been run. See `DEVELOPMENT_REVIEW_2026-09-05.md`.
+The 2026-09-07 review verifies that incoming live/recovery admission and the four Nexus lifecycle
+queues/archives now preserve `(txid, contract_id)`, including valid sibling CREDITs, and that the
+recovery producer rejects malformed qualifying credit identity, amount and finality fields. These
+are real local repairs to the 2026-09-05 Critical admission and malformed-scan findings.
 
-### Current severity summary
+Composite source identity now extends through operator intents, references, audit, CLI selection and
+atomic sibling-scoped finalization. A held source is revalidated before execution and cannot also
+be claimed for a Solana payout. Strict payout memo/evidence reconstruction and an explicit startup
+recovery refusal gate replace the old duplicate-payment and log-and-continue paths. Multi-page
+mutable offset enumeration holds live checkpoints as well as refusing recovery completeness.
+Fees are uniquely attributable per source contract and atomically committed with terminal state;
+payout terms are frozen before submission and matched to full successful finalized Solana transfer
+evidence before finalization. The submission helper cannot write a sparse terminal source. Legacy/ambiguous
+evidence remains held. These are local code repairs, not target-chain production evidence.
 
-| Severity | Count | Meaning |
-|---|---:|---|
-| Critical release gate | 1 | Incoming Nexus contract identity remains txid-only; multi-CREDIT transactions are contained but unrepresentable |
-| High release blocker | 3 | Malformed recovery, mutable pagination and non-latching startup failure |
-| Medium / operational | 5 | Fee atomicity, hidden discrepancy amount, finality coercion, regression gaps and live acceptance |
-| Locally repaired, externally gated | 3 | Treasury scan scope, heartbeat schema and exact old-waterline preservation |
-
-### Release gates
+### Current release-gate summary
 
 | Gate | Status |
 |---|---|
-| No ambiguous state-changing operation is retried blindly | **CONTAINED** — automatic Nexus refunds hold and alert; durable refund protocol remains required |
-| No checkpoint advances from incomplete/lossy enumeration | **FAILED in recovery** — missing/malformed contract identity can be skipped under `complete=True`; target-node stable-range/pagination evidence also remains required |
-| Exact money math for arbitrary configured decimals | **PASS locally and in CI** — integer-only thresholds, outputs and public terms have exact 6/6, 8/6, 6/8, 9/6 and 0/0 regression coverage; target-chain matrix remains required |
-| Durable completed-state data supports reconciliation | **PARTIAL** — outbound terminal records retain `(txid, contract_id)`, but incoming Nexus deposits still collapse all contracts under `txid` |
-| One composable automated test command | **PASS locally** — 145 tests plus 19 subtests on `7208f8b` |
-| CI enforces tests and static checks | **PASS on reviewed head** — GitHub Actions run 33908593661 succeeded for `7208f8b`; the Critical fixtures and live acceptance gates remain open |
-| Live devnet/testnet matrix | **NOT RUN** |
+| Exact source identity; sibling disposition isolation | Repaired locally; explicit legacy holds remain |
+| No blind retry after an ambiguous financial operation | Local intent/claim and recovery gates enforced; live timeout/crash proof required |
+| No checkpoint from incomplete enumeration | Multi-page mutable live polls hold checkpoints and recovery refuses completeness; stable snapshot/cursor protocol remains future work |
+| Live payout evidence matches frozen intent | Direct-signature and memo-recovered paths require exact finalized source identity, vault, mint, recipient and output; re-review evidence is recorded in the post-change report |
+| Atomic fee and terminal source state | Implemented with rollback, replay and frozen-term fixtures |
+| Installed-SDK recovery request construction | Signature-typed transaction lookups and recovery cursor are locally verified through real SDK encoders with a mocked provider; target-chain acceptance remains required |
+| Exact mixed-decimal money math | Existing local regression coverage retained; target-chain matrix required |
+| Complete local engineering gate | See final command results in the post-change report; do not substitute prior-head CI |
+| Exact-candidate CI and live devnet/testnet matrix | Not run for this uncommitted repair |
 
 ---
 
 ## 2. Critical deployment blockers
+
+### E-014 — Incoming Nexus contract identity is not end to end
+
+**Severity:** Critical
+**Priority:** P0 — repair before operator disposition or wipeout recovery can be trusted
+
+**Current status: locally repaired; live and legacy-resolution gates remain.** The new migration
+adds exact source identity to transfer intents and fee evidence, preserving outbound contract identity
+separately. CLI selection requires the exact source contract; source validation, audit and finalization
+preserve siblings and reject conflicting evidence. Legacy intents are retained but cannot authorize,
+claim or finalize a fresh debit. Strict composite payout parsing and positive source/output evidence
+replace synthetic txid markers during reconstruction. Startup cannot proceed from incomplete recovery.
+Per-contract fee classification, terminal state and queue removal are one atomic transaction.
+
+The following exit criteria remain the governing acceptance specification; local fixtures are listed
+in the post-change report and do not replace target-node verification.
+
+#### Required exit
+
+1. Add immutable `source_contract_id` to every transfer intent and audit/operator command; derive the
+   intent id/reference from both source fields.
+2. Read, archive and delete only the exact held source identity in one transaction; never default a
+   current-chain terminal row to `-1`.
+3. Define and strictly parse a versioned payout memo carrying txid and contract id; retain an explicit
+   manual path for legacy txid-only memos.
+4. Prove two held siblings can be independently finalized and a wipeout cannot requeue an already-paid
+   sibling while still recovering an unpaid sibling.
+5. Add source contract identity to fee evidence and make fee classification plus terminal state atomic.
+
+---
 
 ### E-001 — Nexus refunds are not crash-safe or idempotent
 
 **Severity:** Critical
 **Priority:** P0 — contain immediately, then implement durable protocol
 
-**Current status:** **contained; durable-protocol foundation implemented, not yet released.**
-Every automatic Nexus refund branch transitions the source credit to `refund held for operator
-review`, records `hold_reason`, emits a Critical alert and leaves the source row in place.
-A new durable, monotonic `nexus_transfer_intents` ledger now permits exactly one intent per source
-credit and persists its destination, exact base units and deterministic unique reference before a
-Nexus account debit can be issued. It atomically permits a single execution; parsed remote txids
-are retained and timeouts,
-interruptions, non-zero exits and unparsed output become `outcome_unknown`. Resolution only
-completes an intent after a positive on-chain debit whose unique reference, source account,
-destination account and exact base-unit amount all match the immutable intent. For an already
-submitted intent, the observed txid must also match the persisted txid; the state transition
-rejects an attempt to replace the persisted txid, including from an incorrect local caller. It
-never retries a debit.
+**Current status: automatic execution contained; exact-source durable operator protocol repaired locally.**
+Automatic Nexus refunds and quarantine movements remain disabled. The operator path now requires
+`--txid` and `--contract-id`; intent references, uniqueness, authorization and finalization bind that
+exact held source. Source and terminal/payout conflicts are rechecked under the database transaction
+before any single-use execution claim. Finalization preserves sibling rows and requires stored remote
+identity. Legacy txid-only intents retain evidence and remain manual holds, blocking a guessed fresh
+debit for that txid. Interrupted execution becomes `outcome_unknown`, never a fresh attempt.
 
-Automatic refunds and quarantine moves remain disabled in the service loop. A separate
-`nexus_transfer_operator.py` workflow now requires a named operator, rationale, an audited
-preparation event tied to the deterministic intent reference, exact intent reference confirmation,
-a one-time execution request and a final exact remote-txid confirmation before it archives the
-held source row. Each authorization, requested execution and disposition is append-only/auditable. At
-startup, any persisted `executing` intent is demoted to the explicit `outcome_unknown` hold
-before scans run, so a crash after the durable claim cannot consume its authorization again.
+Do not enable operational transfers until the target-node crash/finality matrix passes.
 
 **Independent follow-up remediation (2026-08-31):** every resolver now holds when its bounded
 reference lookup is incomplete, normalizes Nexus `from`/`to` endpoint objects to immutable register
@@ -169,9 +184,12 @@ because it cannot independently prove a complete, snapshot-stable range. Regress
 that no `where=` argument is sent even when a legacy flag is injected into the test configuration
 and that an empty page cannot advance the waterline.
 
-The remaining release gate is external: the target Nexus build must demonstrate complete,
-stable enumeration and pagination under the standing live-node matrix before a waterline is
-trusted with real funds.
+The remaining release gate is stable target-node history coverage. Multi-page mutable offset
+recovery explicitly returns incomplete; live polling holds its checkpoint after requesting any
+nonzero offset, even if a later page is short or empty. Positive credits may still be persisted.
+Two identical scans do not establish a snapshot. The preserved repeatability regression is retained.
+Enabling multi-page checkpoint advancement or complete recovery requires an
+independently verified snapshot/cursor protocol, not removal of this refusal.
 
 #### Immediate containment
 
@@ -544,17 +562,16 @@ migration are defined in [`../ASSET_STANDARD.md`](../ASSET_STANDARD.md#provider-
 The plan is sequenced by expected fund-safety value from the evaluated head. Completed
 containment and engineering-gate work stays visible because every later batch depends on it.
 
-### Batch 0 — Immediate containment **PARTIAL / REOPENED**
+### Batch 0 — Immediate containment **LOCALLY REPAIRED / EXTERNALLY GATED**
 
-1. Disable automatic Nexus refunds; hold and alert instead.
-2. Remove heuristic Nexus server filtering from normal and recovery enumeration.
-3. Surface every held state with chain references, reason, age and safe operator guidance.
-4. Bind deposit admission/recovery to canonical treasury history and `(txid, contract_id)`.
+1. ✅ Disable automatic Nexus refunds; hold and alert instead.
+2. ✅ Remove heuristic Nexus server filtering from normal and recovery enumeration.
+3. ✅ Surface every held state with chain references, reason, age and safe operator guidance.
+4. ✅ Bind source identity through treasury admission, recovery, operator intents and exact finalization.
 
-**Exit not met:** refunds remain contained and canonical treasury-account history is now used
-locally, but target-node account-history semantics are unproven and txid-only state cannot represent
-sibling credits. Multi-CREDIT transactions are rejected atomically and hold the waterline rather
-than being silently truncated.
+**Local containment implemented:** end-to-end source identity, strict payout reconstruction and
+startup refusal are covered by local fixtures. Mutable multi-page recovery is refused. The target-node
+account-history, real finality and crash/restart matrix remain release gates.
 
 ### Batch 1 — Engineering and exact-money gate ✅
 
@@ -598,24 +615,18 @@ Solana↔Nexus exposure while already-owed refunds and quarantines continue in p
 remains partial:** target-node global-uniqueness, single-page boundary/order and transaction-response
 semantics are unproven; local code holds whenever those properties cannot be established.
 
-### Batch 3 — Durable Nexus refund and quarantine protocol **(in progress; automatic execution remains disabled)**
+### Batch 3 — Durable Nexus refund and quarantine protocol **LOCALLY REPAIRED / LIVE GATE OPEN**
 
-1. ✅ Persist intent, destination, exact units and a deterministic unique reference before every eligible transfer.
-2. ✅ Allow exactly one CLI/API execution from an atomically claimed intent and persist only a parsed, non-empty JSON-string Nexus txid.
-3. ✅ Treat timeout, interruption, non-zero exit and unparsed output as `outcome_unknown`.
-4. ✅ Resolve only one exact positive contract identity to completed; incomplete bounded lookups
-   hold, and terminal state retains `contract_id`. The resolver still never retries a debit.
-   Target-node proof that the lookup can establish a complete stable range remains Batch 4 evidence.
-5. ✅ Persist and retain all in-flight intents across restart.
-6. ✅ Provide an operator-only prepare → reference-confirm → authorize → execute-once →
-   resolve → remote-txid-confirmed finalization workflow with an append-only attribution log;
-   automatic refunds and quarantine moves remain disabled until focused fault injection and the
-   live matrix pass.
+1. ✅ Persist exact source contract, destination, integer units and deterministic reference before execution.
+2. ✅ Revalidate the held source at preparation, authorization and single-use claim; exclude competing payouts.
+3. ✅ Retain remote identity; ambiguous results remain `outcome_unknown` without resubmission.
+4. ✅ Resolve only attributable positive remote contract evidence, never bounded negative history.
+5. ✅ Finalize terminal state, exact source removal and audit atomically without deleting a sibling.
+6. ✅ Preserve legacy identities and remote/audit evidence as non-executable manual holds.
+7. ✅ Persist payout terms before RPC and fee classification atomically with confirmed terminal state.
 
-**Remaining exit evidence:** the local crash-after-claim/restart regression now proves an
-interrupted intent becomes a durable `outcome_unknown` hold and cannot execute twice. Target-node
-crashes at every intent/action/finalization boundary, duplicate invocation and timeout behavior
-must still prove exactly one remote transfer.
+**Remaining exit:** run the target-node matrix at every acceptance and crash boundary. Review and
+resolve pre-upgrade ambiguity from real chain evidence; do not relabel legacy rows to bypass a hold.
 
 ### Batch 4 — Live integration and external-semantics evidence
 
@@ -745,15 +756,16 @@ hyphenated `distordia-type` field and address-based read/update calls before v1 
 | `tests/legacy_session.py` | Enforced as an isolated pytest case |
 | `tests/legacy_frozen_names.py` | Enforced as an isolated pytest case |
 | `tests/legacy_dashboard.py` | Enforced as an isolated pytest case |
-| `python -m pytest -q tests/test_critical_safety.py` | Covered by the green full suite on `c2d07aa`; exact focused count is not asserted here |
-| Python byte-compilation | Passed |
-| Dependency consistency | Passed |
-| Local Markdown links | Passed |
-| Current-tree whitespace | Passed after removing four trailing-whitespace defects in the review commit |
-| Full `python -m pytest -q` | 154 passed, 19 subtests passed locally on `c2d07aa` (Python 3.11) |
-| CI workflow | Passed on reviewed implementation head `c2d07aa` — [run 33961339438](https://github.com/distordialabs-brutus/swapService/actions/runs/33961339438); the review commit requires its own exact-head read-back |
-| `pip-audit -r requirements.txt` | No known vulnerabilities found after the targeted E-013 pins |
-| `pyflakes` current tree | Not green; unused/redefinition/f-string diagnostics remain and lint is not enforced in CI |
+| `python -m pytest -q tests/test_critical_safety.py` focused six-test credit/recovery selection | 5 passed plus 6 subtests; the preserved uncommitted stable-pagination test failed |
+| Python byte-compilation | Passed on the working tree with an isolated bytecode cache |
+| Dependency consistency | Passed — `python3 -m pip check` reported no broken requirements |
+| Local Markdown links | Passed before this documentation update; final check required below |
+| Token-pair inventory | 651 active lines at the committed index before this documentation update; regenerate/check against the candidate index |
+| Current-tree whitespace | Passed before this documentation update |
+| Full `python -m pytest -q` | **Working copy red:** 1 failed, 157 passed, 25 subtests passed in 19.00s; only the uncommitted pagination requirement failed |
+| CI workflow | No exact-head CI claim was made by this local review; parent publication must verify the final published SHA |
+| `ruff`, `pyflakes`, `mypy`, `pip-audit`, `bandit` | Not installed in the local environment |
+| Local mocked safety probes | Reproduced sibling deletion at operator finalization and paid-credit requeue after wipeout reconstruction |
 | Live integration | Not run |
 
 ## 9. Definition of deployment-ready
@@ -772,7 +784,7 @@ Deployment may be reconsidered only when:
 
 ## 10. Independent review update — 2026-09-04 21:05 CEST
 
-The current evidence review at [`DEVELOPMENT_REVIEW_2026-09-04_2105.md`](DEVELOPMENT_REVIEW_2026-09-04_2105.md)
+The historical evidence review at [`DEVELOPMENT_REVIEW_2026-09-04_2105.md`](DEVELOPMENT_REVIEW_2026-09-04_2105.md)
 supersedes the prior severity summary. Four P0 repairs precede every other batch:
 
 1. enumerate the canonical treasury account rather than token-register history;
@@ -791,7 +803,7 @@ producer-level enumeration regressions rather than only injected `DepositScan` r
 
 ## 11. Independent review update — 2026-09-05 CEST
 
-The current evidence review at [`DEVELOPMENT_REVIEW_2026-09-05.md`](DEVELOPMENT_REVIEW_2026-09-05.md)
+The historical evidence review at [`DEVELOPMENT_REVIEW_2026-09-05.md`](DEVELOPMENT_REVIEW_2026-09-05.md)
 verifies that C-1, C-3 and C-4 are repaired in local code: both admission and recovery query the
 canonical treasury account; one strict top-level heartbeat DTO is shared across producers and
 consumers; and old custody checkpoints are preserved exactly. The target Nexus node has not yet
@@ -804,3 +816,22 @@ H-1 through H-3 also remain open: malformed qualifying evidence can pass produce
 be silently skipped, mutable offset pagination can omit a boundary item, and startup only logs
 recovery errors instead of aborting or latching a recovery-specific exposure pause. Production and
 real-fund admission remain hard-blocked.
+
+## 12. Independent review update — 2026-09-07 CEST
+
+The historical evidence review at [`DEVELOPMENT_REVIEW_2026-09-07.md`](DEVELOPMENT_REVIEW_2026-09-07.md)
+verifies that `594a111` repairs composite identity for live/recovery admission and lifecycle tables,
+`5714df3` retains it through ordinary terminal helpers, and `6568446` rejects malformed qualifying
+recovery evidence. The migration and two-sibling admission fixtures pass locally.
+
+At that reviewed commit, C-2 was only partially closed. Operator intents/finalization were txid-only;
+a local probe finalized one sibling, deleted both queued siblings and archived one `contract_id=-1`
+row. Composite payout memo reconstruction could also requeue an already-paid source. Mutable offset
+pagination, non-fatal startup recovery failure and non-atomic fee evidence remained blockers.
+
+The subsequent uncommitted repair candidate addresses those code paths and the follow-up live
+payout/pagination and installed-SDK defects. Current implementation and executed review evidence are
+in [`POST_CHANGE_REVIEW_2026-09-07.md`](POST_CHANGE_REVIEW_2026-09-07.md) and the release-gate table
+above; the historical review is not rewritten as if it examined the repaired tree. Production and
+real-fund admission remain hard-blocked pending live/operational acceptance. No live financial side
+effect was performed.
