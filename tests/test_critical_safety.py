@@ -201,6 +201,35 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(record["nexus_treasury_address"], "canonical-treasury")
         self.assertEqual(record["nexus_token_register_address"], "canonical-register")
 
+    def test_solana_deposit_destination_requires_configured_nexus_token_register(self):
+        """A matching ticker cannot authorize a mint to an account for another token."""
+        pair = replace(
+            config.SWAP_PAIR,
+            nexus=replace(
+                config.SWAP_PAIR.nexus,
+                symbol="SAME",
+                register_address="expected-token-register",
+            ),
+        )
+        wrong_token_account = {
+            "address": "recipient",
+            "ticker": "SAME",
+            "token": "attacker-token-register",
+        }
+        right_token_account = {
+            "address": "recipient",
+            "ticker": "SAME",
+            "token": "expected-token-register",
+        }
+
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "NEXUS_TOKEN_NAME", "SAME"
+        ), patch.object(
+            nexus_client, "get_account_info", side_effect=[wrong_token_account, right_token_account]
+        ):
+            self.assertFalse(nexus_client.is_valid_nexus_token_account("recipient"))
+            self.assertTrue(nexus_client.is_valid_nexus_token_account("recipient"))
+
     def test_recovery_scans_canonical_treasury_account_history(self):
         """Wipeout recovery must not fall back to the token register's lossy history."""
         credit = {

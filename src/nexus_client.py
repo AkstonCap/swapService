@@ -254,17 +254,44 @@ def get_account_info(nexus_addr: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _account_token_register_address(account_info: Dict[str, Any]) -> str | None:
+    """Return one unambiguous token-register identity from a Nexus account response.
+
+    ``ticker`` is display metadata and can be shared by unrelated token registers.  The
+    finance account representation carries the immutable token register in ``token``;
+    tolerate the documented response wrappers but reject absent, malformed, or conflicting
+    identities rather than authorizing a cross-token mint.
+    """
+    if not isinstance(account_info, dict):
+        return None
+
+    candidates: set[str] = set()
+    pending = [account_info]
+    while pending:
+        current = pending.pop()
+        token = current.get("token")
+        if isinstance(token, str) and token.strip():
+            candidates.add(token.strip())
+        elif isinstance(token, dict):
+            address = token.get("address")
+            if isinstance(address, str) and address.strip():
+                candidates.add(address.strip())
+        for key in ("result", "results", "account", "data"):
+            nested = current.get(key)
+            if isinstance(nested, dict):
+                pending.append(nested)
+
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 def is_valid_nexus_token_account(account: str) -> bool:
-    """Check the Nexus account exists and holds the configured Nexus-side token."""
+    """Check that an account holds the configured immutable Nexus token register."""
     info = get_account_info(account)
-    if not info:
+    if not info or not info.get("address"):
         return False
-    if not info.get("address"):
-        return False
-    expected = str(getattr(config, "NEXUS_TOKEN_NAME", "USDD") or "USDD")
-    if str(info.get("ticker") or "").upper() != expected.upper():
-        return False
-    return True
+    expected = str(getattr(config.SWAP_PAIR.nexus, "register_address", "") or "").strip()
+    observed = _account_token_register_address(info)
+    return bool(expected and observed and observed == expected)
 
 
 def account_exists_and_owner(account: Dict[str, Any], owner: str | None = None) -> bool:
