@@ -26,8 +26,13 @@ def _emit(value: object) -> None:
     print(json.dumps(value, sort_keys=True, indent=2, default=str))
 
 
-def _held_credit(txid: str) -> dict:
-    matches = [row for row in state_db.get_unprocessed_txids_as_dicts() if row.get("txid") == txid]
+def _held_credit(txid: str, contract_id: int) -> dict:
+    if type(contract_id) is not int or contract_id < 0:
+        raise ValueError("source contract id must be a nonnegative integer")
+    matches = [
+        row for row in state_db.get_unprocessed_txids_as_dicts()
+        if row.get("txid") == txid and row.get("contract_id") == contract_id
+    ]
     if len(matches) != 1:
         raise ValueError("held source credit was not found")
     row = matches[0]
@@ -39,7 +44,7 @@ def _held_credit(txid: str) -> dict:
 
 
 def _prepare(args: argparse.Namespace) -> int:
-    row = _held_credit(args.txid)
+    row = _held_credit(args.txid, args.contract_id)
     config, _ = _nexus_modules()
     treasury = str(getattr(config, "NEXUS_USDD_TREASURY_ACCOUNT", "") or "")
     if not treasury:
@@ -53,7 +58,8 @@ def _prepare(args: argparse.Namespace) -> int:
         if not destination:
             raise ValueError("NEXUS_USDD_QUARANTINE_ACCOUNT is required for quarantine")
     intent = state_db.create_nexus_transfer_intent(
-        kind=args.kind, source_txid=args.txid, from_address=treasury, to_address=destination,
+        kind=args.kind, source_txid=args.txid, source_contract_id=args.contract_id,
+        from_address=treasury, to_address=destination,
         amount_usdd_units=int(row["amount_usdd_units"]),
     )
     state_db.record_nexus_transfer_preparation(intent["id"], actor=args.operator, rationale=args.reason)
@@ -129,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     prepare = commands.add_parser("prepare", help="prepare refund/quarantine intent from a held credit")
     prepare.add_argument("--kind", required=True, choices=("refund", "quarantine"))
     prepare.add_argument("--txid", required=True, help="held Nexus credit txid")
+    prepare.add_argument("--contract-id", required=True, type=int,
+                         help="exact held Nexus CREDIT contract id")
     _operator_reason(prepare)
     prepare.set_defaults(handler=_prepare)
 

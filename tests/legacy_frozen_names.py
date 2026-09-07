@@ -86,8 +86,9 @@ EXPECTED_SCHEMA = {
     "accounts": ["nickname", "chain", "ticker", "name", "address", "balance", "timestamp"],
     "attempts": ["action_key", "count", "last_timestamp"],
     "counters": ["name", "value"],
+    # Explicit additive safety migration: old column names remain unchanged.
     "fee_entries": ["id", "sig", "txid", "kind", "amount_usdc_units", "amount_usdd_units",
-                    "timestamp"],
+                    "contract_id", "timestamp"],
     "fee_summary": ["id", "total_collected_usdc", "total_collected_usdd", "last_updated"],
     "heartbeat": ["name", "last_beat", "wline_sol", "wline_nxs"],
     "metrics_snapshot": ["id", "timestamp", "vault_usdc_units", "circulating_usdd_units",
@@ -98,7 +99,7 @@ EXPECTED_SCHEMA = {
     # per intent, so repeating a CLI command cannot rewrite past authorization evidence.
     "nexus_transfer_audit_events": ["id", "intent_id", "action", "actor", "rationale",
                                     "evidence", "timestamp"],
-    "nexus_transfer_intents": ["id", "kind", "source_txid", "from_address", "to_address",
+    "nexus_transfer_intents": ["id", "kind", "source_txid", "source_contract_id", "from_address", "to_address",
                                "amount_usdd_units", "reference", "status", "remote_txid", "contract_id",
                                "created_timestamp", "last_attempt_timestamp", "resolved_timestamp"],
     "payouts": ["id", "kind", "amount_usdc_units", "reference", "timestamp"],
@@ -109,7 +110,8 @@ EXPECTED_SCHEMA = {
                        "amount_usdd_units", "nexus_destination", "memo", "status", "reference",
                        "contract_id"],
     "processed_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "amount_usdd_units", "from_address", "to_address",
-                        "owner", "sig", "status"],
+                        "owner", "sig", "status", "payout_solana_units", "payout_fee_nexus_units",
+                        "payout_receival_account"],
     "quarantined_sigs": ["sig", "timestamp", "from_address", "amount_usdc_units", "memo",
                          "quarantine_sig", "quarantined_units", "status"],
     "quarantined_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
@@ -123,7 +125,8 @@ EXPECTED_SCHEMA = {
                          "amount_usdd_units", "status", "txid", "reference"],
     "unprocessed_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
                           "owner_from_address", "confirmations_credit", "status",
-                          "receival_account", "sig", "amount_usdd_units", "hold_reason"],
+                          "receival_account", "sig", "amount_usdd_units", "hold_reason",
+                          "payout_solana_units", "payout_fee_nexus_units"],
     "waterline_proposals": ["chain", "proposed_timestamp"],
 }
 

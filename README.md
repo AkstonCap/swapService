@@ -1,373 +1,170 @@
-# USDC ↔ USDD Bidirectional Swap Service
+# swapService — Configurable Solana ↔ Nexus Token Bridge
 
-User-facing guide for performing swaps between USDC (Solana) and USDD (Nexus).
+A custodial, bidirectional bridge for **one operator-configured Solana SPL token and one Nexus token per deployment**. The tokens are not hardcoded to a particular ticker. `USDC` and `USDD` are the historical deployment and default display names; they also remain in some compatibility settings and stored fields.
 
-Operator / setup documentation: see **`SETUP.md`**.  
-Security hardening: **[`docs/SECURITY.md`](docs/SECURITY.md)**.
-Configuration reference: **`CONFIG.md`**.
+The bridge uses a **1:1 whole-token backing/conversion model before fees and conservative decimal rounding**. It is not a market-price exchange, a multi-pair router, or a general cross-chain adapter. The current Solana transfer implementation uses the classic SPL Token program; configurable mint selection does not imply native-SOL or Token-2022 support.
 
-<details>
-<summary><b>Review &amp; audit documents</b> (which one is current?)</summary>
+> **Release safety:** local engineering checks do not establish production readiness. Target-chain, custody, migration and crash/recovery acceptance remain required before real funds are admitted. See the [current evaluation](docs/EVALUATION.md) and [safety repair evidence](docs/POST_CHANGE_REVIEW_2026-09-07.md).
 
-| Document | Status | Read it for |
-|----------|--------|-------------|
-| [`docs/EVALUATION.md`](docs/EVALUATION.md) | **Current remediation plan** | Authoritative issue register, severity, repair priority, exit criteria and deployment definition. |
-| [`docs/DEVELOPMENT_REVIEW_2026-09-04_2105.md`](docs/DEVELOPMENT_REVIEW_2026-09-04_2105.md) | **Current independent review** | Review through `7208f8b`; four Critical skipped-liability/recovery gates keep production hard-blocked. |
-| [`docs/DEVELOPMENT_REVIEW_2026-08-29.md`](docs/DEVELOPMENT_REVIEW_2026-08-29.md) | Review history | Review of committed controls through `5e7d3b8` and the separate staged reconciliation proposal. |
-| [`docs/DEVELOPMENT_REVIEW_2026-08-28.md`](docs/DEVELOPMENT_REVIEW_2026-08-28.md) | Review history | Evidence-backed review of the preceding repair series through `f614897`. |
-| [`docs/POST_CHANGE_REVIEW_2026-08-24.md`](docs/POST_CHANGE_REVIEW_2026-08-24.md) | Review evidence | Independent/static review evidence for commit `1e4f20c` that feeds the current evaluation. |
-| [`docs/DEVELOPMENT_REVIEW_2026-08-24.md`](docs/DEVELOPMENT_REVIEW_2026-08-24.md) | Fix history | Original review, Critical findings, and the repair sequence that led to `1e4f20c`. |
-| [`docs/RISK_ASSESSMENT.md`](docs/RISK_ASSESSMENT.md) | History with current update | Whole-system risk history and current safety-gate note. |
-| [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) | Current with resolution note | Server-side state machines and repaired ambiguity/waterline invariants. |
-| [`docs/SWAP_INITIATOR_STATE_MACHINES.md`](docs/SWAP_INITIATOR_STATE_MACHINES.md) | Current user-flow description | User-facing flow only; it is not fund-safety verification. |
-| [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) | History | The first audit pass, superseded. |
+## Documentation
 
-</details>
+| Audience | Document |
+|---|---|
+| Swap users | This guide and [user-flow state machines](docs/SWAP_INITIATOR_STATE_MACHINES.md) |
+| Operators | [SETUP.md](SETUP.md), [CONFIG.md](CONFIG.md), [`.env.example`](.env.example) |
+| Asset/client integrations | [ASSET_STANDARD.md](ASSET_STANDARD.md) |
+| Developers | [runtime state machines](docs/STATE_MACHINES.md), [engineering guidance](.github/copilot-instructions.md) |
+| Security and release decisions | [SECURITY.md](docs/SECURITY.md), [EVALUATION.md](docs/EVALUATION.md) |
+| Previous verification | [2026-09-07 repair report](docs/POST_CHANGE_REVIEW_2026-09-07.md), [baseline review](docs/DEVELOPMENT_REVIEW_2026-09-07.md) |
 
----
+Dated review/audit reports retain their original snapshots, token examples and test counts. They are historical evidence, not a substitute for checking the current code and deployment.
 
-## Quick Overview
-The service lets you swap:
-- USDC → USDD: Send USDC to the service vault with a memo that specifies a Nexus (USDD) account.
-- USDD → USDC: Send USDD to the treasury and publish an asset mapping your USDD transaction `txid` to a Solana receival account.
+## Which tokens does a deployment bridge?
 
-Thresholds & Fees (defaults – operator may change):
-- Minimum swap amounts (smaller = treated as fees, **no tokens are sent back**):
-  - USDC → USDD: `0.2 USDC` (nets ~0.0998 USDD after the 0.1 flat fee + 0.1%)
-  - USDD → USDC: `1.0 USDD` (nets ~0.499 USDC after the 0.5 flat fee + 0.1%) — this direction carries a larger flat fee, so its minimum is higher. Sending less will **not** be swapped.
-- Flat fee (USDC path) & dynamic fee (bps) may apply as configured.
+The operator selects the pair through [`src/config.py`](src/config.py), which builds the immutable `SWAP_PAIR` configuration:
 
----
+| Setting | Meaning |
+|---|---|
+| `SOLANA_TOKEN_MINT` | Actual Solana mint identity |
+| `SOLANA_VAULT_ACCOUNT` | Service's token account for that mint, not a wallet owner address |
+| `SOLANA_TOKEN_SYMBOL` | Display symbol; defaults to `USDC`, not an authorization check |
+| `SOLANA_TOKEN_DECIMALS` | Solana-side precision; defaults to `6` and must match the selected mint |
+| `NEXUS_TOKEN_REGISTER_ADDRESS` | Immutable Nexus token register identity used for account/transfer validation |
+| `NEXUS_TOKEN_NAME` | Configured token name/display label; defaults to `USDD`, not a substitute for register identity |
+| `NEXUS_TREASURY_ACCOUNT` | Service's Nexus treasury account for the selected token |
+| `NEXUS_TOKEN_DECIMALS` | Nexus-side precision; defaults to `6` and must match the selected token |
+| `DEPOSIT_MEMO_PREFIX` | Solana deposit memo prefix; defaults to `nexus:` |
 
-## How to swap USDD for USDC
+Both precisions are configurable and need not match. Changing a display symbol alone does **not** select another asset. Identity, custody accounts, decimals and fees must all describe the same intended pair.
 
-### USDC->USDD
+Supported legacy aliases, such as `USDC_MINT` and `NEXUS_USDD_TREASURY_ACCOUNT`, remain compatible; conflicting canonical/legacy identity, custody, decimal or fee settings are rejected rather than silently selecting a different pair. See [CONFIG.md](CONFIG.md) for the exact alias and precedence rules, including settings that retain legacy-only names.
 
-Send USDC from a solana wallet which allow memos in the following format:
+Do not change a deployed pair over an existing custody database, heartbeat or unresolved liabilities as though it were a label change. Pair migration needs a separately verified custody and recovery plan. The provider-v2 schema in [ASSET_STANDARD.md](ASSET_STANDARD.md) is a **planned extension**, not current multi-pair support.
 
-- Send to: `Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ`
+## Verify the deployment before sending
 
-> ⚠️ **This is the vault address of *this* deployment.** Always verify it against the
-> operator's on-chain heartbeat asset (`solana_vault_address`) before sending funds.
-> **If you deploy a fork, you MUST replace this address and the one in the CLI example
-> below with your own `VAULT_USDC_ACCOUNT`** — otherwise your users' USDC is sent to
-> the original operator's vault.
-- Memo/note: `nexus:<USDD receival account>`
-- Amount: minimum `0.2 USDC`
+Never copy a vault, mint or treasury address from an unrelated deployment. Obtain the operator's actual registration and independently verify:
 
-Fees (USDC→USDD): 0.1 USDC flat + 0.1% of amount. The USDD→USDC direction charges 0.5 USDC flat + 0.1%.
+- Solana network, `solana_vault_mint` and `solana_vault_address`;
+- Nexus network, `nexus_token_register_address` and `nexus_treasury_address`;
+- `memo_prefix`, current minimums and fees, and the token precision on each side;
+- the operator's identity/contact, record `status` and freshness of `last_poll_timestamp`.
 
-Optionally use the local solana CLI:
+An `online` status or recent heartbeat is a liveness signal, **not proof of solvency, completed recovery or release approval**. A displayed ticker alone does not establish token identity.
 
-`spl-token transfer \EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \<amount> \Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ \--with-memo "nexus:<USDD receival account>" \--url https://api.mainnet-beta.solana.com`
-
-### USDD->USDC (Asset‑Mapped Receival Account)
-
-> 📖 **Full specification:** See [ASSET_STANDARD.md](ASSET_STANDARD.md) for complete asset format details and examples.
-
-Publish (or update) a Nexus Asset **you own** that maps the USDD transfer txid to your Solana receival address. The service matches on two fields: `txid_toService` (the USDD credit transaction hash) AND `owner` (the signature chain that sent the USDD). When it finds an asset row containing a `receival_account`, it sends USDC there.
-
-**Quick Start (3 commands):**
-
-1) **Create asset** (one-time setup):
-```bash
-nexus assets/create/asset name=distordiaBridge format=basic \
-    txid_toService="" \
-    receival_account=<YOUR_SOLANA_USDC_ATA> \
-    pin=<PIN>
-```
-
-2) **Send USDD** to treasury and capture txid:
-```bash
-nexus finance/debit/account from=<YOUR_USDD_ACCOUNT> to=<TREASURY_ACCOUNT> amount=10.5 pin=<PIN>
-# Response includes "txid": "01b88ff8..."
-```
-> **Note:** Use `finance/debit/account` with your USDD account name or address. The `finance/debit/token` command debits from the token supply and is reserved for the token creator.
-
-3) **Update asset** with txid:
-```bash
-nexus assets/update/asset name=distordiaBridge format=basic \
-    txid_toService=01b88ff8... \
-    pin=<PIN>
-```
-
-Done! The service will detect your credit, verify the asset owner matches, and send USDC to your `receival_account`.
-
-**Key Points:**
-- Asset owner must match the sender's `owner` field of the USDD credit (security check)
-- The same asset is reused for multiple swaps—just update `txid_toService` each time
-- Your Solana wallet must already have a USDC ATA (most wallets auto-create on first receive)
-- Minimum: `1.0 USDD` (`MIN_CREDIT_USDD`). Smaller amounts are recorded and treated as fees — no USDC is sent
-- If no asset mapping within `REFUND_TIMEOUT_SEC` (default 1 hour) → the credit is held
-  for operator review. Automatic Nexus refunds are disabled until their durable,
-  crash-safe protocol is implemented.
-
-High‑level flow:
-1. You send USDD to the service treasury.
-2. You obtain the resulting transaction `txid` (returned by the CLI / wallet).
-3. You create (or update) an asset you own adding fields:
-  - `txid_toService` : the txid from step 2
-  - `receival_account` : either your Solana USDC token account (ATA) OR your Solana wallet address (the service will derive the ATA if it already exists). 
-4. Service detects the credit, queries assets filtering by `txid_toService=<txid>` AND `owner=<sender_owner_hash>`, validates the receival account, then sends net USDC.
-5. If no matching asset appears before the refund timeout, the credit is held for
-   operator review; it is not automatically refunded.
-
-Detailed steps:
-
-1) Ensure your Solana wallet already has (or will auto-create) a USDC ATA.
-  - Most consumer wallets (Phantom, Solflare, Glow) auto-create it on first receive.
-  - Power users can pre-create it: `spl-token create-account <USDC_MINT>`.
-
-2) Send USDD to the treasury
-  - To: `NEXUS_USDD_TREASURY_ACCOUNT`
-  - Amount: ≥ `MIN_CREDIT_USDD` (default 1.0). Amounts below the threshold are recorded and treated as micro credits (100% fee); no USDC will be sent.
-  - Command example (token debit):
-    ```bash
-    nexus finance/debit/token from=USDD to=<TREASURY_ACCOUNT> amount=<AMOUNT_IN_BASE_UNITS> pin=<PIN>
-    ```
-    or (account debit if you hold a USDD account object):
-    ```bash
-    nexus finance/debit/account from=<YOUR_USDD_ACCOUNT> to=<TREASURY_ACCOUNT> amount=<AMOUNT_UNITS> pin=<PIN>
-    ```
-  - Capture the `txid` from the CLI output.
-
-3) Create or update the mapping asset (owned by the same signature chain that performed the debit):
-  - If you do not already have an asset container for swaps, you can create one with mutable fields:
-    ```bash
-    nexus register/create/asset name=swapRecv mutable=txid_toService,receival_account
-    ```
-  - Then set (or update) the fields for this specific txid:
-    ```bash
-    nexus register/write/asset name=swapRecv data='{"txid_toService":"<TXID>","receival_account":"<SOLANA_OR_USDC_TOKEN_ACCOUNT>"}'
-    ```
-    (If your CLI supports partial field updates you can just write those two fields.)
-  - Alternative: create one asset per swap (simpler, higher on‑chain object count):
-    ```bash
-    nexus register/create/asset name=swapRecv_<SHORT_TXID> data='{"txid_toService":"<TXID>","receival_account":"<SOLANA_OR_TOKEN_ACCOUNT>"}'
-    ```
-
-4) Wait for service processing
-  - Service polls, resolves your Solana address via `find_asset_receival_account_by_txid_and_owner`. If the supplied value is a wallet address (not a USDC token account), it attempts to locate an existing USDC ATA; it will NOT create a missing one.
-  - On success it sends net USDC (after flat + dynamic fees, if configured) with a memo referencing the originating Nexus txid.
-
-5) Refund / fallback cases
-  - No asset found within `REFUND_TIMEOUT_SEC`: credit is held for operator review.
-  - Invalid/malformed `receival_account`: credit is held for operator review.
-  - Solana send failures enter the separately tracked payout-confirmation/quarantine flow;
-    they are not a reason to retry a Nexus refund automatically.
-  - Micro credit (< threshold): recorded as fees instantly; no asset lookup needed.
-
-Notes
-- Asset owner must match the sender’s `owner` field of the USDD credit; otherwise it is ignored.
-- You can batch multiple swaps by using multiple assets or updating the same asset sequentially (only the row with matching `txid_toService` is considered).
-- Tiny USDD credits below `MIN_CREDIT_USDD` (default 1.0) are treated as fees (100% micro fee policy). They are recorded in the service database (sender, amount, txid) so they can be traced; credits below `DUST_CREDIT_USDD` (default 0.01) are ignored entirely as spam.
-- Keep the asset published before the timeout to avoid manual operator intervention.
-
----
-
-## Summary of Both Directions
-
-### USDC → USDD (Solana to Nexus)
-1. Send USDC to the vault token account (`VAULT_USDC_ACCOUNT`) with memo: `nexus:<NEXUS_USDD_ACCOUNT>`.
-2. Service validates the Nexus account & token, mints/sends USDD minus fees.
-3. Invalid or missing memo → refund (flat fee may apply). Tiny deposits ≤ flat fee are treated as fees.
-
-### USDD → USDC (Nexus to Solana)
-1. Send USDD to treasury (`NEXUS_USDD_TREASURY_ACCOUNT`).
-2. Publish asset with `txid_toService` + `receival_account` (Solana wallet or USDC ATA).
-3. Service finds mapping, validates address / existing ATA, and sends net USDC. If the
-   mapping is missing past the timeout → hold for operator review (no automatic Nexus refund).
-
----
-
-## Common Questions
-**Q: How fast are swaps?**  Depends on polling and chain confirmation. Typical: a few Solana blocks (USDC→USDD) or one Nexus credit + mapping publish cycle (USDD→USDC).  
-**Q: Can I reuse the same asset?** Yes—just update its fields for each new `txid_toService`, or create per‑swap assets.  
-**Q: What if I forget to publish the asset?** After the timeout the credit is held for
-operator review. Automatic Nexus refunds are intentionally disabled pending a durable
-idempotent refund protocol.
-**Q: Do you create my USDC ATA?** No. Ensure it already exists (most wallets auto‑create on first receive).  
-**Q: Are sub‑threshold amounts lost?** They are treated as fees/donations per policy; do not send below the published minimum.  
-
----
-
-## Minimal Cheat Sheet
-
-USDC→USDD:
-```
-Send USDC to <VAULT_USDC_ACCOUNT>
-Memo: nexus:<YOUR_USDD_ACCOUNT>
-Amount ≥ 0.2 USDC
-```
-
-USDD→USDC:
-```
-Send USDD to <NEXUS_USDD_TREASURY_ACCOUNT>
-Grab txid from CLI output
-Publish or update asset with fields: {"txid_toService":"<TXID>","receival_account":"<SOL_OR_USDC_TOKEN_ACCOUNT>"}
-Amount ≥ 1.0 USDD
-```
-
----
-
-## How It Works
-
-### USDC → USDD (Solana to Nexus)
-1. User sends USDC to your vault USDC token account (`VAULT_USDC_ACCOUNT`).
-2. The same transaction must include a Memo: `nexus:<NEXUS_ADDRESS>`.
-3. Service validates the Nexus address exists and is for the expected token (`NEXUS_TOKEN_NAME`, e.g., USDD).
-4. If valid, the service mints/sends USDD on Nexus to that address (amount normalized by decimals).
-5. If invalid/missing memo or wrong token, the service refunds the USDC back to the source SPL token account with a memo explaining the reason. A flat fee (`FLAT_FEE_USDD`, the USDC→USDD fee) is deducted from the refund. On successful swaps, a dynamic fee in bps (`DYNAMIC_FEE_BPS`) is also retained. Tiny deposits ≤ `FLAT_FEE_USDC` are treated as fees and not processed further.
-
-Notes:
-- Amounts are handled in base units and normalized between `USDC_DECIMALS` and `USDD_DECIMALS`.
-- The refund is sent to the original SPL token account the deposit came from (not a wallet owner).
-
-### USDD → USDC (Nexus to Solana)
-1. User sends USDD to the Nexus USDD Treasury account (`NEXUS_USDD_TREASURY_ACCOUNT`).
-2. User creates or updates a Nexus asset with `txid_toService` set to the debit transaction hash and `receival_account` set to their Solana USDC ATA or wallet address.
-3. Service detects the credit, queries assets filtering by `txid_toService` and `owner` (must match the sender's genesis ID).
-4. If valid mapping found, the service sends USDC from the vault to the `receival_account`. The recipient must already have a USDC ATA (the service will not create it).
-5. If no mapping is found within `REFUND_TIMEOUT_SEC` (default 1 hour), the USDD is held
-   for operator review. Invalid receival accounts also hold; automatic Nexus refunds remain
-   disabled until a durable idempotent protocol exists. On successful sends, a flat fee
-   (`FLAT_FEE_USDC`) and optional dynamic fee (`DYNAMIC_FEE_BPS`) are deducted from the
-   USDC output.
-
-Policy notes on USDD → USDC:
-- Tiny USDD credits ≤ `MIN_CREDIT_USDD` are treated as fees (no USDC is sent).
-- See [ASSET_STANDARD.md](ASSET_STANDARD.md) for the full asset specification and [SWAP_INITIATOR_STATE_MACHINES.md](docs/SWAP_INITIATOR_STATE_MACHINES.md) for the step-by-step user flow.
-
-### Loop-Safety and Reliability
-- Actions that can incur fees (mint, send, refunds) are guarded by attempt limits and cooldowns:
-  - `MAX_ACTION_ATTEMPTS` attempts per unique item (tx/signature).
-  - `ACTION_RETRY_COOLDOWN_SEC` between attempts.
-- Processed state is persisted; items are only marked processed after a successful outcome.
-- Solana transfers include confirmation attempts.
- - If all refund attempts fail:
-   - USDC→USDD path: the remaining refundable amount (after the last attempt's flat fee) is moved from the vault USDC token account to a self-owned quarantine USDC token account.
-   - USDD→USDC path: no automatic Nexus quarantine or refund debit is issued. The source
-     credit is held for operator review; any future Nexus move must use a durable intent,
-     chain-reference resolution and separately authorized disposition.
-   - In both cases, the event is recorded for manual inspection.
-
-## Finding and verifying a bridge
-
-Every operator publishes a single Nexus asset describing their bridge: the token pair, the
-vault and treasury backing it, current fees and minimums, the deposit memo format, and a
-liveness timestamp. Read it before sending funds:
+With the operator tooling configured, a published record can be inspected with:
 
 ```bash
-python3 register_service.py --inspect <bridgeAssetName>
-# or directly:  nexus assets/get/asset name=<bridgeAssetName>
+python3 register_service.py --inspect <REGISTRATION_ASSET_NAME>
 ```
 
-Check that `solana_vault_address` matches where you are about to send, that `status` is
-`online`, and that `last_poll_timestamp` is recent.
-
-## Public Heartbeat (Free, On-Chain)
-
-The service updates a Nexus Asset after each poll cycle. **Anyone can read it on-chain to
-check whether the bridge is alive and what it is currently backing** — use it to verify the
-vault address before sending funds.
-
-> **Operators:** the heartbeat asset is *not* optional. The Solana poller reads its waterline
-> from it, so without one no USDC deposit is ever ingested. See
-> [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping).
-
-- One-time cost: create an Asset (1 NXS fee for asset creation, + optionally 1 NXS for adding a local name). Updates are free as long as they are not more frequent than every 10 seconds (there's a congestion fee of 0.01 NXS for more frequent transactions).
-- Fields published: `last_poll_timestamp`, `last_safe_timestamp_solana`, `last_safe_timestamp_nexus`, plus transparency fields (treasury and vault addresses) per [ASSET_STANDARD.md](ASSET_STANDARD.md).
-
-Setup steps (operators) — use the helper, which validates input and confirms before spending:
-```bash
-python3 create_heartbeat_asset.py --name distordiaBridgeHeartbeat --dry-run   # preview, spends nothing
-python3 create_heartbeat_asset.py --name distordiaBridgeHeartbeat            # ~1 NXS
-```
-Then set **`NEXUS_HEARTBEAT_ASSET_NAME`** in `.env` (plus `HEARTBEAT_ENABLED=true`).
-
-> The service looks the asset up **by name**, not by address — `NEXUS_HEARTBEAT_ASSET_ADDRESS`
-> is recorded for reference only and is not read. An asset created without `--name` is
-> unreachable by the service.
->
-> The asset must carry `last_poll_timestamp`, `last_safe_timestamp_solana` and
-> `last_safe_timestamp_nexus`. `format=basic` fixes the field set at creation, so a missing
-> field makes **every** heartbeat update fail atomically. The service validates this at
-> startup and prints the fields the asset actually has.
-
-How clients check status:
-- Read the asset throught the `register` api: `register/get/assets:asset address=<ASSET_ADDRESS>`
-  - Or by name: `register/get/assets:asset name=<ASSET_NAME>`
-- Extract `results.last_poll_timestamp` (unix seconds).
-- Consider the service online if `now - last_poll_timestamp <= grace`, where `grace ≈ 2–3 × POLL_INTERVAL`.
-
-Waterline (optional):
-- The service can also honor per-chain “waterline” timestamps stored on the same asset to bound how far back it scans:
-  - Default field names: `last_safe_timestamp_solana` and `last_safe_timestamp_nexus` (configurable via `HEARTBEAT_WATERLINE_SOLANA_FIELD` / `HEARTBEAT_WATERLINE_NEXUS_FIELD` — these **must** match the asset, since `format=basic` fixes its fields at creation)
-  - Pollers skip on-chain items strictly older than their respective waterline (with a small safety margin). Idempotency still prevents double-processing if you later move the waterline.
-
-## Setting Up Your Own Swap Service (Operators)
-
-Operator installation, configuration, account creation and running the service are
-documented in one place — **[`SETUP.md`](SETUP.md)** — so there is a single source of truth:
-
-| Step | Where |
-|------|-------|
-| Prerequisites, RPC/Nexus access | [SETUP.md § Prerequisites](SETUP.md#prerequisites--api-access-requirements) |
-| Install | [SETUP.md § Installation](SETUP.md#installation) |
-| Solana vault keypair + USDC ATA | [SETUP.md § Solana Setup](SETUP.md#solana-setup) |
-| Nexus accounts + heartbeat asset | [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping) |
-| Every environment variable | [`.env.example`](.env.example) and [CONFIG.md](CONFIG.md) |
-| Running in production | [SETUP.md § Running](SETUP.md#running) |
-| Choosing the token pair | [SETUP.md § Choosing the token pair](SETUP.md#choosing-the-token-pair) |
-| Registering the bridge on-chain | `python3 register_service.py --show` → [SETUP.md § Nexus Setup](SETUP.md#nexus-setup--asset-mapping) |
-| Monitoring dashboard | [SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard) |
-| Security hardening | [SECURITY.md](docs/SECURITY.md) |
-
-> This README previously duplicated the whole setup guide and its own `.env` template.
-> Both had drifted out of sync with the code, so they were removed rather than maintained twice.
-
-### Operator Dashboard (web UI)
-
-A read-only web UI for watching swaps, spotting problems and checking that the vault is
-fully backed. It runs as a **separate process** from the swap service:
+Operators can preview their own configured record without publishing it:
 
 ```bash
-python3 dashboard.py            # then open http://127.0.0.1:8787
+python3 register_service.py --show --json
 ```
 
-It binds to localhost only. To view it from your laptop, tunnel rather than exposing it:
+These helpers require the relevant configuration. The public record's `min_to_nexus` is denominated in the **Solana input token**, while `min_to_solana` is denominated in the **Nexus input token**. Flat fees are named for the **output chain**. See [ASSET_STANDARD.md](ASSET_STANDARD.md) for actual field names and schema limits.
+
+## Solana token → Nexus token
+
+1. Verify the deployment and ensure your destination is a Nexus account for the **configured immutable token register**. A matching ticker is insufficient.
+2. Use a Solana wallet/tool that can include a memo in the token-transfer transaction.
+3. Send the configured SPL token to the verified service vault token account, with an amount meeting the deployment's effective minimum.
+4. Include the configured memo prefix immediately followed by your Nexus destination account.
+
+```text
+Token:       <CONFIGURED_SOLANA_TOKEN_MINT>
+Destination: <VERIFIED_SERVICE_VAULT_TOKEN_ACCOUNT>
+Memo:        <DEPLOYMENT_MEMO_PREFIX><YOUR_NEXUS_TOKEN_ACCOUNT>
+Amount:      <AMOUNT_IN_SOLANA_TOKEN_UNITS>
+```
+
+For a deployment using the default prefix, the memo is `nexus:<YOUR_NEXUS_TOKEN_ACCOUNT>`. The prefix is not universally fixed: use the operator's published value.
+
+The service validates the deposit, finality, memo and Nexus account's token register, computes the net output with the configured fees/precision, and tracks the outbound Nexus transaction through confirmation. Submission alone is not settlement.
+
+Solana-side refund and quarantine mechanisms exist for eligible failed deposits, but **a timeout or incomplete lookup does not guarantee an immediate refund**. Ambiguous outcomes can remain held for authoritative resolution. A refund, when made, returns to the original SPL source token account, not automatically to a wallet-owner address. Do not repeat a transfer merely because processing is delayed.
+
+## Nexus token → Solana token
+
+> **Known operator-safety limitation:** the configured daily payout cap does not cover this
+> direction's current send helper. It is checked on refund/quarantine sends only. See
+> [the cap bypass in SECURITY.md](docs/SECURITY.md); configuring a positive cap is not a fix.
+
+1. Use an **existing token-account address for the configured Solana mint**. The payout path does not resolve a wallet-owner address to its ATA and does not create missing token accounts.
+2. Send the configured Nexus token from your token account to the verified service treasury, respecting the deployment's effective minimum. Normal holders use the account-debit flow, not a token-creator supply-debit example.
+3. Capture the complete transfer/debit transaction ID and publish or update a Nexus asset owned by the same signature chain that sent the funds.
+4. The mapping asset must contain these exact fields:
+
+```json
+{
+  "txid_toService": "<COMPLETE_DEBIT_TRANSACTION_ID>",
+  "receival_account": "<EXISTING_SOLANA_TOKEN_ACCOUNT>"
+}
+```
+
+See [ASSET_STANDARD.md](ASSET_STANDARD.md) for supported asset creation/update commands. The service matches `txid_toService` **and asset owner**. Mapping is transaction-level; internal Nexus source accounting separately preserves each exact `(txid, contract_id)` credit. Do not invent a new mapping field to replace that existing protocol.
+
+Once the mapping and destination are valid, the service freezes the payout terms and submits the net Solana transfer. It finalizes only after successful finalized transfer evidence matches the source identity, configured vault/mint, recipient and frozen output. A memo or finalized signature alone is insufficient.
+
+- Missing/invalid mapping, unresolved outcomes or missing destination accounts can require an operator hold.
+- `REFUND_TIMEOUT_SEC` is an observation/hold threshold, **not a promise of an automatic Nexus refund**.
+- Automatic Nexus refunds and treasury-to-quarantine transfers remain disabled. A separate, exact-source, authorized operator workflow exists; it is not an automatic retry path.
+- Do not overwrite a reusable mapping with the next transaction ID while a previous swap still depends on it. Keep the relevant mapping discoverable until that swap is resolved, or use separate assets.
+
+## Fees, minimums and dust
+
+There is no universal minimum expressed in a particular ticker. Check the selected deployment's effective terms before every transfer.
+
+- `FEE_FLAT_TO_NEXUS` governs Nexus output; `FEE_FLAT_TO_SOLANA` governs Solana output.
+- `FEE_BPS` applies a percentage fee to the input of each direction.
+- `FEE_REFUND_SOLANA` is the separate Solana-side refund fee. It is not automatically a Nexus-output fee on a different unit scale.
+- `MIN_DEPOSIT_SOLANA_TOKEN` and `MIN_CREDIT_NEXUS_TOKEN` are input-side minimum settings. Effective minimums have a fee-derived floor; a lower configured value does not necessarily lower the enforced minimum.
+- Accepted sub-minimum amounts are retained as fees with **no output**. The legacy micro-fee percentage settings are parsed but do not implement a partial-return policy. Nexus credits below `DUST_CREDIT_NEXUS_TOKEN` are ignored rather than recorded as swaps.
+- Amounts are accounted in integer base units; unequal precisions can leave a conservative rounding remainder.
+
+[CONFIG.md](CONFIG.md) documents defaults, fallback rules and units. The operator's `.env` may override them; sample fees for the historical token pair are not quotes for every configurable token.
+
+## Processing, recovery and monitoring
+
+Processing time depends on chain finality, polling, asset discovery, RPC availability and hold conditions. There is no guaranteed number of blocks or automatic timeout refund.
+
+The current service requires valid custody checkpoints and affirmative complete startup recovery before exposure-producing loop work. Missing/zero waterlines, incompatible heartbeat data, incomplete scans and recovery errors refuse startup. Creating a heartbeat asset does not by itself establish a safe bootstrap checkpoint. Never set waterlines to the current time to bypass recovery.
+
+Mutable multi-page Nexus offset scans cannot authorize checkpoint advancement. Previously discovered positive credits can be retained while coverage remains incomplete. Refer to [STATE_MACHINES.md](docs/STATE_MACHINES.md) for live processing and recovery invariants.
+
+### Read-only operator dashboard
 
 ```bash
-ssh -L 8787:127.0.0.1:8787 operator@your-host
+python3 dashboard.py
+# Default: http://127.0.0.1:8787
 ```
 
-**At a glance**
+The dashboard is separate from the service and exposes no retry/refund controls. It shows selected-token labels, backing/liabilities, pending and held work, fee accounting, payout-cap use and heartbeat age. Historic column names are compatibility fields, not fixed token selection.
 
-| Panel | Tells you |
-|-------|-----------|
-| Backing ratio | Vault USDC ÷ circulating USDD. Turns red below 1.0 — you are under-collateralised |
-| Vault / Circulating | Current balances on each chain |
-| Open items · Quarantined | How much is in flight, and how much needs a human |
-| 24h payouts | Outbound USDC against `DAILY_PAYOUT_CAP_USDC`, with a utilisation bar |
-| Heartbeat | Age of the last on-chain beat — your liveness signal |
-| **Issues** tab | Everything needing action: unverified debits, pending refunds, quarantined items, USDD marked quarantined but *not actually moved*, and actions that used up their retries |
-| Transaction tabs | Pending / completed / refunded / quarantined per direction, plus payouts and the fee ledger |
+Keep it local or follow the authentication/TLS requirements in [SETUP.md](SETUP.md). The dashboard's read-only design is not an instruction to expose custody credentials or the service database publicly.
 
-Banners appear on their own for a **backing-deficit pause**, **stale metrics** (the service
-has stopped writing — likely down or wedged) and **under-collateralisation**.
+## Operator and developer entry points
 
-**It cannot touch your funds.** The dashboard opens the database read-only, has no
-mutating endpoints and no retry/refund buttons, and holds no vault keypair, Nexus PIN or
-RPC key. Manual intervention stays on the CLI. Full configuration, the token/TLS rules for
-non-localhost binds, and the reasoning behind those choices are in
-[SETUP.md § Operator Dashboard](SETUP.md#operator-dashboard).
+- [Installation, custody setup, registration and startup](SETUP.md)
+- [Configuration and legacy aliases](CONFIG.md)
+- [Security controls and deployment restrictions](docs/SECURITY.md)
+- [Current engineering evaluation and remaining release gates](docs/EVALUATION.md)
+- [Nexus API reference material](Nexus%20API%20docs/) — check it against the intended node version; vendored documentation is not proof of live API semantics.
+
+Run local automated verification in an environment with the declared dependencies installed:
 
 ```bash
-python -m pytest -q tests/test_legacy_scripts.py   # dashboard and legacy safety checks run isolated
+python -m pytest -q
+python -m compileall -q src tests
+python -m pip check
+python scripts/check_markdown_links.py
+python scripts/check_token_pair_inventory.py
 ```
 
-## Nexus API Docs
-Official Nexus API docs are included in the `Nexus API docs/` folder for reference.
+The literal-inventory check reads the **Git index**. An unchanged-index pass does not verify unstaged documentation; stage an intended candidate or use a disposable index without altering other work. Real-SDK regression coverage requires the installed Solana dependencies. Local tests do not replace isolated target-chain acceptance.
 
 ## License
+
 This project is provided as-is. Use at your own risk.

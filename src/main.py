@@ -278,7 +278,30 @@ def run():
 
     # Refuse to run a second instance against the same state DB.
     if not acquire_singleton_lock():
-        return
+        return False
+
+    # Recovery is an admission gate, not a diagnostic. It must complete before any
+    # heartbeat checks, metrics reads, reconciliation, or poller can touch a chain.
+    try:
+        from . import startup_recovery
+        rec = startup_recovery.perform_startup_recovery()
+    except Exception as exc:
+        alerts.critical(
+            "startup_recovery_incomplete",
+            "startup recovery raised; refusing all cross-chain activity",
+            error=str(exc),
+        )
+        return False
+    if (not isinstance(rec, dict)
+            or rec.get("recovery_complete") is not True
+            or rec.get("recovery_incomplete") is True
+            or bool(rec.get("error"))):
+        alerts.critical(
+            "startup_recovery_incomplete",
+            "startup recovery lacks complete authoritative evidence; refusing all cross-chain activity",
+            error=rec.get("error") if isinstance(rec, dict) else "invalid recovery result",
+        )
+        return False
 
     print("\n")
     print("🌐 Starting bidirectional swap service")
@@ -352,13 +375,11 @@ def run():
     except Exception as e:
         print(f"   Startup metrics error: {e}")
 
-    # Startup recovery (idempotent) – rebuild processed markers & seed reference counter if needed
-    try:
-        from . import startup_recovery
-        rec = startup_recovery.perform_startup_recovery()
-        print(f"   Startup recovery: ref_seeded={rec.get('reference_seeded')} interrupted_nexus_transfers_held={rec.get('interrupted_nexus_transfers_held', 0)} added_nexus_processed={rec.get('added_nexus_processed')} added_refunded={rec.get('added_refunded_sigs')} (memos scanned nexus={rec.get('found_nexus_memos')} refunds={rec.get('found_refund_memos')})")
-    except Exception as e:
-        print(f"   Startup recovery error: {e}")
+    print(
+        f"   Startup recovery: ref_seeded={rec.get('reference_seeded')} "
+        f"interrupted_nexus_transfers_held={rec.get('interrupted_nexus_transfers_held', 0)} "
+        f"nexus_payouts_reconstructed={rec.get('nexus_payouts_reconstructed', 0)}"
+    )
 
     # Balance reconciliation check (Solana→Nexus direction) – detect potential double-mints.
     # Start latched: an unavailable startup read-back is never permission to create exposure.
@@ -583,3 +604,4 @@ def run():
             pass
         except Exception as e:
             print(f"Final state save error: {e}")
+    return True

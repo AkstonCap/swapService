@@ -1,368 +1,175 @@
 # Swap Initiator State Machines
 
-This document describes the swap process **from the perspective of the swap initiator** (the user sending tokens to the service). It complements `STATE_MACHINES.md` which documents the service's internal processing states.
+This document describes the current service from the sender's perspective. One process bridges one
+operator-configured pair: one **classic SPL Token Program** mint on Solana and one Nexus token
+register. Read the published registration and verify the mint, token register, vault, treasury,
+fees, minimums, memo prefix, status, and liveness before sending funds.
 
----
+`SOLANA_TOKEN_SYMBOL` and `NEXUS_TOKEN_NAME` are display labels. The enforced identities are
+`SOLANA_TOKEN_MINT` and `NEXUS_TOKEN_REGISTER_ADDRESS`; custody addresses are
+`SOLANA_VAULT_ACCOUNT` and `NEXUS_TREASURY_ACCOUNT`. Token-2022, multiple simultaneous pairs, and
+chains other than Solana are not implemented.
 
-## USDC to USDD — Initiator State Machine (Solana to Nexus)
+## Solana token → Nexus token
 
-The user sends USDC on Solana and receives USDD on Nexus.
+The sender transfers the configured SPL token to the configured vault and attaches:
 
-### Prerequisites
+```text
+<DEPOSIT_MEMO_PREFIX><YOUR_NEXUS_TOKEN_ACCOUNT_ADDRESS>
+```
 
-- A Solana wallet with USDC balance (e.g., Phantom, Solflare, or CLI)
-- The wallet must support attaching a **memo** to SPL token transfers
-- A valid Nexus USDD token account to receive USDD
-- Minimum amount: `0.2 USDC` (= 2x the 0.1 flat fee; amounts below this are treated as fees, no USDC is returned)
+The default prefix is `nexus:`, but users must read the operator's published `memo_prefix` rather
+than assume that default.
 
-### State Diagram
+### Initiator flow
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PrepareTransaction : User decides to swap
-
-    state PrepareTransaction {
-        [*] --> ValidateNexusAddress : Look up your Nexus USDD account address
-        ValidateNexusAddress --> FormMemo : Format memo as nexus:YOUR_USDD_ADDRESS
-        FormMemo --> SetAmount : Choose amount >= 0.2 USDC
-        SetAmount --> SetDestination : Set destination to vault USDC token account
-    }
-
-    PrepareTransaction --> TransactionSubmitted : Send USDC with memo on Solana
-
-    TransactionSubmitted --> SolanaConfirmed : Transaction confirmed on Solana
-    TransactionSubmitted --> SolanaFailed : Transaction failed (insufficient SOL/USDC, network error)
-
-    SolanaFailed --> PrepareTransaction : Fix issue and retry
-
-    SolanaConfirmed --> ServiceDetected : Service polls and finds deposit (POLL_INTERVAL)
-    ServiceDetected --> ServiceValidating : Service parses memo and validates Nexus account
-
-    ServiceValidating --> USDDMinting : Valid memo + valid Nexus USDD account
-    ServiceValidating --> RefundInitiated : Invalid memo OR invalid Nexus account
-
-    USDDMinting --> USDDDelivered : USDD debit confirmed on Nexus
-    USDDMinting --> RefundInitiated : Nexus debit fails after retries
-
-    RefundInitiated --> RefundReceived : USDC refund confirmed on Solana (minus flat fee)
-    RefundInitiated --> Quarantined : Refund fails after MAX_ACTION_ATTEMPTS
-
-    USDDDelivered --> [*] : Swap complete — USDD in Nexus account
-    RefundReceived --> [*] : Refund complete — USDC returned (minus fee)
-    Quarantined --> [*] : Manual resolution required — contact operator
+    [*] --> Prepare: verify service record, destination, minimum and cap
+    Prepare --> Submitted: send configured SPL token to configured vault with memo
+    Submitted --> SolanaFailed: source transaction fails
+    SolanaFailed --> Prepare: correct locally and retry
+    Submitted --> FinalizedDeposit: accepted at SOLANA_DEPOSIT_COMMITMENT
+    FinalizedDeposit --> Validating: service validates mint, vault, memo and Nexus account
+    Validating --> FeeOnly: below processing minimum or net output <= 0
+    Validating --> SolanaRefund: invalid memo/destination or configured cap exceeded
+    Validating --> NexusDebit: valid deposit
+    NexusDebit --> Delivered: exact Nexus debit reaches configured confirmation policy
+    NexusDebit --> Held: result absent, malformed, incomplete or ambiguous
+    SolanaRefund --> RefundDelivered: finalized Solana refund evidence
+    SolanaRefund --> Quarantined: refund cannot be completed safely
+    Delivered --> [*]
+    FeeOnly --> [*]
+    RefundDelivered --> [*]
+    Held --> [*]
+    Quarantined --> [*]
 ```
 
-### State Descriptions
+| Initiator view | Persisted service state | Meaning |
+|---|---|---|
+| Deposit detected | `unprocessed_sigs`: `"ready for processing"` | Waiting for validation and Nexus debit |
+| Nexus debit submitted | `"debit in flight"` → `"debited, awaiting confirmation"` | Submission is not finality |
+| Debit outcome unclear | `"debit unverified"` | Held for positive txid/reference evidence; never guessed |
+| Delivered | `processed_sigs`: `"debit_confirmed"` | Exact debit evidence met the configured positive Nexus confirmation threshold |
+| Returned on Solana | `"to be refunded"` → `"refund sent, awaiting confirmation"` → `"refund_confirmed"` | Refund is settled only from finalized Solana evidence |
+| Manual review | quarantine statuses/tables | No blind retry or double payment |
 
-| # | Initiator State | What the User Did / Sees | Service State | Typical Duration |
-|---|-----------------|--------------------------|---------------|------------------|
-| 1 | **PrepareTransaction** | Gathering destination address, amount, and memo | N/A | User-dependent |
-| 2 | **TransactionSubmitted** | Sent USDC transfer with memo on Solana | Not yet visible | Seconds |
-| 3 | **SolanaFailed** | Transaction rejected by Solana (insufficient funds, bad signature) | N/A | Immediate |
-| 4 | **SolanaConfirmed** | Transaction confirmed on Solana (visible in explorer) | Not yet detected | 1-2 Solana slots (~0.4-0.8s) |
-| 5 | **ServiceDetected** | Waiting — deposit detected by service | `unprocessed_sigs` — `ready for processing` | Up to `POLL_INTERVAL` (default 10s) |
-| 6 | **ServiceValidating** | Waiting — service validating memo and Nexus account | `unprocessed_sigs` — being processed | Seconds |
-| 7 | **USDDMinting** | Waiting — USDD debit issued. If the node's response is unclear the row sits in `debit in flight` / `debit unverified` while the service checks the chain by reference; a negative, failed or incomplete lookup never authorizes an automatic retry or refund | `unprocessed_sigs` — `debit in flight` → `debit unverified` → `debited, awaiting confirmation` | Nexus block time (~50s); ambiguous outcomes remain held until positive reference evidence or manual resolution |
-| 8 | **USDDDelivered** | USDD received in Nexus account | `processed_sigs` — `debit_confirmed` | Terminal |
-| 9 | **RefundInitiated** | Waiting for refund | `unprocessed_sigs` — `to be refunded` | Up to `ACTION_RETRY_COOLDOWN_SEC` |
-| 10 | **RefundReceived** | USDC returned to original Solana token account (minus flat fee) | `refunded_sigs` — `refund_confirmed` | Terminal |
-| 11 | **Quarantined** | Funds held by service; manual review needed | `quarantined_sigs` | Requires operator action |
+An RPC/CLI failure, timeout, or unparsable Nexus result is **not** proof that the debit failed. The
+service retains the pre-call reference and holds until positive evidence resolves the outcome. It
+does not automatically refund a Solana deposit merely because the Nexus debit could not be observed.
 
-### Fee Schedule (USDC to USDD)
+### User checklist
 
-| Fee | Amount | When Applied |
-|-----|--------|--------------|
-| Flat fee | `FLAT_FEE_USDD` (default 0.1 USDC-equivalent) | Deducted from swap amount |
-| Dynamic fee | `DYNAMIC_FEE_BPS` / 10000 of amount (default 0.1%) | Deducted from swap amount |
-| Refund fee | `FLAT_FEE_USDD` (default 0.1 USDC) | Deducted from refund amount |
-| Below minimum (amount < `MIN_DEPOSIT_USDC`) | 100% — entire amount kept as fee | No USDD sent, no refund |
+1. Verify the current named registration/heartbeat is fresh and its `status` permits use.
+2. Verify `solana_vault_mint=<SOLANA_TOKEN_MINT>` and the published vault address.
+3. Verify the Nexus token register and create the destination Nexus token account.
+4. Read `memo_prefix`, `fee_flat_to_nexus`, `fee_bps`, and `min_to_nexus` from the current v1
+   registration created by `register_service.py`.
+5. Send the configured classic SPL token to `<SOLANA_VAULT_ACCOUNT>` with memo
+   `<DEPOSIT_MEMO_PREFIX><YOUR_NEXUS_TOKEN_ACCOUNT_ADDRESS>`.
+6. Treat only the Nexus account balance/transaction as delivery evidence. If neither delivery nor a
+   finalized Solana refund appears, contact the operator; do not resend the same deposit.
 
-**Net USDD received** = `USDC_amount - flat_fee - (USDC_amount * dynamic_fee_bps / 10000)`
+## Nexus token → Solana token
 
-### What to Do at Each Stage
+The sender first creates a reusable Nexus mapping asset with the literal compatibility fields
+`txid_toService` and `receival_account`. `receival_account` must be an **existing classic SPL token
+account for `SOLANA_TOKEN_MINT`**. The current runtime does not derive an ATA from a wallet address
+and does not create token accounts.
 
-| Situation | User Action |
-|-----------|-------------|
-| Transaction pending on Solana | Wait for confirmation; check Solana explorer |
-| Transaction confirmed but no USDD yet | Wait up to 2-3 poll intervals; check the service heartbeat asset |
-| USDD received | Swap complete; verify in Nexus wallet |
-| USDC refunded | Check memo for reason; fix and retry if desired |
-| No USDD and no refund after 1+ hour | Check service heartbeat; contact operator if service appears down |
-| Amount below minimum | Amount is treated as a fee; do not send below `0.2 USDC` |
-
-### Step-by-Step Instructions
-
-1. **Verify your Nexus USDD account exists** — use `nexus register/get/finance:account name=USDD` or query by address.
-
-2. **Send USDC on Solana** with memo:
-   ```
-   Destination: <VAULT_USDC_ACCOUNT>  (e.g., Bg1MUQDMjAuXSAFr8izhGCUUhsrta1EjHcTvvgFnJEzZ)
-   Memo:        nexus:<YOUR_NEXUS_USDD_ACCOUNT_ADDRESS>
-   Amount:      >= 0.2 USDC
-   ```
-
-   Using Solana CLI:
-   ```bash
-   spl-token transfer EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v <AMOUNT> \
-       <VAULT_USDC_ACCOUNT> \
-       --with-memo "nexus:<YOUR_NEXUS_USDD_ACCOUNT>" \
-       --url https://api.mainnet-beta.solana.com
-   ```
-
-3. **Wait for confirmation** — the service polls every `POLL_INTERVAL` seconds (default 10).
-
-4. **Check your Nexus USDD balance** to confirm delivery.
-
-### Error Scenarios
-
-| Error | Cause | Result |
-|-------|-------|--------|
-| No memo or wrong format | Memo missing or not `nexus:<address>` | USDC refunded minus flat fee |
-| Invalid Nexus address | Address doesn't exist or isn't a USDD token account | USDC refunded minus flat fee |
-| Amount below minimum | Sent less than `MIN_DEPOSIT_USDC` | Treated as fee; no refund |
-| Nexus debit fails | Service-side issue (Nexus node down, insufficient treasury) | USDC refunded after retry timeout |
-| Refund fails | Sender's USDC token account closed or invalid | Funds quarantined for manual review |
-
----
-
-## USDD to USDC — Initiator State Machine (Nexus to Solana)
-
-The user sends USDD on Nexus and receives USDC on Solana.
-
-### Prerequisites
-
-- A Nexus signature chain with a USDD token account and sufficient balance
-- The Nexus CLI available (for asset creation and token transfers)
-- A Solana wallet with an **existing** USDC Associated Token Account (ATA)
-  - Most wallets (Phantom, Solflare) auto-create on first receive
-  - Power users: `spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
-  - **The service will NOT create your USDC ATA** — it must already exist
-- Minimum amount: `1.0 USDD` (= 2x the 0.5 flat fee). Credits between `DUST_CREDIT_USDD` (0.01) and this are recorded and treated as fees; below 0.01 they are ignored entirely.
-
-### State Diagram
-
-```mermaid
-stateDiagram-v2
-    [*] --> CreateBridgeAsset : One-time setup (first swap only)
-
-    state CreateBridgeAsset {
-        [*] --> CreateAsset : nexus assets/create/asset name=distordiaBridge ...
-        CreateAsset --> AssetReady : Asset created with receival_account
-    }
-
-    state PerformSwap {
-        [*] --> SendUSDD : nexus finance/debit/account from=<USDD_ACCT> to=<TREASURY>
-        SendUSDD --> CaptureTxid : Save txid from CLI response
-        CaptureTxid --> UpdateAsset : nexus assets/update/asset txid_toService=<TXID>
-    }
-
-    AssetReady --> PerformSwap : Ready to swap
-    CreateBridgeAsset --> PerformSwap : For subsequent swaps, skip to here
-
-    PerformSwap --> WaitingForDetection : USDD sent + asset updated
-
-    WaitingForDetection --> ServiceDetected : Service polls treasury and finds USDD credit
-    ServiceDetected --> AssetLookup : Service queries assets for txid_toService + owner match
-
-    AssetLookup --> USDCSending : Asset found, receival_account valid
-    AssetLookup --> WaitingForAsset : Asset not yet published (user hasn't updated yet)
-
-    WaitingForAsset --> AssetLookup : Service retries on next poll cycle
-    WaitingForAsset --> TimeoutRefund : REFUND_TIMEOUT_SEC elapsed (default 1 hour)
-
-    USDCSending --> USDCDelivered : USDC transfer confirmed on Solana
-    USDCSending --> RefundInitiated : USDC send fails after retries
-
-    TimeoutRefund --> RefundReceived : USDD refunded to sender on Nexus
-    TimeoutRefund --> Quarantined : Refund fails after MAX_ACTION_ATTEMPTS
-
-    RefundInitiated --> RefundReceived : USDD refunded to sender on Nexus
-    RefundInitiated --> Quarantined : Refund fails after MAX_ACTION_ATTEMPTS
-
-    USDCDelivered --> [*] : Swap complete — USDC in Solana wallet
-    RefundReceived --> [*] : Refund complete — USDD returned on Nexus
-    Quarantined --> [*] : Manual resolution required — contact operator
-```
-
-### State Descriptions
-
-| # | Initiator State | What the User Did / Sees | Service State | Typical Duration |
-|---|-----------------|--------------------------|---------------|------------------|
-| 1 | **CreateBridgeAsset** | One-time: creates Nexus asset with receival_account | N/A | ~5s (1 Nexus tx) |
-| 2 | **SendUSDD** | Debits USDD from account to treasury | N/A | ~5s (1 Nexus tx) |
-| 3 | **CaptureTxid** | Copies txid from CLI output | N/A | Immediate |
-| 4 | **UpdateAsset** | Updates asset `txid_toService` field | N/A | ~5s (1 Nexus tx) |
-| 5 | **WaitingForDetection** | Waiting — all user actions complete | Not yet detected | Up to `NEXUS_POLL_INTERVAL` |
-| 6 | **ServiceDetected** | Waiting — credit detected by service | `unprocessed_txids` — `pending_receival` | Seconds |
-| 7 | **AssetLookup** | Waiting — service querying assets | `unprocessed_txids` — checking assets | Seconds |
-| 8 | **WaitingForAsset** | If user hasn't updated asset yet | `unprocessed_txids` — `pending_receival` | Up to `REFUND_TIMEOUT_SEC` |
-| 9 | **USDCSending** | Waiting — USDC transfer in progress | `unprocessed_txids` — `sending` / `sig created, awaiting confirmations` | Solana confirmation time |
-| 10 | **USDCDelivered** | USDC received in Solana wallet | `processed_txids` — `processed` | Terminal |
-| 11 | **TimeoutRefund** | Asset not published within timeout | `unprocessed_txids` — `trade balance to be checked` | Begins at `REFUND_TIMEOUT_SEC` |
-| 12 | **RefundInitiated** | Service returning USDD | `unprocessed_txids` — `refund pending` / `collecting refund` | Seconds |
-| 13 | **RefundReceived** | USDD returned to Nexus account | `refunded_txids` — `refunded` | Terminal |
-| 14 | **Quarantined** | Funds held by service; manual review needed | `quarantined_txids` — `quarantined` | Requires operator action |
-
-### Fee Schedule (USDD to USDC)
-
-| Fee | Amount | When Applied |
-|-----|--------|--------------|
-| Flat fee | `FLAT_FEE_USDC` (default 0.5 USDC-equivalent) | Deducted from USDC output |
-| Dynamic fee | `DYNAMIC_FEE_BPS` / 10000 of amount (default 0.1%) | Deducted from USDC output |
-| Below minimum (`DUST_CREDIT_USDD` ≤ amount < `MIN_CREDIT_USDD`) | 100% — kept as fee, but **recorded** (sender, amount, txid) | No USDC sent |
-| Dust (amount < `DUST_CREDIT_USDD`, 0.01) | Ignored entirely — no record | No USDC sent |
-| Nexus asset creation | 1 NXS (one-time) | Nexus blockchain fee |
-| Nexus asset naming | 1 NXS (optional, one-time) | Nexus blockchain fee |
-| Nexus asset updates | Free (if >= 10s apart) | No cost for subsequent swaps |
-
-**Net USDC received** = `USDD_amount - flat_fee - (USDD_amount * dynamic_fee_bps / 10000)`
-
-### What to Do at Each Stage
-
-| Situation | User Action |
-|-----------|-------------|
-| Don't have a bridge asset | Create one (one-time): see Step 1 below |
-| USDD sent but forgot to update asset | Update asset with txid immediately — you have `REFUND_TIMEOUT_SEC` (default 1 hour) |
-| USDC not received after several minutes | Verify asset `txid_toService` matches exactly; check service heartbeat |
-| USDD refunded | Check if asset was published in time and receival_account was valid |
-| No USDC and no refund after 1+ hour | Check service heartbeat; contact operator if service appears down |
-| Amount below minimum | Amount treated as fee; do not send below `1.0 USDD` |
-
-### Step-by-Step Instructions
-
-#### Step 1: Create Bridge Asset (One-Time)
+### One-time mapping asset
 
 ```bash
-nexus assets/create/asset name=distordiaBridge format=basic \
+nexus assets/create/asset name=<USER_MAPPING_ASSET_NAME> format=basic \
     txid_toService="" \
-    receival_account=<YOUR_SOLANA_USDC_ATA_OR_WALLET_ADDRESS> \
-    toChain=solana \
+    receival_account=<EXISTING_SOLANA_TOKEN_ACCOUNT> \
     pin=<YOUR_PIN>
 ```
 
-> Save the asset address from the response. You will reuse this asset for all future swaps.
+`toChain`, `fromToken`, `toToken`, and `distordiaType` are optional legacy metadata. The runtime does
+not use them to select a chain or pair.
 
-#### Step 2: Send USDD to Treasury
-
-```bash
-nexus finance/debit/account from=<YOUR_USDD_ACCOUNT> to=<TREASURY_ACCOUNT> amount=<AMOUNT> pin=<YOUR_PIN>
-```
-
-> **Important:** Use `finance/debit/account` with your USDD account name or address as `from`.
-> The `finance/debit/token` command debits from the token supply itself and is reserved for the token creator.
-
-**Save the `txid` from the response.** You need it for the next step.
-
-Example response:
-```json
-{
-    "success": true,
-    "txid": "01b88ff8707638acff63e05ca48dec9c79d5b9d754b065ae8f35e0b6cb8b90c6"
-}
-```
-
-#### Step 3: Update Asset with Transaction ID
+### Per-swap actions
 
 ```bash
-nexus assets/update/asset name=distordiaBridge format=basic \
-    txid_toService=01b88ff8707638acff63e05ca48dec9c79d5b9d754b065ae8f35e0b6cb8b90c6 \
+nexus finance/debit/account from=<YOUR_NEXUS_TOKEN_ACCOUNT> \
+    to=<NEXUS_TREASURY_ACCOUNT> amount=<AMOUNT> pin=<YOUR_PIN>
+
+nexus assets/update/asset name=<USER_MAPPING_ASSET_NAME> format=basic \
+    txid_toService=<RETURNED_NEXUS_TXID> \
+    receival_account=<EXISTING_SOLANA_TOKEN_ACCOUNT> \
     pin=<YOUR_PIN>
 ```
 
-> You must do this **before** `REFUND_TIMEOUT_SEC` (default 1 hour) elapses since the USDD transfer. Otherwise the service will refund your USDD.
+Use `finance/debit/account`, not `finance/debit/token`; the latter acts on token supply authority.
+The mapping asset's built-in `owner` must match the sender's Nexus genesis owner.
 
-#### Step 4: Wait for USDC Delivery
+### Initiator flow
 
-The service will:
-1. Detect your USDD credit to the treasury
-2. Query assets for `txid_toService` matching your txid AND `owner` matching your genesis ID
-3. Validate your `receival_account` is a valid Solana address with an existing USDC token account
-4. Send USDC to your `receival_account` (minus fees)
-
-Check your Solana wallet for the USDC deposit.
-
-#### For Subsequent Swaps
-
-Repeat Steps 2-4 only. The bridge asset is reused — just update `txid_toService` each time.
-
-### Error Scenarios
-
-| Error | Cause | Result |
-|-------|-------|--------|
-| Asset not found within timeout | User didn't create/update asset with txid | USDD refunded |
-| Invalid receival_account | Solana address format invalid | USDD refunded |
-| USDC ATA doesn't exist | Recipient wallet has no USDC token account | USDD refunded |
-| Owner mismatch | Asset owned by different genesis than USDD sender | Asset ignored, timeout, then refund |
-| USDC send fails | Service-side issue (insufficient vault USDC, Solana RPC error) | USDD refunded after retries |
-| Refund fails repeatedly | Nexus node issue or sender account problem | Funds quarantined |
-| Amount below minimum | Sent less than `MIN_CREDIT_USDD` | Treated as fee; no USDC sent |
-
-### Security Notes for Initiators
-
-- **Owner verification**: The service matches the asset `owner` against the USDD sender's `owner` (genesis ID). This prevents other users from claiming your swap by publishing an asset with your txid.
-- **Reuse your asset**: Update `txid_toService` for each new swap. Creating a new asset per swap works but is unnecessary.
-- **Verify the treasury address**: Only send USDD to the service's published treasury account. Check the heartbeat asset for the official address.
-- **Check the heartbeat**: Before initiating a swap, verify the service is online by reading the heartbeat asset's `last_poll_timestamp`.
-
----
-
-## Combined Initiator Flow Summary
-
-```
-USDC to USDD (Simple):
-  1. Send USDC to vault with memo "nexus:<NEXUS_ADDR>"
-  2. Wait for USDD in Nexus account
-
-USDD to USDC (Asset-Mapped):
-  1. Create bridge asset (one-time)
-  2. Send USDD to treasury, capture txid
-  3. Update asset txid_toService=<TXID>
-  4. Wait for USDC in Solana wallet
+```mermaid
+stateDiagram-v2
+    [*] --> Prepare: verify pair, terms, treasury and existing destination token account
+    Prepare --> NexusCredit: debit configured Nexus token to configured treasury
+    NexusCredit --> PublishMapping: update txid_toService and receival_account
+    PublishMapping --> Pending: service admits exact CREDIT as (txid, contract_id)
+    Pending --> Ready: complete lookup, owner match, valid configured-mint token account
+    Pending --> Held: timeout, invalid/ambiguous/incomplete mapping, owner mismatch, or cap policy
+    Ready --> Sending: payout/fee units frozen and exact source claimed before RPC
+    Sending --> AwaitingEvidence: Solana signature stored or found by exact composite memo
+    Sending --> Held: send outcome ambiguous or attempt policy exhausted
+    AwaitingEvidence --> Delivered: successful finalized payout matches all frozen evidence
+    AwaitingEvidence --> Quarantined: confirmation timeout or evidence mismatch
+    Held --> OperatorDisposition: separately reviewed durable intent, if refund/quarantine is authorized
+    OperatorDisposition --> Disposed: exact positive Nexus evidence and explicit finalization
+    Delivered --> [*]
+    Quarantined --> [*]
+    Disposed --> [*]
 ```
 
----
+| Initiator view | Persisted service state | Meaning |
+|---|---|---|
+| Credit waiting for mapping | `"pending_receival"` | Lookup may be retried only from this admission state |
+| Ready | `"ready for processing"` | Owner and destination token account validated |
+| Payout submitted/unknown | `"sending"` / `"sig created, awaiting confirmations"` | `payout_solana_units` and `payout_fee_nexus_units` are frozen before RPC |
+| Delivered | `processed_txids`: `"processed"` | Successful finalized transaction matches exact source, memo, signer/vault, mint, recipient and amount |
+| Held | `"refund held for operator review"` or legacy `"refund pending"`, `"collecting refund"`, `"trade balance to be checked"` | No automatic Nexus refund or treasury-to-quarantine debit |
+| Manual review | `"quarantined"` | Solana payout may already exist; never assume failure from timeout |
 
-## Monitoring Your Swap
+New payouts carry `nexus_txid:<txid>:<contract_id>`. The older txid-only memo is legacy and cannot
+identify sibling CREDIT contracts safely. A signature, memo match, or confirmation status alone is
+not completion: the service requires successful finalized transaction evidence matching the frozen
+source and payout terms.
 
-### Check Service Status
+`REFUND_TIMEOUT_SEC` changes an unresolved mapping into an operator hold; it does **not** promise an
+automatic refund. An authorized Nexus refund or quarantine is a separate intent-first operator
+workflow (`prepare`, `authorize`, one `execute`, `resolve`, `finalize`) that binds the exact
+`(source_txid, source_contract_id)` and requires positive chain evidence.
 
-Query the heartbeat asset to verify the service is running:
+## Fees, minimums, dust, and caps
 
-```bash
-nexus register/get/assets:asset name=<HEARTBEAT_ASSET_NAME>
-```
+Amounts are not fixed to historical USDC/USDD defaults. Read the current service record and operator
+configuration. Canonical settings are `FEE_FLAT_TO_NEXUS`, `FEE_FLAT_TO_SOLANA`,
+`FEE_REFUND_SOLANA`, `FEE_BPS`, `MIN_DEPOSIT_SOLANA_TOKEN`, `MIN_CREDIT_NEXUS_TOKEN`, and
+`DUST_CREDIT_NEXUS_TOKEN`. The effective processing minimum is at least twice the corresponding
+output flat fee. Nexus credits below the dust threshold are intentionally not persisted; credits at
+or above dust but below the processing minimum are durably recorded and processed as fees.
 
-Look at `last_poll_timestamp` — if `current_time - last_poll_timestamp > 60 seconds`, the service may be stalled or restarting.
+Some exposure-cap environment names and persisted amount columns retain `USDC`/`USDD` for
+compatibility (`MAX_SWAP_USDC`, `MAX_SWAP_USDD`, `DAILY_PAYOUT_CAP_USDC`, `amount_usdc_units`,
+`amount_usdd_units`). Their values apply to the configured Solana/Nexus pair; do not rename them in
+an existing database or operational procedure without a migration.
 
-### Timeouts to Be Aware Of
+## Recovery, waterlines, and heartbeat
 
-| Timeout | Default | What Happens |
-|---------|---------|--------------|
-| `REFUND_TIMEOUT_SEC` | 3600s (1 hour) | USDD→USDC: if no asset mapping found, USDD is refunded |
-| `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s (10 min) | USDD→USDC: if the USDC send cannot be confirmed, the swap is **quarantined for manual review**, not auto-refunded (the USDC may already have been sent) |
-| `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s (24 hours) | Unresolved deposits are quarantined for manual review |
-| `ACTION_RETRY_COOLDOWN_SEC` | 300s (5 min) | Minimum wait between retry attempts (enforced) |
-
-### Verifying Swap Completion
-
-**USDC to USDD:**
-- Check your Nexus USDD account balance:
-  ```bash
-  nexus finance/get/account name=USDD
-  ```
-
-**USDD to USDC:**
-- Check your Solana wallet for USDC balance:
-  ```bash
-  spl-token balance <YOUR_USDC_ATA_ADDRESS>
-  ```
-- The USDC transfer memo will contain `nexus_txid:<YOUR_NEXUS_TXID>` for cross-reference.
-
----
+The current runtime resolves its heartbeat by `NEXUS_HEARTBEAT_ASSET_NAME`. A fresh
+`last_poll_timestamp` is liveness evidence, not settlement or proof of catch-up. On startup, both
+configured top-level waterlines must be positive and reconstruction on both chains must be complete;
+otherwise the service aborts before pollers or exposure-producing activity. Live empty Nexus
+enumeration and mutable nonzero-offset pagination hold the Nexus checkpoint.
 
 ## References
 
-- Server-side state machines: [STATE_MACHINES.md](STATE_MACHINES.md)
-- Asset format specification: [ASSET_STANDARD.md](../ASSET_STANDARD.md)
-- Configuration reference: [CONFIG.md](../CONFIG.md)
-- Setup guide: [SETUP.md](../SETUP.md)
+- Internal states and literal compatibility values: [STATE_MACHINES.md](STATE_MACHINES.md)
+- User and provider assets: [ASSET_STANDARD.md](../ASSET_STANDARD.md)
+- Configuration: [CONFIG.md](../CONFIG.md)
+- Security controls: [SECURITY.md](SECURITY.md)

@@ -3,19 +3,20 @@ import json
 import base64
 import logging
 from time import time
-from typing import Optional
+from typing import Any, Optional
 import os
 import requests
 from solana.rpc.api import Client
 from solders.pubkey import Pubkey as PublicKey
 from solders.keypair import Keypair
+from solders.signature import Signature
 from solders.instruction import Instruction as TransactionInstruction, AccountMeta
 from solders.hash import Hash
 from solders.transaction import Transaction, VersionedTransaction
 from solders.message import Message
 from struct import pack
 import threading, queue
-from . import state_db, nexus_client
+from . import state_db, nexus_client, nexus_memo
 import time
 
 from . import config, structured_logging
@@ -177,9 +178,10 @@ def core_get_transactions_for_address(
     out: list = []
     for sig in sigs:
         try:
+            signature_obj = Signature.from_string(sig)
             tx_resp = _rpc_call(
                 client.get_transaction,
-                sig,
+                signature_obj,
                 encoding="jsonParsed",
                 timeout=getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
             )
@@ -391,9 +393,10 @@ def _fetch_deposits_core_rpc(
                 continue
             
             try:
+                signature_obj = Signature.from_string(sig)
                 tx_resp = _rpc_call(
                     client.get_transaction,
-                    sig,
+                    signature_obj,
                     encoding="jsonParsed",
                     timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 12),
                 )
@@ -1563,20 +1566,12 @@ def ensure_send_token(to_owner_addr: str, amount_base_units: int, memo: str | No
 
 
 def send_solana_token_to_account_with_sig(dest_token_account_addr: str, amount_base_units: int, memo: str | None = None) -> tuple[bool, str | None]:
-    """Send Solana base units directly to an existing token account address."""
-    # Idempotency short‑circuit for memo formats we recognize
-    if memo:
-        # Legacy numeric reference
-        if memo.isdigit():
-            ref_key = f"nexus_ref_{memo}"
-            if state_db.is_processed_txid(ref_key):
-                return True, None
-        # New structured memo nexus_txid:<txid>
-        elif memo.startswith("nexus_txid:"):
-            txid_part = memo.split(":", 1)[1]
-            proc_key = f"nexus_txid:{txid_part}"
-            if state_db.is_processed_txid(proc_key):
-                return True, None
+    """Submit Solana base units directly to an existing token account.
+
+    This RPC helper deliberately owns no Nexus idempotency or terminal state.  The
+    caller must persist an exact source intent before submission and finalize it only
+    after independently validating the returned transaction evidence.
+    """
     
     try:
         if amount_base_units <= 0:
@@ -1606,21 +1601,6 @@ def send_solana_token_to_account_with_sig(dest_token_account_addr: str, amount_b
         _log("solana_token_account_payout_submitted", signature=sig,
              destination=dest_token_account_addr, amount_units=int(amount_base_units),
              token=config.SOLANA_TOKEN_SYMBOL)
-
-        # Mark processed based on memo form for future idempotency.
-        # "usdc_sent" is a persisted `processed_txids.status` value, frozen for the same
-        # reason as the USDD_STATUS_* strings in swap_nexus: renaming it would make rows
-        # written by an earlier build unrecognisable to the idempotency check.
-        try:
-            if memo:
-                if memo.isdigit():
-                    state_db.mark_processed_txid(f"nexus_ref_{memo}", timestamp=int(__import__('time').time()), amount_usdd=0, from_address="", to_address="", owner="", sig="", status="usdc_sent")
-                elif memo.startswith("nexus_txid:"):
-                    txid_part = memo.split(":", 1)[1]
-                    state_db.mark_processed_txid(f"nexus_txid:{txid_part}", timestamp=int(__import__('time').time()), amount_usdd=0, from_address="", to_address="", owner="", sig="", status="usdc_sent")
-        except Exception:
-            pass
-        
         return True, sig
     except Exception as e:
         _log("solana_token_account_payout_failed", level=logging.ERROR, error=str(e))
@@ -1649,14 +1629,153 @@ def is_valid_solana_token_account(addr: str) -> bool:
     return _is_token_account_for_mint(addr, config.USDC_MINT)
 
 
-def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]:
-    """Best-effort lookup of a recently sent signature containing the given memo string.
-    Searches recent signatures for the vault token account (and optionally the vault owner)
-    and inspects transaction instructions for the Memo program.
-    Returns first matching signature or None.
+def get_nexus_payout_evidence(
+    signature: str,
+    txid: str,
+    contract_id: int,
+) -> nexus_memo.NexusPayoutEvidence | None:
+    """Read one finalized signature and return exact attributable payout evidence.
+
+    A status response is intentionally insufficient: finality, success, the direct
+    transaction signature, exact composite memo and vault transfer are all checked in
+    the transaction returned by ``getTransaction``.
     """
-    if not memo:
+    expected_memo = nexus_memo.parse_nexus_payout_memo(
+        f"nexus_txid:{txid}:{contract_id}"
+    )
+    if (not isinstance(signature, str) or not signature
+            or expected_memo is None or expected_memo.is_legacy):
         return None
+    try:
+        from solders.signature import Signature
+
+        signature_obj = Signature.from_string(signature)
+        client = _get_client()
+        response = _rpc_call(
+            client.get_transaction,
+            signature_obj,
+            encoding="jsonParsed",
+            commitment="finalized",
+            max_supported_transaction_version=0,
+            timeout=getattr(
+                config, "SOLANA_TX_FETCH_TIMEOUT_SEC",
+                getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
+            ),
+        )
+        tx_value = _rpc_get_result(response)
+    except Exception:
+        return None
+    if not isinstance(tx_value, dict):
+        return None
+    transaction = tx_value.get("transaction")
+    transaction_signatures = (
+        transaction.get("signatures") if isinstance(transaction, dict) else None
+    )
+    if (not isinstance(transaction_signatures, list) or not transaction_signatures
+            or str(transaction_signatures[0]) != signature):
+        return None
+
+    message = transaction.get("message")
+    instructions = message.get("instructions") if isinstance(message, dict) else None
+    if not isinstance(instructions, list):
+        return None
+    payout_memos: list[nexus_memo.NexusPayoutMemo | None] = []
+    for instruction in instructions:
+        if not isinstance(instruction, dict):
+            continue
+        program = instruction.get("programId") or instruction.get("program")
+        if not program or not (
+            str(program).startswith("Memo111")
+            or str(program) == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+            or str(program) == "spl-memo"
+        ):
+            continue
+        data = instruction.get("data", instruction.get("parsed"))
+        if isinstance(data, list) and len(data) == 1:
+            data = data[0]
+        candidates = [data] if isinstance(data, str) else []
+        if isinstance(data, str):
+            try:
+                candidates.append(base64.b64decode(data, validate=True).decode("utf-8"))
+            except Exception:
+                pass
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.startswith("nexus_txid:"):
+                payout_memos.append(nexus_memo.parse_nexus_payout_memo(candidate))
+    if payout_memos != [expected_memo]:
+        return None
+    return _extract_nexus_payout_evidence(
+        tx_value, signature=signature, memo=expected_memo
+    )
+
+
+def find_nexus_payout_evidence(
+    memo: str,
+    search_limit: int = 50,
+) -> nexus_memo.NexusPayoutEvidence | None:
+    """Recover one unambiguous finalized payout with full transaction evidence."""
+    expected = nexus_memo.parse_nexus_payout_memo(memo)
+    if (expected is None or expected.is_legacy
+            or type(search_limit) is not int or search_limit <= 0):
+        return None
+    try:
+        client = _get_client()
+    except Exception:
+        return None
+
+    addresses = [str(config.VAULT_USDC_ACCOUNT)]
+    vault_owner = getattr(config, "VAULT_OWNER", None)
+    if vault_owner:
+        addresses.append(str(vault_owner))
+    seen: set[str] = set()
+    matches: list[nexus_memo.NexusPayoutEvidence] = []
+    for address in dict.fromkeys(addresses):
+        try:
+            response = _rpc_call(
+                client.get_signatures_for_address,
+                PublicKey.from_string(address),
+                limit=search_limit,
+                commitment="finalized",
+            )
+            entries = _rpc_get_value(response)
+        except Exception:
+            return None
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            signature = entry.get("signature")
+            if (not isinstance(signature, str) or not signature or signature in seen
+                    or entry.get("confirmationStatus") != "finalized"
+                    or entry.get("err") is not None):
+                continue
+            seen.add(signature)
+            evidence = get_nexus_payout_evidence(
+                signature, expected.txid, expected.contract_id
+            )
+            if evidence is not None:
+                matches.append(evidence)
+                if len(matches) > 1:
+                    return None
+    return matches[0] if len(matches) == 1 else None
+
+
+def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]:
+    """Return a finalized signature for generic refund/quarantine memo paths.
+
+    Nexus payout callers should consume :func:`find_nexus_payout_evidence`; this
+    compatibility wrapper retains the signature-only API for existing non-Nexus uses.
+    """
+    if not isinstance(memo, str) or not memo:
+        return None
+    payout_memo = None
+    if memo.startswith("nexus_txid:"):
+        payout_memo = nexus_memo.parse_nexus_payout_memo(memo)
+        if payout_memo is None or payout_memo.is_legacy:
+            return None
+        evidence = find_nexus_payout_evidence(memo, search_limit)
+        return evidence.solana_signature if evidence is not None else None
     try:
         client = _get_client()
     except Exception:
@@ -1676,10 +1795,12 @@ def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]
     seen = set()
     for addr in addresses:
         try:
-            try:
-                resp = _rpc_call(client.get_signatures_for_address, PublicKey.from_string(addr), limit=search_limit)
-            except TimeoutError:
-                continue
+            resp = _rpc_call(
+                client.get_signatures_for_address,
+                PublicKey.from_string(addr),
+                limit=search_limit,
+                commitment="finalized",
+            )
             js = _rpc_get_value(resp)
             if isinstance(js, list):
                 sig_list = js
@@ -1688,70 +1809,146 @@ def find_signature_with_memo(memo: str, search_limit: int = 50) -> Optional[str]
         except Exception:
             continue
         for entry in sig_list:
-            try:
-                sig = entry.get("signature") if isinstance(entry, dict) else None
-            except Exception:
-                sig = None
-            if not sig or sig in seen:
+            if not isinstance(entry, dict):
+                continue
+            sig = entry.get("signature")
+            if (not isinstance(sig, str) or not sig or sig in seen
+                    or entry.get("err") is not None
+                    or entry.get("confirmationStatus") != "finalized"):
                 continue
             seen.add(sig)
-            # Fetch transaction to inspect memo instruction
             try:
-                try:
-                    tx_resp = _rpc_call(
-                        client.get_transaction,
-                        sig,
-                        encoding="jsonParsed",
-                        timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8)),
-                    )
-                except TimeoutError:
-                    continue
+                signature_obj = Signature.from_string(sig)
+                tx_resp = _rpc_call(
+                    client.get_transaction,
+                    signature_obj,
+                    encoding="jsonParsed",
+                    timeout=getattr(
+                        config, "SOLANA_TX_FETCH_TIMEOUT_SEC",
+                        getattr(config, "SOLANA_RPC_TIMEOUT_SEC", 8),
+                    ),
+                )
                 tx_val = _rpc_get_result(tx_resp)
             except Exception:
                 continue
-            # Various shapes; try to drill into transaction.message.instructions
-            try:
-                tx_obj = tx_val.get("transaction") if isinstance(tx_val, dict) else None
-                msg = (tx_obj or {}).get("message") if isinstance(tx_obj, dict) else None
-                insts = (msg or {}).get("instructions") if isinstance(msg, dict) else None
-                if isinstance(insts, list):
-                    for ix in insts:
-                        try:
-                            # jsonParsed may embed program info differently
-                            prog = ix.get("programId") or ix.get("program")
-                            if prog and (str(prog).startswith("Memo111") or "memo" in str(prog).lower()):
-                                # Data may be base64 or raw string
-                                data = ix.get("data")
-                                if isinstance(data, list):
-                                    # Sometimes list like [b64, encoding]
-                                    if data:
-                                        data = data[0]
-                                if isinstance(data, str):
-                                    # Try direct compare
-                                    if data == memo:
-                                        return sig
-                                    # Try base64 decode
-                                    try:
-                                        decoded = base64.b64decode(data + "==").decode("utf-8", errors="ignore")
-                                        if decoded == memo:
-                                            return sig
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            continue
-            except Exception:
+            if not isinstance(tx_val, dict):
                 continue
-            # Fallback: inspect log messages
-            try:
-                meta = tx_val.get("meta") if isinstance(tx_val, dict) else None
-                logs = (meta or {}).get("logMessages") if isinstance(meta, dict) else None
-                if isinstance(logs, list):
-                    for lg in logs:
-                        if isinstance(lg, str) and memo in lg:
-                            return sig
-            except Exception:
+            meta = tx_val.get("meta")
+            tx_obj = tx_val.get("transaction")
+            msg = tx_obj.get("message") if isinstance(tx_obj, dict) else None
+            insts = msg.get("instructions") if isinstance(msg, dict) else None
+            if (not isinstance(meta, dict) or meta.get("err") is not None
+                    or not isinstance(insts, list)
+                    or not _is_attributable_vault_transaction(tx_val)):
                 continue
+            for ix in insts:
+                if not isinstance(ix, dict):
+                    continue
+                prog = ix.get("programId") or ix.get("program")
+                if not prog or not (
+                    str(prog).startswith("Memo111")
+                    or str(prog) == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+                    or str(prog) == "spl-memo"
+                ):
+                    continue
+                data = ix.get("data", ix.get("parsed"))
+                if isinstance(data, list) and len(data) == 1:
+                    data = data[0]
+                candidates = [data] if isinstance(data, str) else []
+                if isinstance(data, str):
+                    try:
+                        candidates.append(base64.b64decode(data, validate=True).decode("utf-8"))
+                    except Exception:
+                        pass
+                if memo not in candidates:
+                    continue
+                if payout_memo is not None and _extract_nexus_payout_evidence(
+                    tx_val, signature=sig, memo=payout_memo
+                ) is None:
+                    continue
+                return sig
     return None
+
+
+def _is_attributable_vault_transaction(tx_value: object) -> bool:
+    """Require the configured vault authority to be an actual transaction signer."""
+    if not isinstance(tx_value, dict):
+        return False
+    transaction = tx_value.get("transaction")
+    message = transaction.get("message") if isinstance(transaction, dict) else None
+    account_keys = message.get("accountKeys") if isinstance(message, dict) else None
+    if not isinstance(account_keys, list):
+        return False
+    authority = str(config.SOL_MAIN_ACCOUNT)
+    for account in account_keys:
+        if isinstance(account, dict):
+            if str(account.get("pubkey") or "") == authority and account.get("signer") is True:
+                return True
+    return False
+
+
+def _extract_nexus_payout_evidence(
+    tx_value: object,
+    *,
+    signature: str,
+    memo: nexus_memo.NexusPayoutMemo,
+) -> nexus_memo.NexusPayoutEvidence | None:
+    """Bind an exact composite memo to one exact successful vault token transfer."""
+    if memo.contract_id is None or not _is_attributable_vault_transaction(tx_value):
+        return None
+    if not isinstance(tx_value, dict) or not isinstance(tx_value.get("meta"), dict):
+        return None
+    meta = tx_value["meta"]
+    if "err" not in meta or meta["err"] is not None:
+        return None
+    transaction = tx_value.get("transaction")
+    message = transaction.get("message") if isinstance(transaction, dict) else None
+    instructions = message.get("instructions") if isinstance(message, dict) else None
+    if not isinstance(instructions, list):
+        return None
+
+    transfers: list[tuple[str, int]] = []
+    for instruction in instructions:
+        if not isinstance(instruction, dict) or str(instruction.get("program") or "") != "spl-token":
+            continue
+        parsed = instruction.get("parsed")
+        if not isinstance(parsed, dict) or parsed.get("type") not in {"transfer", "transferChecked"}:
+            continue
+        info = parsed.get("info")
+        if not isinstance(info, dict):
+            continue
+        if str(info.get("source") or "") != str(config.VAULT_USDC_ACCOUNT):
+            continue
+        mint = info.get("mint")
+        if str(mint or "") != str(config.USDC_MINT):
+            continue
+        destination = info.get("destination")
+        raw_amount = info.get("amount")
+        token_amount = info.get("tokenAmount")
+        if isinstance(token_amount, dict):
+            raw_amount = token_amount.get("amount")
+        if not isinstance(destination, str) or not destination.strip():
+            continue
+        if isinstance(raw_amount, bool):
+            continue
+        amount_text = str(raw_amount or "")
+        if not amount_text.isdigit() or (len(amount_text) > 1 and amount_text.startswith("0")):
+            continue
+        amount_units = int(amount_text)
+        if amount_units <= 0:
+            continue
+        transfers.append((destination, amount_units))
+
+    if len(transfers) != 1:
+        return None
+    destination, amount_units = transfers[0]
+    return nexus_memo.NexusPayoutEvidence(
+        txid=memo.txid,
+        contract_id=memo.contract_id,
+        solana_signature=signature,
+        to_token_account=destination,
+        amount_solana_units=amount_units,
+    )
 
 
 def scan_recent_memos(search_limit: int = 400) -> dict:
@@ -1762,7 +1959,14 @@ def scan_recent_memos(search_limit: int = 400) -> dict:
     }
     Best effort; ignores errors.
     """
-    out = {"nexus_txids": {}, "refund_sigs": {}}
+    out = {
+        "nexus_payouts": {},
+        "legacy_nexus_txids": {},
+        "malformed_nexus_memos": [],
+        "refund_sigs": {},
+        "complete": False,
+        "reason": "bounded_recent_scan",
+    }
     try:
         client = _get_client()
     except Exception:
@@ -1777,11 +1981,13 @@ def scan_recent_memos(search_limit: int = 400) -> dict:
     for ent in entries:
         try:
             sig = ent.get("signature") if isinstance(ent, dict) else None
-            if not sig:
+            if (not sig or ent.get("err") is not None
+                    or ent.get("confirmationStatus") != "finalized"):
                 continue
             # Fetch transaction (short timeout)
             try:
-                tx_resp = _rpc_call(client.get_transaction, sig, encoding="jsonParsed", timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 6))
+                signature_obj = Signature.from_string(sig)
+                tx_resp = _rpc_call(client.get_transaction, signature_obj, encoding="jsonParsed", timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 6))
             except Exception:
                 continue
             tx_val = _rpc_get_result(tx_resp)
@@ -1816,13 +2022,22 @@ def scan_recent_memos(search_limit: int = 400) -> dict:
                 except Exception:
                     pass
             for m in memos:
-                if "nexus_txid:" in m:
-                    try:
-                        txid = m.split("nexus_txid:", 1)[1].strip().split()[0]
-                        if txid and txid not in out["nexus_txids"]:
-                            out["nexus_txids"][txid] = sig
-                    except Exception:
-                        pass
+                if isinstance(m, str) and m.startswith("nexus_txid:"):
+                    parsed = nexus_memo.parse_nexus_payout_memo(m)
+                    if parsed is None:
+                        out["malformed_nexus_memos"].append(m)
+                    elif parsed.is_legacy:
+                        out["legacy_nexus_txids"].setdefault(parsed.txid, sig)
+                    else:
+                        evidence = _extract_nexus_payout_evidence(
+                            tx_val, signature=sig, memo=parsed
+                        )
+                        if evidence is None:
+                            out["malformed_nexus_memos"].append(m)
+                        else:
+                            out["nexus_payouts"].setdefault(
+                                (parsed.txid, parsed.contract_id), evidence
+                            )
                 if "refundSig:" in m:
                     try:
                         dsig = m.split("refundSig:", 1)[1].strip().split()[0]
@@ -1836,160 +2051,182 @@ def scan_recent_memos(search_limit: int = 400) -> dict:
 
 
 def scan_memos_since_timestamp(since_timestamp: int, max_signatures: int = 10000) -> dict:
-    """Scan ALL signatures for the vault account since timestamp, collecting structured memos.
-    
-    Args:
-        since_timestamp: Unix timestamp to scan from
-        max_signatures: Maximum signatures to fetch (safety limit)
-    
-    Returns:
-        dict: {
-            'nexus_txids': { txid: signature },
-            'refund_sigs': { deposit_sig: refund_tx_sig },
-            'quarantined_sigs': { sig: True },
-            'deposits': [ { sig, from, amount, memo, timestamp } ],  # Unprocessed deposits
-        }
-    
-    Note: This can be slow for large time ranges. Use waterline properly to minimize scan range.
-    """
-    out = {"nexus_txids": {}, "refund_sigs": {}, "quarantined_sigs": {}, "deposits": []}
-    
+    """Enumerate finalized vault transactions without turning gaps into absence proof."""
+    out = {
+        "nexus_payouts": {},
+        "legacy_nexus_txids": {},
+        "malformed_nexus_memos": [],
+        "refund_sigs": {},
+        "quarantined_sigs": {},
+        "deposits": [],
+        "complete": False,
+        "reason": None,
+    }
+
+    def incomplete(reason: str) -> dict:
+        out["nexus_payouts"].clear()
+        out["legacy_nexus_txids"].clear()
+        out["refund_sigs"].clear()
+        out["quarantined_sigs"].clear()
+        out["complete"] = False
+        out["reason"] = reason
+        return out
+
+    if (isinstance(since_timestamp, bool) or not isinstance(since_timestamp, int)
+            or since_timestamp <= 0):
+        return incomplete("invalid_waterline")
+    if (isinstance(max_signatures, bool) or not isinstance(max_signatures, int)
+            or max_signatures <= 0):
+        return incomplete("invalid_signature_budget")
+
     try:
         client = _get_client()
     except Exception:
-        return out
-    
-    # Fetch signatures in batches, working backwards from most recent
+        return incomplete("client_unavailable")
+
     fetched_count = 0
     before_sig = None
-    batch_size = 1000  # Max allowed by Solana RPC
-    
+    batch_size = 1000
+
     while fetched_count < max_signatures:
+        request_limit = min(batch_size, max_signatures - fetched_count)
+        params: dict[str, Any] = {
+            "limit": request_limit,
+            "commitment": "finalized",
+        }
+        if before_sig:
+            params["before"] = before_sig
         try:
-            # Get batch of signatures
-            params = {"limit": min(batch_size, max_signatures - fetched_count)}
-            if before_sig:
-                params["before"] = before_sig
-            
             resp = _rpc_call(
                 client.get_signatures_for_address,
                 PublicKey.from_string(str(config.VAULT_USDC_ACCOUNT)),
-                **params
+                **params,
             )
-            entries = _rpc_get_value(resp)
-            
-            if not isinstance(entries, list) or not entries:
-                break  # No more signatures
-            
-            reached_waterline = False
-            for ent in entries:
-                try:
-                    sig = ent.get("signature") if isinstance(ent, dict) else None
-                    block_time = ent.get("blockTime") if isinstance(ent, dict) else None
-                    
-                    if not sig:
-                        continue
-                    
-                    # Check if we've reached the waterline
-                    if block_time and block_time < since_timestamp:
-                        reached_waterline = True
-                        break
-                    
-                    # Fetch transaction details
-                    try:
-                        tx_resp = _rpc_call(
-                            client.get_transaction,
-                            sig,
-                            encoding="jsonParsed",
-                            timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 6)
-                        )
-                    except Exception:
-                        continue
-                    
-                    tx_val = _rpc_get_result(tx_resp)
-                    if not tx_val:
-                        continue
-                    
-                    # Extract memos
-                    try:
-                        tx_obj = tx_val.get("transaction") if isinstance(tx_val, dict) else None
-                        msg = (tx_obj or {}).get("message") if isinstance(tx_obj, dict) else None
-                        insts = (msg or {}).get("instructions") if isinstance(msg, dict) else None
-                    except Exception:
-                        insts = None
-                    
-                    memos: list[str] = []
-                    if isinstance(insts, list):
-                        for ix in insts:
-                            try:
-                                prog = ix.get("programId") or ix.get("program")
-                                if prog and str(prog).startswith("Memo111"):
-                                    data = ix.get("data")
-                                    if isinstance(data, list) and data:
-                                        data = data[0]
-                                    if isinstance(data, str):
-                                        memos.append(data)
-                            except Exception:
-                                continue
-                    
-                    # Fallback: check logs
-                    if not memos:
-                        try:
-                            logs = (tx_val.get("meta") or {}).get("logMessages") if isinstance(tx_val, dict) else None
-                            if isinstance(logs, list):
-                                for lg in logs:
-                                    if isinstance(lg, str) and any(x in lg for x in ["nexus_txid:", "refundSig:", "quarantinedSig:"]):
-                                        memos.append(lg)
-                        except Exception:
-                            pass
-                    
-                    # Process memos
-                    for m in memos:
-                        if "nexus_txid:" in m:
-                            try:
-                                txid = m.split("nexus_txid:", 1)[1].strip().split()[0]
-                                if txid and txid not in out["nexus_txids"]:
-                                    out["nexus_txids"][txid] = sig
-                            except Exception:
-                                pass
-                        
-                        if "refundSig:" in m:
-                            try:
-                                dsig = m.split("refundSig:", 1)[1].strip().split()[0]
-                                if dsig and dsig not in out["refund_sigs"]:
-                                    out["refund_sigs"][dsig] = sig
-                            except Exception:
-                                pass
-                        
-                        if "quarantinedSig:" in m:
-                            try:
-                                qsig = m.split("quarantinedSig:", 1)[1].strip().split()[0]
-                                if qsig:
-                                    out["quarantined_sigs"][qsig] = True
-                            except Exception:
-                                pass
-                    
-                    # Check if this is a deposit to vault (no processed marker)
-                    # We'll collect ALL deposits and let caller filter out processed ones
-                    # This is simpler than trying to determine processing status here
-                    
-                except Exception:
-                    continue
-            
-            fetched_count += len(entries)
-            before_sig = entries[-1].get("signature") if entries else None
-            
-            # Stop conditions
-            if reached_waterline:
+        except Exception as exc:
+            _log("solana_memo_scan_failed", level=logging.ERROR, error=str(exc))
+            return incomplete("signature_page_fetch_failed")
+
+        entries = _rpc_get_value(resp)
+        if not isinstance(entries, list):
+            return incomplete("invalid_signature_page")
+        if not entries:
+            out["complete"] = True
+            return out
+
+        reached_waterline = False
+        for ent in entries:
+            if not isinstance(ent, dict):
+                return incomplete("invalid_signature_entry")
+            sig = ent.get("signature")
+            block_time = ent.get("blockTime")
+            if not isinstance(sig, str) or not sig.strip():
+                return incomplete("invalid_signature")
+            if (isinstance(block_time, bool) or not isinstance(block_time, int)
+                    or block_time <= 0):
+                return incomplete("invalid_block_time")
+            if block_time < since_timestamp:
+                reached_waterline = True
                 break
-            if len(entries) < batch_size:
-                break  # No more signatures available
-            
-        except Exception as e:
-            _log("solana_memo_scan_failed", level=logging.ERROR, error=str(e))
-            break
-    
-    return out
+            if ent.get("confirmationStatus") != "finalized":
+                return incomplete("signature_not_finalized")
+            if ent.get("err") is not None:
+                continue
+
+            try:
+                signature_obj = Signature.from_string(sig)
+            except Exception:
+                return incomplete("invalid_signature")
+            try:
+                tx_resp = _rpc_call(
+                    client.get_transaction,
+                    signature_obj,
+                    encoding="jsonParsed",
+                    timeout=getattr(config, "SOLANA_TX_FETCH_TIMEOUT_SEC", 6),
+                )
+            except Exception:
+                return incomplete("transaction_fetch_failed")
+
+            tx_val = _rpc_get_result(tx_resp)
+            if not isinstance(tx_val, dict):
+                return incomplete("invalid_transaction")
+            meta = tx_val.get("meta")
+            tx_obj = tx_val.get("transaction")
+            msg = tx_obj.get("message") if isinstance(tx_obj, dict) else None
+            insts = msg.get("instructions") if isinstance(msg, dict) else None
+            if not isinstance(meta, dict) or not isinstance(insts, list):
+                return incomplete("invalid_transaction")
+            if meta.get("err") is not None:
+                continue
+
+            memos: list[str] = []
+            for ix in insts:
+                if not isinstance(ix, dict):
+                    return incomplete("invalid_instruction")
+                prog = ix.get("programId") or ix.get("program")
+                if not prog or not (
+                    str(prog).startswith("Memo111")
+                    or str(prog) == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+                    or str(prog) == "spl-memo"
+                ):
+                    continue
+                data = ix.get("data", ix.get("parsed"))
+                if isinstance(data, list) and len(data) == 1:
+                    data = data[0]
+                if not isinstance(data, str):
+                    return incomplete("invalid_memo_instruction")
+                memos.append(data)
+
+            for memo in memos:
+                if memo.startswith("nexus_txid:"):
+                    parsed = nexus_memo.parse_nexus_payout_memo(memo)
+                    if parsed is None:
+                        out["malformed_nexus_memos"].append(memo)
+                        return incomplete("malformed_nexus_payout_memo")
+                    if parsed.is_legacy:
+                        existing = out["legacy_nexus_txids"].get(parsed.txid)
+                        if existing is not None and existing != sig:
+                            return incomplete("duplicate_nexus_payout_identity")
+                        out["legacy_nexus_txids"][parsed.txid] = sig
+                    else:
+                        evidence = _extract_nexus_payout_evidence(
+                            tx_val, signature=sig, memo=parsed
+                        )
+                        if evidence is None:
+                            return incomplete("missing_nexus_payout_transfer_evidence")
+                        identity = (parsed.txid, parsed.contract_id)
+                        existing = out["nexus_payouts"].get(identity)
+                        if (existing is not None
+                                and existing.solana_signature != evidence.solana_signature):
+                            return incomplete("duplicate_nexus_payout_identity")
+                        out["nexus_payouts"][identity] = evidence
+                elif memo.startswith("refundSig:"):
+                    deposit_sig = memo[len("refundSig:"):]
+                    if not deposit_sig or deposit_sig.strip() != deposit_sig or any(
+                        ch.isspace() for ch in deposit_sig
+                    ):
+                        return incomplete("malformed_refund_memo")
+                    out["refund_sigs"].setdefault(deposit_sig, sig)
+                elif memo.startswith("quarantinedSig:"):
+                    deposit_sig = memo[len("quarantinedSig:"):]
+                    if not deposit_sig or deposit_sig.strip() != deposit_sig or any(
+                        ch.isspace() for ch in deposit_sig
+                    ):
+                        return incomplete("malformed_quarantine_memo")
+                    out["quarantined_sigs"][deposit_sig] = sig
+
+        fetched_count += len(entries)
+        if reached_waterline or len(entries) < request_limit:
+            out["complete"] = True
+            return out
+        cursor = entries[-1].get("signature")
+        if not isinstance(cursor, str) or not cursor:
+            return incomplete("invalid_pagination_cursor")
+        try:
+            before_sig = Signature.from_string(cursor)
+        except Exception:
+            return incomplete("invalid_pagination_cursor")
+
+    return incomplete("pagination_truncated")
 
 
 ## Memo extraction removed.

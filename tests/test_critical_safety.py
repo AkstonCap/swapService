@@ -201,10 +201,39 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(record["nexus_treasury_address"], "canonical-treasury")
         self.assertEqual(record["nexus_token_register_address"], "canonical-register")
 
+    def test_solana_deposit_destination_requires_configured_nexus_token_register(self):
+        """A matching ticker cannot authorize a mint to an account for another token."""
+        pair = replace(
+            config.SWAP_PAIR,
+            nexus=replace(
+                config.SWAP_PAIR.nexus,
+                symbol="SAME",
+                register_address="expected-token-register",
+            ),
+        )
+        wrong_token_account = {
+            "address": "recipient",
+            "ticker": "SAME",
+            "token": "attacker-token-register",
+        }
+        right_token_account = {
+            "address": "recipient",
+            "ticker": "SAME",
+            "token": "expected-token-register",
+        }
+
+        with patch.object(config, "SWAP_PAIR", pair), patch.object(
+            config, "NEXUS_TOKEN_NAME", "SAME"
+        ), patch.object(
+            nexus_client, "get_account_info", side_effect=[wrong_token_account, right_token_account]
+        ):
+            self.assertFalse(nexus_client.is_valid_nexus_token_account("recipient"))
+            self.assertTrue(nexus_client.is_valid_nexus_token_account("recipient"))
+
     def test_recovery_scans_canonical_treasury_account_history(self):
         """Wipeout recovery must not fall back to the token register's lossy history."""
         credit = {
-            "txid": "treasury-account-credit", "timestamp": 1_000, "confirmations": 2,
+            "txid": "ab" * 64, "timestamp": 1_000, "confirmations": 2,
             "contracts": [{
                 "id": 0, "OP": "CREDIT", "from": "sender",
                 "to": "canonical-treasury", "amount": "3",
@@ -304,7 +333,7 @@ class CriticalSafetyTests(unittest.TestCase):
             ),
         )
         credit = {
-            "txid": "recovery-canonical-fee-only-credit",
+            "txid": "02aea6aae656703572ac70f202b4f28d8157ae643e61fc91da258ae0eff4b124a23edb752b118e8ccb2edf90bcd9aef6777ebefe337397ac8aba9a47812f5932",
             "timestamp": 1_000,
             "confirmations": 2,
             "contracts": [{
@@ -345,11 +374,11 @@ class CriticalSafetyTests(unittest.TestCase):
                 "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": amount,
             }]}
         credits = [
-            credit("dust", "0.000001"),
-            credit("below", "0.000025"),
-            credit("fee-only", "0.000100"),
-            credit("payable", "0.000150"),
-            credit("over-cap", "0.000201"),
+            credit("3ef11e70f4e1566bf0e06d67aae3e657b47ef559569b6d4d34f558d107a81f447f03f142c48917d37da97d53c0fc3fbedeb71ffabac8889cf8d25d7e98ba32fd", "0.000001"),
+            credit("cb7c5b863c128460e06ecf3cfbdd950d4f59a23ad1779e107a7926f0d30fc46e5f73c24369c3f379bfe503b56cc3225cddb4157e18ea062fa24dbef16de1d5c2", "0.000025"),
+            credit("3ad395d849200810475664bf6ed2fee53fa4e0e9d08eeff0823c1de8164ad93210fa3736ce18efb946698eea6a5c56a3ffc40b992eb1b48e7b94362330ce3c83", "0.000100"),
+            credit("8902c136f635ff68499d5e5cc71caaf7a7a255ea32e530edb0ea69c3292e5a1cd8fbda0767c25e968d1e92a82a89963b75ab5bf26726f7a53d56b7985b1241dd", "0.000150"),
+            credit("5024b233a953ab982ea4cdd0d9f78ed612f6e8d840824a52a4a31a521a008ea955f179b1d151b11ede2164ef616f34f2e689421da8083ee73b839f3eafcb515e", "0.000201"),
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
@@ -370,22 +399,22 @@ class CriticalSafetyTests(unittest.TestCase):
                     "SELECT txid, amount_usdd_units FROM processed_txids"
                 ).fetchall())
                 conn.close()
-                dust_processed = state_db.is_processed_txid("dust")
+                dust_processed = state_db.is_processed_txid("3ef11e70f4e1566bf0e06d67aae3e657b47ef559569b6d4d34f558d107a81f447f03f142c48917d37da97d53c0fc3fbedeb71ffabac8889cf8d25d7e98ba32fd")
 
         self.assertFalse(dust_processed)
-        self.assertEqual(fees["below"][5], 25)
-        self.assertEqual(fees["fee-only"][5], 100)
-        self.assertEqual(processed["below"], 25)
-        self.assertEqual(processed["fee-only"], 100)
-        self.assertEqual(pending["payable"]["amount_usdd_units"], 150)
-        self.assertEqual(pending["payable"]["comment"], "pending_receival")
-        self.assertEqual(pending["over-cap"]["amount_usdd_units"], 201)
-        self.assertEqual(pending["over-cap"]["comment"], "refund pending")
+        self.assertEqual(fees["cb7c5b863c128460e06ecf3cfbdd950d4f59a23ad1779e107a7926f0d30fc46e5f73c24369c3f379bfe503b56cc3225cddb4157e18ea062fa24dbef16de1d5c2"][5], 25)
+        self.assertEqual(fees["3ad395d849200810475664bf6ed2fee53fa4e0e9d08eeff0823c1de8164ad93210fa3736ce18efb946698eea6a5c56a3ffc40b992eb1b48e7b94362330ce3c83"][5], 100)
+        self.assertEqual(processed["cb7c5b863c128460e06ecf3cfbdd950d4f59a23ad1779e107a7926f0d30fc46e5f73c24369c3f379bfe503b56cc3225cddb4157e18ea062fa24dbef16de1d5c2"], 25)
+        self.assertEqual(processed["3ad395d849200810475664bf6ed2fee53fa4e0e9d08eeff0823c1de8164ad93210fa3736ce18efb946698eea6a5c56a3ffc40b992eb1b48e7b94362330ce3c83"], 100)
+        self.assertEqual(pending["8902c136f635ff68499d5e5cc71caaf7a7a255ea32e530edb0ea69c3292e5a1cd8fbda0767c25e968d1e92a82a89963b75ab5bf26726f7a53d56b7985b1241dd"]["amount_usdd_units"], 150)
+        self.assertEqual(pending["8902c136f635ff68499d5e5cc71caaf7a7a255ea32e530edb0ea69c3292e5a1cd8fbda0767c25e968d1e92a82a89963b75ab5bf26726f7a53d56b7985b1241dd"]["comment"], "pending_receival")
+        self.assertEqual(pending["5024b233a953ab982ea4cdd0d9f78ed612f6e8d840824a52a4a31a521a008ea955f179b1d151b11ede2164ef616f34f2e689421da8083ee73b839f3eafcb515e"]["amount_usdd_units"], 201)
+        self.assertEqual(pending["5024b233a953ab982ea4cdd0d9f78ed612f6e8d840824a52a4a31a521a008ea955f179b1d151b11ede2164ef616f34f2e689421da8083ee73b839f3eafcb515e"]["comment"], "refund pending")
 
     def test_recovery_holds_positive_inexact_nexus_credit_for_manual_resolution(self):
         """A positive inexact credit must survive recovery instead of falling beyond the waterline."""
         credit = {
-            "txid": "inexact-credit", "timestamp": 1_000, "confirmations": 2,
+            "txid": "4afed61d781c65c4d12d19bfb4da1a95fd0d1529310768f6904bf7a723cda07619bbcb1cdd45c3665ebe719bd92049d42d8ef0ff18e861ea477aaa2028107a93", "timestamp": 1_000, "confirmations": 2,
             "contracts": [{
                 "id": 0,
                 "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": "1.0000001",
@@ -407,14 +436,14 @@ class CriticalSafetyTests(unittest.TestCase):
                 pending = {row["txid"]: row for row in state_db.get_unprocessed_txids_as_dicts()}
 
         self.assertEqual(summary["nexus_deposits_added"], 0)
-        self.assertEqual(pending["inexact-credit"]["comment"], "quarantined")
-        self.assertEqual(pending["inexact-credit"]["hold_reason"], "invalid_exact_nexus_amount")
-        self.assertIsNone(pending["inexact-credit"]["amount_usdd_units"])
+        self.assertEqual(pending["4afed61d781c65c4d12d19bfb4da1a95fd0d1529310768f6904bf7a723cda07619bbcb1cdd45c3665ebe719bd92049d42d8ef0ff18e861ea477aaa2028107a93"]["comment"], "quarantined")
+        self.assertEqual(pending["4afed61d781c65c4d12d19bfb4da1a95fd0d1529310768f6904bf7a723cda07619bbcb1cdd45c3665ebe719bd92049d42d8ef0ff18e861ea477aaa2028107a93"]["hold_reason"], "invalid_exact_nexus_amount")
+        self.assertIsNone(pending["4afed61d781c65c4d12d19bfb4da1a95fd0d1529310768f6904bf7a723cda07619bbcb1cdd45c3665ebe719bd92049d42d8ef0ff18e861ea477aaa2028107a93"]["amount_usdd_units"])
 
     def test_recovery_revalidates_each_credit_destination_in_a_sibling_transaction(self):
         """A treasury sibling cannot authorize recovery of a CREDIT sent elsewhere."""
         tx = {
-            "txid": "sibling-credits", "timestamp": 1_000, "confirmations": 2,
+            "txid": "b435426e25bb29ec8d12ddb6834e5a99159628c4841e6fa670213784634a39643e6850c996098012d8908244f04d6cf9133ef9a829ee3b936741b248068cebb8", "timestamp": 1_000, "confirmations": 2,
             "contracts": [
                 {"id": 0, "OP": "CREDIT", "from": "attacker", "to": "OTHER", "amount": "2"},
                 {"id": 0, "OP": "CREDIT", "from": "sender", "to": "TREASURY", "amount": "3"},
@@ -467,7 +496,7 @@ class CriticalSafetyTests(unittest.TestCase):
     def test_recovery_persists_each_treasury_credit_by_contract_identity(self):
         """Wipeout recovery restores every sibling CREDIT independently."""
         tx = {
-            "txid": "two-recovery-credits", "timestamp": 1_000, "confirmations": 2,
+            "txid": "543468669345f4e0839339878341ccf342bc2efcc12b3fff28bbf724be4b573f4d2fa0dbad4be5277c26cc5e762e5f20e4233be083a49bb8c0914de573d01806", "timestamp": 1_000, "confirmations": 2,
             "contracts": [
                 {"id": 0, "OP": "CREDIT", "from": "sender-a", "to": "TREASURY", "amount": "3"},
                 {"id": 1, "OP": "CREDIT", "from": "sender-b", "to": "TREASURY", "amount": "4"},
@@ -486,8 +515,8 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(
             {(row["txid"], row["contract_id"], row["from"], row["amount_usdd_units"])
              for row in queued},
-            {("two-recovery-credits", 0, "sender-a", 3_000_000),
-             ("two-recovery-credits", 1, "sender-b", 4_000_000)},
+            {("543468669345f4e0839339878341ccf342bc2efcc12b3fff28bbf724be4b573f4d2fa0dbad4be5277c26cc5e762e5f20e4233be083a49bb8c0914de573d01806", 0, "sender-a", 3_000_000),
+             ("543468669345f4e0839339878341ccf342bc2efcc12b3fff28bbf724be4b573f4d2fa0dbad4be5277c26cc5e762e5f20e4233be083a49bb8c0914de573d01806", 1, "sender-b", 4_000_000)},
         )
 
     def test_credit_identity_migration_preserves_legacy_rows_without_colliding(self):
@@ -586,6 +615,32 @@ class CriticalSafetyTests(unittest.TestCase):
 
                 self.assertFalse(scan.complete)
                 self.assertEqual(scan.deposits, [])
+
+    def test_recovery_deposit_scan_requires_stable_repeatable_pagination_evidence(self):
+        """Recovery cannot call offset-paginated history complete after it changes mid-scan."""
+        def transaction(txid, timestamp):
+            return {
+                "txid": txid,
+                "timestamp": timestamp,
+                "confirmations": 2,
+                "contracts": [],
+            }
+
+        newest_page = [transaction(f"tx-{timestamp}", timestamp) for timestamp in range(200, 100, -1)]
+        first_terminal_page = [transaction("old-a", 99)]
+        changed_terminal_page = [transaction("old-b", 99)]
+        pages = [newest_page, first_terminal_page, newest_page, changed_terminal_page]
+
+        with patch.object(
+            nexus_client,
+            "_run",
+            side_effect=[(0, json.dumps(page), "") for page in pages],
+        ):
+            scan = nexus_client.fetch_deposits_since("TREASURY", 100, max_pages=2)
+
+        self.assertFalse(scan.complete)
+        self.assertEqual(scan.reason, "pagination_snapshot_unavailable")
+        self.assertEqual(scan.deposits, [])
 
     def test_service_record_terms_use_canonical_pair_fee_policy(self):
         """Nexus heartbeat terms must advertise the same policy that pays Solana users."""
@@ -2463,6 +2518,8 @@ class CriticalSafetyTests(unittest.TestCase):
                 main._stop_event.set()
 
         recovery = {
+            "recovery_complete": True,
+            "recovery_incomplete": False,
             "reference_seeded": False, "interrupted_nexus_transfers_held": 0,
             "added_nexus_processed": 0, "added_refunded_sigs": 0,
             "found_nexus_memos": 0, "found_refund_memos": 0,
@@ -2530,7 +2587,7 @@ class CriticalSafetyTests(unittest.TestCase):
                 for invalid_units in (True, 1.9, Decimal("1"), "1000000"):
                     with self.subTest(invalid_units=repr(invalid_units)):
                         with self.assertRaisesRegex(ValueError, "exact positive integer"):
-                            state_db.create_nexus_transfer_intent(
+                            state_db.create_nexus_transfer_intent(source_contract_id=0,
                                 kind="refund",
                                 source_txid=f"credit-invalid-{repr(invalid_units)}",
                                 from_address="TREASURY",
@@ -2569,20 +2626,31 @@ class CriticalSafetyTests(unittest.TestCase):
                     state_db.get_nexus_transfer_intents_by_status(("prepared",)), []
                 )
 
+    def _seed_held_credit(self, txid, units=1_000_000, contract_id=0):
+        """Explicit source fixture for operator-intent tests; no authorization bypass."""
+        state_db.add_unprocessed_txid(
+            txid=txid, contract_id=contract_id, timestamp=1,
+            amount_usdd=float(Decimal(units) / (Decimal(10) ** config.NEXUS_TOKEN_DECIMALS)),
+            amount_usdd_units=units, from_address="sender", to_address="TREASURY",
+            owner_from_address="owner", confirmations_credit=2,
+            status=swap_nexus.NEXUS_STATUS_REFUND_HOLD,
+        )
+
     def test_nexus_transfer_intent_is_durable_and_reuses_its_unique_reference(self):
         """A refund/quarantine transfer is uniquely identified before the CLI can run."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                first = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-1', units=1000000)
+                first = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund",
                     source_txid="credit-1",
                     from_address="TREASURY",
                     to_address="sender",
                     amount_usdd_units=1_000_000,
                 )
-                second = state_db.create_nexus_transfer_intent(
+                second = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund",
                     source_txid="credit-1",
                     from_address="TREASURY",
@@ -2603,7 +2671,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-missing-preparation', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-missing-preparation",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2620,7 +2689,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-missing-execution-request', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-missing-execution-request",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2646,12 +2716,13 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                refund = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-single-disposition', units=1000000)
+                refund = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-single-disposition",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
                 with self.assertRaisesRegex(ValueError, "conflicts"):
-                    state_db.create_nexus_transfer_intent(
+                    state_db.create_nexus_transfer_intent(source_contract_id=0,
                         kind="quarantine", source_txid="credit-single-disposition",
                         from_address="TREASURY", to_address="QUARANTINE",
                         amount_usdd_units=1_000_000,
@@ -2688,8 +2759,22 @@ class CriticalSafetyTests(unittest.TestCase):
             finally:
                 conn.close()
             with patch.object(state_db, "DB_PATH", db_path):
-                with self.assertRaisesRegex(RuntimeError, "unsafe duplicate Nexus transfer intents"):
-                    state_db.init_db()
+                state_db.init_db()
+                for intent_id in ("old-refund", "old-quarantine"):
+                    intent = state_db.get_nexus_transfer_intent(intent_id)
+                    self.assertEqual(intent["source_contract_id"], -1)
+                    self.assertEqual(intent["status"], "legacy_manual_hold")
+                    with self.assertRaises(ValueError):
+                        state_db.authorize_nexus_transfer_intent(
+                            intent_id, actor="alice", rationale="cannot guess source",
+                            expected_reference=intent["reference"],
+                        )
+                    self.assertIsNone(state_db.claim_nexus_transfer_intent(intent_id))
+                with self.assertRaises(ValueError):
+                    state_db.create_nexus_transfer_intent(
+                        source_contract_id=0, kind="refund", source_txid="credit-duplicate",
+                        from_address="TREASURY", to_address="destination", amount_usdd_units=100,
+                    )
 
 
     @patch.object(nexus_client, "_run", return_value=(0, '{"txid":"refund-tx"}', ""))
@@ -2698,7 +2783,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-2', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-2", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2731,7 +2817,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-non-string-returned-txid', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-non-string-returned-txid",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2761,7 +2848,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-immutable-remote-txid', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-immutable-remote-txid",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2795,7 +2883,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-terminal', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-terminal", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2837,7 +2926,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-3', units=2000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="quarantine", source_txid="credit-3", from_address="TREASURY",
                     to_address="QUARANTINE", amount_usdd_units=2_000_000,
                 )
@@ -2882,7 +2972,8 @@ class CriticalSafetyTests(unittest.TestCase):
                 nexus_client, "_run"
             ) as run:
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-direct-txid', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-direct-txid", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -2963,7 +3054,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path), patch.object(nexus_client, "_run") as run:
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-wrong-reference', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-wrong-reference", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -3003,7 +3095,8 @@ class CriticalSafetyTests(unittest.TestCase):
                 nexus_client, "find_nexus_transfer_debits_by_references"
             ) as lookup:
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-incomplete-lookup', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-incomplete-lookup",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -3081,7 +3174,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-ambiguous-contracts', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-ambiguous-contracts",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -3172,7 +3266,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-crash-after-claim', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-crash-after-claim",
                     from_address="TREASURY", to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -3215,7 +3310,8 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
-                intent = state_db.create_nexus_transfer_intent(
+                self._seed_held_credit('credit-wrong-terms', units=1000000)
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-wrong-terms", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -3266,8 +3362,9 @@ class CriticalSafetyTests(unittest.TestCase):
             db_path = os.path.join(tmpdir, "state.db")
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
+                self._seed_held_credit("credit-4")
                 refunded = nexus_client.refund_nexus_token(
-                    "sender", 1_000_000, "missing mapping txid: credit-4"
+                    "sender", 1_000_000, "missing mapping txid: credit-4", source_contract_id=0,
                 )
                 intents = state_db.get_nexus_transfer_intents_by_status(("prepared",))
 
@@ -3285,12 +3382,12 @@ class CriticalSafetyTests(unittest.TestCase):
             with patch.object(state_db, "DB_PATH", db_path):
                 state_db.init_db()
                 state_db.add_unprocessed_txid(
-                    txid="credit-operator", timestamp=1, amount_usdd=1.0,
+                    txid="credit-operator", contract_id=0, timestamp=1, amount_usdd=1.0,
                     from_address="sender", to_address="TREASURY", owner_from_address="owner",
                     confirmations_credit=2, status=swap_nexus.NEXUS_STATUS_REFUND_HOLD,
                     amount_usdd_units=1_000_000, hold_reason="missing mapping",
                 )
-                intent = state_db.create_nexus_transfer_intent(
+                intent = state_db.create_nexus_transfer_intent(source_contract_id=0,
                     kind="refund", source_txid="credit-operator", from_address="TREASURY",
                     to_address="sender", amount_usdd_units=1_000_000,
                 )
@@ -3340,8 +3437,8 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertTrue(all(event["actor"] == "alice" for event in events))
 
     @patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99)
-    @patch.object(startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True})
-    @patch.object(startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True})
+    @patch.object(startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True, "recovery_complete": True, "_nexus_payouts": {}})
+    @patch.object(startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True, "recovery_complete": True})
     @patch.object(startup_recovery, "_fallback_recent_scan")
     @patch.object(state_db, "recover_interrupted_nexus_transfer_intents", return_value=0)
     @patch.object(
@@ -3363,7 +3460,7 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertTrue(stats["waterline_mode"])
         self.assertEqual(stats["nexus_waterline"], 1_999_999_000)
         self.assertEqual(stats["solana_waterline"], 1_999_999_500)
-        rebuild_nexus.assert_called_once_with(1_999_999_000)
+        rebuild_nexus.assert_called_once_with(1_999_999_000, paid_nexus_payouts={})
         rebuild_solana.assert_called_once_with(1_999_999_500)
         fallback.assert_not_called()
 
@@ -3391,15 +3488,15 @@ class CriticalSafetyTests(unittest.TestCase):
         with patch.object(startup_recovery.state_db, "recover_interrupted_nexus_transfer_intents", return_value=0), patch.object(
             startup_recovery.nexus_client, "get_heartbeat_asset", return_value=heartbeat
         ), patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99), patch.object(
-            startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True}
+            startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True, "recovery_complete": True}
         ) as rebuild_nexus, patch.object(
-            startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True}
+            startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True, "recovery_complete": True, "_nexus_payouts": {}}
         ) as rebuild_solana, patch.object(startup_recovery.time, "time", return_value=2_000_000_000):
             stats = startup_recovery.perform_startup_recovery()
 
         self.assertEqual(stats["nexus_waterline"], 1_000_000_000)
         self.assertEqual(stats["solana_waterline"], 1_000_000_500)
-        rebuild_nexus.assert_called_once_with(1_000_000_000)
+        rebuild_nexus.assert_called_once_with(1_000_000_000, paid_nexus_payouts={})
         rebuild_solana.assert_called_once_with(1_000_000_500)
 
     def test_heartbeat_waterline_parser_rejects_duplicate_configured_field_names(self):

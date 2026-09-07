@@ -153,6 +153,8 @@ def init_db():
             sig TEXT,
             amount_usdd_units INTEGER,
             hold_reason TEXT,
+            payout_solana_units INTEGER,
+            payout_fee_nexus_units INTEGER,
             PRIMARY KEY (txid, contract_id)
         )
     """)
@@ -168,6 +170,9 @@ def init_db():
             owner TEXT,
             sig TEXT,
             status TEXT,
+            payout_solana_units INTEGER,
+            payout_fee_nexus_units INTEGER,
+            payout_receival_account TEXT,
             PRIMARY KEY (txid, contract_id)
         )
     """)
@@ -240,14 +245,15 @@ def init_db():
     """)
 
     # Every Nexus-side transfer must first have a durable local intent. A source
-    # credit may authorize exactly one remote debit: allowing one "refund" and one
-    # "quarantine" intent for the same source would permit two dispositions of the
-    # same funds. The source-only unique index below also migrates existing ledgers.
+    # credit contract may authorize exactly one remote debit: allowing one "refund"
+    # and one "quarantine" intent for the same source identity would permit two
+    # dispositions of the same funds.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS nexus_transfer_intents (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
             source_txid TEXT NOT NULL,
+            source_contract_id INTEGER NOT NULL DEFAULT -1,
             from_address TEXT NOT NULL,
             to_address TEXT NOT NULL,
             amount_usdd_units INTEGER NOT NULL,
@@ -257,24 +263,9 @@ def init_db():
             contract_id INTEGER,
             created_timestamp INTEGER NOT NULL,
             last_attempt_timestamp INTEGER,
-            resolved_timestamp INTEGER,
-            UNIQUE(kind, source_txid)
+            resolved_timestamp INTEGER
         )
     """)
-    try:
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_transfer_intents_source "
-            "ON nexus_transfer_intents(source_txid)"
-        )
-    except sqlite3.IntegrityError as exc:
-        # Do not guess which pre-upgrade duplicate intent is safe. Refusing startup
-        # preserves both records for manual chain-evidence resolution.
-        conn.close()
-        raise RuntimeError(
-            "unsafe duplicate Nexus transfer intents share a source_txid; "
-            "resolve them manually before starting the service"
-        ) from exc
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nexus_transfer_intents_status ON nexus_transfer_intents(status, created_timestamp)")
     # The ledger is append-only: authorization and final disposition are not inferred
     # from a mutable status value, but attributable to a named operator and rationale.
     cursor.execute("""
@@ -316,6 +307,7 @@ def init_db():
             kind TEXT NOT NULL,
             amount_usdc_units INTEGER,
             amount_usdd_units INTEGER,
+            contract_id INTEGER NOT NULL DEFAULT -1,
             timestamp INTEGER NOT NULL
         )
     """)
@@ -386,6 +378,10 @@ def init_db():
     # shows actionable evidence instead of only an opaque lifecycle label.
     if "hold_reason" not in _utx_cols:
         cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN hold_reason TEXT")
+    if "payout_solana_units" not in _utx_cols:
+        cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN payout_solana_units INTEGER")
+    if "payout_fee_nexus_units" not in _utx_cols:
+        cursor.execute("ALTER TABLE unprocessed_txids ADD COLUMN payout_fee_nexus_units INTEGER")
 
     # A debit intent fixes both the exact Nexus output and its unique reference before
     # the debit is attempted. The output cannot be recomputed later under changed fee
@@ -398,10 +394,94 @@ def init_db():
     if "amount_usdd_units" not in _usig_cols:
         cursor.execute("ALTER TABLE unprocessed_sigs ADD COLUMN amount_usdd_units INTEGER")
 
+    # Transfer intents written before contract-level source admission only identify a
+    # transaction. Preserve every immutable id/reference/remote result and mark the
+    # missing source contract explicitly as legacy. The rebuilt table deliberately has
+    # no txid-only UNIQUE constraint: current intents are unique by exact source below,
+    # while multiple legacy rows must remain visible for manual chain disposition.
     cursor.execute("PRAGMA table_info(nexus_transfer_intents)")
     _transfer_cols = {row[1] for row in cursor.fetchall()}
-    if "contract_id" not in _transfer_cols:
-        cursor.execute("ALTER TABLE nexus_transfer_intents ADD COLUMN contract_id INTEGER")
+    if "source_contract_id" not in _transfer_cols:
+        cursor.execute("DROP INDEX IF EXISTS idx_nexus_transfer_intents_source")
+        cursor.execute("""
+            CREATE TABLE nexus_transfer_intents_source_identity_v3 (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                source_txid TEXT NOT NULL,
+                source_contract_id INTEGER NOT NULL DEFAULT -1,
+                from_address TEXT NOT NULL,
+                to_address TEXT NOT NULL,
+                amount_usdd_units INTEGER NOT NULL,
+                reference TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                remote_txid TEXT,
+                contract_id INTEGER,
+                created_timestamp INTEGER NOT NULL,
+                last_attempt_timestamp INTEGER,
+                resolved_timestamp INTEGER
+            )
+        """)
+        remote_contract = "contract_id" if "contract_id" in _transfer_cols else "NULL"
+        cursor.execute(
+            """INSERT INTO nexus_transfer_intents_source_identity_v3
+               (id, kind, source_txid, source_contract_id, from_address, to_address,
+                amount_usdd_units, reference, status, remote_txid, contract_id,
+                created_timestamp, last_attempt_timestamp, resolved_timestamp)
+               SELECT id, kind, source_txid, -1, from_address, to_address,
+                      amount_usdd_units, reference, 'legacy_manual_hold', remote_txid, """
+            + remote_contract
+            + """, created_timestamp, last_attempt_timestamp, resolved_timestamp
+               FROM nexus_transfer_intents"""
+        )
+        cursor.execute("DROP TABLE nexus_transfer_intents")
+        cursor.execute(
+            "ALTER TABLE nexus_transfer_intents_source_identity_v3 "
+            "RENAME TO nexus_transfer_intents"
+        )
+    cursor.execute(
+        """UPDATE nexus_transfer_intents SET status = 'legacy_manual_hold'
+           WHERE source_contract_id = -1 AND status != 'legacy_manual_hold'"""
+    )
+    # Replace the old txid-only index even if a partially upgraded database already
+    # acquired the new column. Startup is serialized and this remains in one migration
+    # transaction, so there is no interval in which a worker can insert without it.
+    cursor.execute("DROP INDEX IF EXISTS idx_nexus_transfer_intents_source")
+    try:
+        cursor.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_transfer_intents_source
+               ON nexus_transfer_intents(source_txid, source_contract_id)
+               WHERE source_contract_id >= 0"""
+        )
+    except sqlite3.IntegrityError as exc:
+        conn.close()
+        raise RuntimeError(
+            "unsafe duplicate Nexus transfer intents share an exact source identity; "
+            "resolve them manually before starting the service"
+        ) from exc
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nexus_transfer_intents_status "
+        "ON nexus_transfer_intents(status, created_timestamp)"
+    )
+
+    cursor.execute("PRAGMA table_info(fee_entries)")
+    _fee_cols = {row[1] for row in cursor.fetchall()}
+    if "contract_id" not in _fee_cols:
+        cursor.execute(
+            "ALTER TABLE fee_entries ADD COLUMN contract_id INTEGER NOT NULL DEFAULT -1"
+        )
+    try:
+        cursor.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_entries_nexus_source
+               ON fee_entries(txid, contract_id)
+               WHERE txid IS NOT NULL AND contract_id >= 0
+                     AND amount_usdd_units IS NOT NULL"""
+        )
+    except sqlite3.IntegrityError as exc:
+        conn.close()
+        raise RuntimeError(
+            "conflicting Nexus fee evidence shares an exact source identity; "
+            "resolve it manually before starting the service"
+        ) from exc
 
     # Completed Solana->Nexus mints must retain all evidence required for later
     # reconciliation.  The queue row is deliberately removed after confirmation, so
@@ -425,6 +505,12 @@ def init_db():
     _ptx_cols = {row[1] for row in cursor.fetchall()}
     if "amount_usdd_units" not in _ptx_cols:
         cursor.execute("ALTER TABLE processed_txids ADD COLUMN amount_usdd_units INTEGER")
+    if "payout_solana_units" not in _ptx_cols:
+        cursor.execute("ALTER TABLE processed_txids ADD COLUMN payout_solana_units INTEGER")
+    if "payout_fee_nexus_units" not in _ptx_cols:
+        cursor.execute("ALTER TABLE processed_txids ADD COLUMN payout_fee_nexus_units INTEGER")
+    if "payout_receival_account" not in _ptx_cols:
+        cursor.execute("ALTER TABLE processed_txids ADD COLUMN payout_receival_account TEXT")
 
     # SQLite cannot add a composite primary key in place.  Legacy rows have no
     # authoritative contract id, so preserve them under the explicit -1 sentinel
@@ -448,19 +534,23 @@ def init_db():
         "unprocessed_txids",
         ("txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
          "owner_from_address", "confirmations_credit", "status", "receival_account", "sig",
-         "amount_usdd_units", "hold_reason"),
+         "amount_usdd_units", "hold_reason", "payout_solana_units", "payout_fee_nexus_units"),
         "txid TEXT NOT NULL, contract_id INTEGER NOT NULL DEFAULT -1, timestamp INTEGER, "
         "amount_usdd REAL, from_address TEXT, to_address TEXT, owner_from_address TEXT, "
         "confirmations_credit INTEGER, status TEXT, receival_account TEXT, sig TEXT, "
-        "amount_usdd_units INTEGER, hold_reason TEXT, PRIMARY KEY (txid, contract_id)",
+        "amount_usdd_units INTEGER, hold_reason TEXT, payout_solana_units INTEGER, "
+        "payout_fee_nexus_units INTEGER, PRIMARY KEY (txid, contract_id)",
     )
     _migrate_credit_identity(
         "processed_txids",
         ("txid", "contract_id", "timestamp", "amount_usdd", "amount_usdd_units",
-         "from_address", "to_address", "owner", "sig", "status"),
+         "from_address", "to_address", "owner", "sig", "status", "payout_solana_units",
+         "payout_fee_nexus_units", "payout_receival_account"),
         "txid TEXT NOT NULL, contract_id INTEGER NOT NULL DEFAULT -1, timestamp INTEGER, "
         "amount_usdd REAL, amount_usdd_units INTEGER, from_address TEXT, to_address TEXT, "
-        "owner TEXT, sig TEXT, status TEXT, PRIMARY KEY (txid, contract_id)",
+        "owner TEXT, sig TEXT, status TEXT, payout_solana_units INTEGER, "
+        "payout_fee_nexus_units INTEGER, payout_receival_account TEXT, "
+        "PRIMARY KEY (txid, contract_id)",
     )
     _migrate_credit_identity(
         "refunded_txids",
@@ -489,7 +579,7 @@ def init_db():
 # debit.  These rows capture all debit inputs before invocation and make the
 # persisted reference the only identifier used for post-crash resolution.
 _NEXUS_TRANSFER_COLUMNS = (
-    "id", "kind", "source_txid", "from_address", "to_address",
+    "id", "kind", "source_txid", "source_contract_id", "from_address", "to_address",
     "amount_usdd_units", "reference", "status", "remote_txid", "contract_id",
     "created_timestamp", "last_attempt_timestamp", "resolved_timestamp",
 )
@@ -498,9 +588,10 @@ _NEXUS_TRANSFER_AUDIT_COLUMNS = (
 )
 
 
-def _nexus_transfer_intent_id(source_txid: str) -> str:
+def _nexus_transfer_intent_id(source_txid: str, source_contract_id: int) -> str:
     """Stable identity for the one permissible Nexus transfer per source credit."""
-    return "nexus-transfer-" + hashlib.sha256(source_txid.encode("utf-8")).hexdigest()[:32]
+    source = f"{source_txid}:{source_contract_id}"
+    return "nexus-transfer-" + hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
 
 
 def _nexus_transfer_reference(intent_id: str) -> str:
@@ -526,12 +617,91 @@ def _require_operator_text(value: str, field: str) -> str:
     return text
 
 
+def _nexus_transfer_audit_evidence(intent: dict, **extra: object) -> str:
+    evidence = {
+        "reference": str(intent["reference"]),
+        "source_contract_id": int(intent["source_contract_id"]),
+        "source_txid": str(intent["source_txid"]),
+    }
+    evidence.update(extra)
+    return __import__("json").dumps(evidence, sort_keys=True, separators=(",", ":"))
+
+
+def _audit_evidence_matches_intent(evidence: str | None, intent: dict) -> bool:
+    try:
+        decoded = __import__("json").loads(str(evidence or ""))
+        return (
+            decoded.get("reference") == str(intent["reference"])
+            and decoded.get("source_txid") == str(intent["source_txid"])
+            and type(decoded.get("source_contract_id")) is int
+            and decoded["source_contract_id"] == int(intent["source_contract_id"])
+        )
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _has_nexus_fee_evidence(conn, txid: str, contract_id: int) -> bool:
+    """Treat legacy txid-only Nexus fees as a hold for every possible sibling."""
+    return conn.execute(
+        """SELECT 1 FROM fee_entries
+           WHERE txid = ? AND amount_usdd_units IS NOT NULL
+                 AND (contract_id = -1 OR contract_id = ?)
+           LIMIT 1""",
+        (txid, contract_id),
+    ).fetchone() is not None
+
+
+def _nexus_transfer_has_exact_held_source(conn, intent: dict) -> bool:
+    """Verify the exact unspent source authorization inside the caller's transaction."""
+    source_contract_id = intent.get("source_contract_id")
+    if type(source_contract_id) is not int or source_contract_id < 0:
+        return False
+    if _has_nexus_fee_evidence(conn, str(intent["source_txid"]), source_contract_id):
+        return False
+    source = conn.execute(
+        """SELECT amount_usdd_units, from_address, to_address, status, sig,
+                  payout_solana_units, payout_fee_nexus_units
+           FROM unprocessed_txids WHERE txid = ? AND contract_id = ?""",
+        (intent["source_txid"], source_contract_id),
+    ).fetchone()
+    if source is None:
+        return False
+    units, sender, treasury, status, payout_sig, payout_units, payout_fee = source
+    if (type(units) is not int
+            or units != int(intent["amount_usdd_units"])
+            or str(treasury or "") != str(intent["from_address"])
+            or status != "refund held for operator review"
+            or bool(payout_sig)
+            or payout_units is not None
+            or payout_fee is not None):
+        return False
+    if intent["kind"] == "refund" and str(sender or "") != str(intent["to_address"]):
+        return False
+    for table in ("processed_txids", "refunded_txids", "quarantined_txids"):
+        if conn.execute(
+            f"SELECT 1 FROM {table} WHERE txid = ? AND contract_id = ?",
+            (intent["source_txid"], source_contract_id),
+        ).fetchone():
+            return False
+    return True
+
+
 def _record_nexus_transfer_audit_event(
     conn, *, intent_id: str, action: str, actor: str, rationale: str, evidence: str | None = None
 ) -> None:
-    """Append one immutable operator event. Repeating an action is idempotent."""
+    """Append immutable operator evidence; only an exact replay is idempotent."""
+    existing = conn.execute(
+        """SELECT actor, rationale, evidence FROM nexus_transfer_audit_events
+           WHERE intent_id = ? AND action = ?""",
+        (intent_id, action),
+    ).fetchone()
+    expected = (actor, rationale, evidence)
+    if existing is not None:
+        if existing != expected:
+            raise ValueError("conflicting Nexus transfer audit evidence already exists")
+        return
     conn.execute(
-        """INSERT OR IGNORE INTO nexus_transfer_audit_events
+        """INSERT INTO nexus_transfer_audit_events
            (intent_id, action, actor, rationale, evidence, timestamp)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (intent_id, action, actor, rationale, evidence, int(time.time())),
@@ -542,6 +712,7 @@ def create_nexus_transfer_intent(
     *,
     kind: str,
     source_txid: str,
+    source_contract_id: int,
     from_address: str,
     to_address: str,
     amount_usdd_units: int,
@@ -562,20 +733,30 @@ def create_nexus_transfer_intent(
     if type(amount_usdd_units) is not int or amount_usdd_units <= 0:
         raise ValueError("Nexus transfer intent requires exact positive integer units")
     units = amount_usdd_units
+    if type(source_contract_id) is not int or source_contract_id < 0:
+        raise ValueError("Nexus transfer intent requires a nonnegative source contract id")
     if not kind or not source_txid or not from_address or not to_address:
         raise ValueError("Nexus transfer intent requires kind, source and addresses")
 
-    intent_id = _nexus_transfer_intent_id(source_txid)
+    intent_id = _nexus_transfer_intent_id(source_txid, source_contract_id)
     reference = _nexus_transfer_reference(intent_id)
     now = int(time.time())
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            """SELECT 1 FROM nexus_transfer_intents
+               WHERE source_txid = ? AND source_contract_id = -1 LIMIT 1""",
+            (source_txid,),
+        ).fetchone():
+            raise ValueError(
+                "legacy Nexus transfer intent blocks fresh debit for this source txid"
+            )
         row = conn.execute(
             "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
-            " FROM nexus_transfer_intents WHERE source_txid = ?",
-            (source_txid,),
+            " FROM nexus_transfer_intents WHERE source_txid = ? AND source_contract_id = ?",
+            (source_txid, source_contract_id),
         ).fetchone()
         if row:
             existing = _nexus_transfer_intent_dict(row)
@@ -588,12 +769,23 @@ def create_nexus_transfer_intent(
                 raise ValueError("existing Nexus transfer intent conflicts with requested inputs")
             conn.commit()
             return existing
+        candidate = {
+            "kind": kind,
+            "source_txid": source_txid,
+            "source_contract_id": source_contract_id,
+            "from_address": from_address,
+            "to_address": to_address,
+            "amount_usdd_units": units,
+        }
+        if not _nexus_transfer_has_exact_held_source(conn, candidate):
+            raise ValueError("Nexus transfer intent requires an exact held source credit")
         conn.execute(
             """INSERT INTO nexus_transfer_intents
-               (id, kind, source_txid, from_address, to_address, amount_usdd_units,
+               (id, kind, source_txid, source_contract_id, from_address, to_address, amount_usdd_units,
                 reference, status, created_timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?)""",
-            (intent_id, kind, source_txid, from_address, to_address, units, reference, now),
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?)""",
+            (intent_id, kind, source_txid, source_contract_id, from_address, to_address,
+             units, reference, now),
         )
         conn.commit()
         created = get_nexus_transfer_intent(intent_id, conn=conn)
@@ -629,19 +821,25 @@ def claim_nexus_transfer_intent(intent_id: str) -> dict | None:
     try:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
+        intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is None or int(intent["source_contract_id"]) < 0:
+            conn.commit()
+            return None
+        if not _nexus_transfer_has_exact_held_source(conn, intent):
+            conn.commit()
+            return None
         requested = conn.execute(
-            """SELECT 1 FROM nexus_transfer_audit_events
-               WHERE intent_id = ? AND action = 'execution_requested' AND evidence =
-               (SELECT reference FROM nexus_transfer_intents WHERE id = ?)""",
-            (intent_id, intent_id),
+            """SELECT evidence FROM nexus_transfer_audit_events
+               WHERE intent_id = ? AND action = 'execution_requested'""",
+            (intent_id,),
         ).fetchone()
-        if requested is None:
+        if requested is None or not _audit_evidence_matches_intent(requested[0], intent):
             conn.commit()
             return None
         updated = conn.execute(
             """UPDATE nexus_transfer_intents
                SET status = 'executing', last_attempt_timestamp = ?
-               WHERE id = ? AND status = 'authorized'""",
+               WHERE id = ? AND status = 'authorized' AND source_contract_id >= 0""",
             (now, intent_id),
         ).rowcount
         if not updated:
@@ -671,10 +869,14 @@ def recover_interrupted_nexus_transfer_intents() -> int:
     try:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """UPDATE nexus_transfer_intents SET status = 'legacy_manual_hold'
+               WHERE source_contract_id = -1 AND status != 'legacy_manual_hold'"""
+        )
         recovered = conn.execute(
             """UPDATE nexus_transfer_intents
                SET status = 'outcome_unknown'
-               WHERE status = 'executing'"""
+               WHERE status = 'executing' AND source_contract_id >= 0"""
         ).rowcount
         conn.commit()
         return int(recovered)
@@ -699,21 +901,25 @@ def authorize_nexus_transfer_intent(
         intent = get_nexus_transfer_intent(intent_id, conn=conn)
         if intent is None:
             raise ValueError("Nexus transfer intent does not exist")
+        if int(intent["source_contract_id"]) < 0:
+            raise ValueError("legacy Nexus transfer intent cannot be authorized")
         if expected_reference != str(intent["reference"]):
             raise ValueError("Nexus transfer reference confirmation does not match")
         if intent["status"] != "prepared":
             raise ValueError("only a prepared Nexus transfer intent may be authorized")
+        if not _nexus_transfer_has_exact_held_source(conn, intent):
+            raise ValueError("Nexus transfer authorization requires exact held source evidence")
         preparation = conn.execute(
-            """SELECT 1 FROM nexus_transfer_audit_events
-               WHERE intent_id = ? AND action = ? AND evidence = ?""",
-            (intent_id, f"prepared_{intent['kind']}", str(intent["reference"])),
+            """SELECT evidence FROM nexus_transfer_audit_events
+               WHERE intent_id = ? AND action = ?""",
+            (intent_id, f"prepared_{intent['kind']}"),
         ).fetchone()
-        if preparation is None:
+        if preparation is None or not _audit_evidence_matches_intent(preparation[0], intent):
             raise ValueError("Nexus transfer requires an audited preparation before authorization")
         conn.execute("UPDATE nexus_transfer_intents SET status = 'authorized' WHERE id = ?", (intent_id,))
         _record_nexus_transfer_audit_event(
             conn, intent_id=intent_id, action="authorized_execution", actor=actor,
-            rationale=rationale, evidence=expected_reference,
+            rationale=rationale, evidence=_nexus_transfer_audit_evidence(intent),
         )
         conn.commit()
         authorized = get_nexus_transfer_intent(intent_id, conn=conn)
@@ -738,11 +944,13 @@ def record_nexus_transfer_preparation(
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
         intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is not None and int(intent["source_contract_id"]) < 0:
+            raise ValueError("legacy Nexus transfer intent cannot be prepared")
         if intent is None or intent["status"] != "prepared":
             raise ValueError("only a prepared Nexus transfer intent may be attributed")
         _record_nexus_transfer_audit_event(
             conn, intent_id=intent_id, action=f"prepared_{intent['kind']}", actor=actor,
-            rationale=rationale, evidence=str(intent["reference"]),
+            rationale=rationale, evidence=_nexus_transfer_audit_evidence(intent),
         )
         conn.commit()
     except Exception:
@@ -763,11 +971,15 @@ def record_nexus_transfer_execution_request(
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
         intent = get_nexus_transfer_intent(intent_id, conn=conn)
+        if intent is not None and int(intent["source_contract_id"]) < 0:
+            raise ValueError("legacy Nexus transfer intent cannot be executed")
         if intent is None or intent["status"] != "authorized":
             raise ValueError("only an authorized Nexus transfer intent may be executed")
+        if not _nexus_transfer_has_exact_held_source(conn, intent):
+            raise ValueError("Nexus transfer execution requires exact held source evidence")
         _record_nexus_transfer_audit_event(
             conn, intent_id=intent_id, action="execution_requested", actor=actor,
-            rationale=rationale, evidence=str(intent["reference"]),
+            rationale=rationale, evidence=_nexus_transfer_audit_evidence(intent),
         )
         conn.commit()
     except Exception:
@@ -794,7 +1006,7 @@ def get_nexus_transfer_audit_events(intent_id: str) -> list[dict]:
 def finalize_nexus_transfer_disposition(
     intent_id: str, *, actor: str, rationale: str, expected_remote_txid: str
 ) -> bool:
-    """Move a held source row only after its completed transfer has exact chain evidence."""
+    """Move only the exact held source after its completed transfer has chain evidence."""
     actor = _require_operator_text(actor, "operator")
     rationale = _require_operator_text(rationale, "disposition rationale")
     expected_remote_txid = _require_operator_text(expected_remote_txid, "remote txid confirmation")
@@ -803,54 +1015,85 @@ def finalize_nexus_transfer_disposition(
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("BEGIN IMMEDIATE")
         intent = get_nexus_transfer_intent(intent_id, conn=conn)
-        if (intent is None or intent["status"] != "completed" or
-                str(intent.get("remote_txid") or "") != expected_remote_txid):
+        if (intent is None or int(intent["source_contract_id"]) < 0
+                or intent["status"] != "completed"
+                or str(intent.get("remote_txid") or "") != expected_remote_txid
+                or type(intent.get("contract_id")) is not int
+                or int(intent["contract_id"]) < 0):
             conn.commit()
             return False
+        if not _nexus_transfer_has_exact_held_source(conn, intent):
+            conn.commit()
+            return False
+        source_contract_id = int(intent["source_contract_id"])
         source = conn.execute(
-            """SELECT txid, timestamp, amount_usdd, from_address, to_address,
+            """SELECT txid, contract_id, timestamp, amount_usdd, from_address, to_address,
                       owner_from_address, confirmations_credit, status, amount_usdd_units
-               FROM unprocessed_txids WHERE txid = ?""",
-            (intent["source_txid"],),
+               FROM unprocessed_txids WHERE txid = ? AND contract_id = ?""",
+            (intent["source_txid"], source_contract_id),
         ).fetchone()
         if source is None:
             conn.commit()
             return False
-        txid, timestamp, amount, sender, treasury, owner, confirmations, source_status, units = source
-        if (source_status != "refund held for operator review" or
-                int(units or -1) != int(intent["amount_usdd_units"]) or
-                str(treasury or "") != str(intent["from_address"])):
+        (txid, stored_contract_id, timestamp, amount, sender, treasury, owner,
+         confirmations, source_status, units) = source
+        if (stored_contract_id != source_contract_id
+                or source_status != "refund held for operator review"
+                or type(units) is not int
+                or units != int(intent["amount_usdd_units"])
+                or str(treasury or "") != str(intent["from_address"])):
             conn.commit()
             return False
+
+        terminal_tables = ("refunded_txids", "quarantined_txids", "processed_txids")
+        for table in terminal_tables:
+            if conn.execute(
+                f"SELECT 1 FROM {table} WHERE txid = ? AND contract_id = ?",
+                (txid, source_contract_id),
+            ).fetchone():
+                conn.commit()
+                return False
+
         if intent["kind"] == "refund":
             if str(sender or "") != str(intent["to_address"]):
                 conn.commit()
                 return False
             conn.execute(
-                """INSERT OR REPLACE INTO refunded_txids
-                   (txid, timestamp, amount_usdd, from_address, to_address, owner_from_address,
-                    confirmations_credit, status, sig)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (txid, timestamp, amount, sender, treasury, owner, confirmations,
-                 "refund_confirmed_by_operator", expected_remote_txid),
+                """INSERT INTO refunded_txids
+                   (txid, contract_id, timestamp, amount_usdd, from_address, to_address,
+                    owner_from_address, confirmations_credit, status, sig)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (txid, source_contract_id, timestamp, amount, sender, treasury, owner,
+                 confirmations, "refund_confirmed_by_operator", expected_remote_txid),
             )
             action = "finalized_refund"
         elif intent["kind"] == "quarantine":
             conn.execute(
-                """INSERT OR REPLACE INTO quarantined_txids
-                   (txid, timestamp, amount_usdd, from_address, to_address, owner, sig, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (txid, timestamp, amount, sender, treasury, owner, expected_remote_txid,
-                 "quarantine_confirmed_by_operator"),
+                """INSERT INTO quarantined_txids
+                   (txid, contract_id, timestamp, amount_usdd, from_address, to_address,
+                    owner, sig, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (txid, source_contract_id, timestamp, amount, sender, treasury, owner,
+                 expected_remote_txid, "quarantine_confirmed_by_operator"),
             )
             action = "finalized_quarantine"
         else:
             conn.commit()
             return False
-        conn.execute("DELETE FROM unprocessed_txids WHERE txid = ?", (txid,))
+        deleted = conn.execute(
+            "DELETE FROM unprocessed_txids WHERE txid = ? AND contract_id = ?",
+            (txid, source_contract_id),
+        ).rowcount
+        if deleted != 1:
+            raise RuntimeError("exact held Nexus source changed during finalization")
         _record_nexus_transfer_audit_event(
             conn, intent_id=intent_id, action=action, actor=actor, rationale=rationale,
-            evidence=expected_remote_txid,
+            evidence=_nexus_transfer_audit_evidence(
+                intent,
+                remote_txid=expected_remote_txid,
+                remote_contract_id=int(intent["contract_id"]),
+                disposition=intent["kind"],
+            ),
         )
         conn.commit()
         return True
@@ -888,6 +1131,8 @@ def update_nexus_transfer_intent(
         intent = get_nexus_transfer_intent(intent_id, conn=conn)
         if intent is None:
             raise ValueError("Nexus transfer intent does not exist")
+        if int(intent["source_contract_id"]) < 0:
+            raise ValueError("legacy Nexus transfer intent cannot be advanced")
         current_status = str(intent["status"])
         if status not in transitions.get(current_status, set()):
             raise ValueError(
@@ -903,8 +1148,9 @@ def update_nexus_transfer_intent(
                 and supplied_remote_txid != persisted_remote_txid):
             raise ValueError("persisted Nexus remote txid is immutable")
         next_remote_txid = supplied_remote_txid or persisted_remote_txid
-        if isinstance(contract_id, bool) or (contract_id is not None and not isinstance(contract_id, int)):
-            raise ValueError("Nexus transfer contract id must be an integer")
+        if (contract_id is not None
+                and (type(contract_id) is not int or contract_id < 0)):
+            raise ValueError("Nexus transfer contract id must be a nonnegative integer")
         persisted_contract_id = intent.get("contract_id")
         if (persisted_contract_id is not None and contract_id is not None
                 and int(contract_id) != int(persisted_contract_id)):
@@ -943,6 +1189,7 @@ def get_nexus_transfer_intents_by_status(statuses: tuple[str, ...], limit: int =
         rows = conn.execute(
             "SELECT " + ", ".join(_NEXUS_TRANSFER_COLUMNS) +
             f" FROM nexus_transfer_intents WHERE status IN ({marks}) "
+            "AND source_contract_id >= 0 "
             "ORDER BY created_timestamp ASC LIMIT ?",
             tuple(statuses) + (int(limit),),
         ).fetchall()
@@ -1946,6 +2193,271 @@ def clear_waterline_proposals():
     conn.close()
 
 
+def prepare_nexus_payout(
+    *,
+    txid: str,
+    contract_id: int,
+    receival_account: str,
+    amount_usdd_units: int,
+    payout_solana_units: int,
+    payout_fee_nexus_units: int,
+) -> bool:
+    """Atomically freeze payout terms and claim one exact Nexus credit for RPC."""
+    txid = str(txid or "").strip()
+    receival_account = str(receival_account or "").strip()
+    if not txid or not receival_account:
+        raise ValueError("Nexus payout requires a txid and receival account")
+    if type(contract_id) is not int or contract_id < 0:
+        raise ValueError("Nexus payout contract id must be a nonnegative integer")
+    if type(amount_usdd_units) is not int or amount_usdd_units <= 0:
+        raise ValueError("Nexus payout source units must be an exact positive integer")
+    if type(payout_solana_units) is not int or payout_solana_units <= 0:
+        raise ValueError("Nexus payout units must be an exact positive integer")
+    if (type(payout_fee_nexus_units) is not int
+            or payout_fee_nexus_units < 0
+            or payout_fee_nexus_units > amount_usdd_units):
+        raise ValueError("Nexus payout fee must be exact, nonnegative, and no more than source")
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        if _has_nexus_fee_evidence(conn, txid, contract_id):
+            conn.commit()
+            return False
+        if conn.execute(
+            """SELECT 1 FROM nexus_transfer_intents
+               WHERE source_txid = ? AND (source_contract_id = -1 OR source_contract_id = ?)
+               LIMIT 1""",
+            (txid, contract_id),
+        ).fetchone():
+            conn.commit()
+            return False
+        for table in ("processed_txids", "refunded_txids", "quarantined_txids"):
+            if conn.execute(
+                f"SELECT 1 FROM {table} WHERE txid = ? AND contract_id = ?",
+                (txid, contract_id),
+            ).fetchone():
+                conn.commit()
+                return False
+        row = conn.execute(
+            """SELECT status, receival_account, amount_usdd_units,
+                      payout_solana_units, payout_fee_nexus_units
+               FROM unprocessed_txids WHERE txid = ? AND contract_id = ?""",
+            (txid, contract_id),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return False
+        status, stored_destination, stored_source_units, stored_payout, stored_fee = row
+        if (status != "ready for processing"
+                or stored_destination != receival_account
+                or type(stored_source_units) is not int
+                or stored_source_units != amount_usdd_units
+                or stored_payout is not None
+                or stored_fee is not None):
+            conn.commit()
+            return False
+        updated = conn.execute(
+            """UPDATE unprocessed_txids
+               SET payout_solana_units = ?, payout_fee_nexus_units = ?, status = 'sending'
+               WHERE txid = ? AND contract_id = ? AND status = 'ready for processing'
+                     AND payout_solana_units IS NULL AND payout_fee_nexus_units IS NULL""",
+            (payout_solana_units, payout_fee_nexus_units, txid, contract_id),
+        ).rowcount
+        conn.commit()
+        return updated == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def finalize_nexus_credit(
+    *,
+    txid: str,
+    contract_id: int,
+    timestamp: int,
+    amount_usdd: float,
+    amount_usdd_units: int,
+    from_address: str,
+    to_address: str,
+    owner: str,
+    sig: str,
+    status: str,
+    fee_kind: str | None,
+    fee_nexus_units: int,
+) -> bool:
+    """Atomically journal a source fee, archive the exact credit, and remove its queue row."""
+    txid = str(txid or "").strip()
+    from_address = str(from_address or "")
+    to_address = str(to_address or "")
+    owner = str(owner or "")
+    if not txid or not from_address or not to_address:
+        raise ValueError("Nexus credit terminal evidence requires source identity and addresses")
+    if type(contract_id) is not int or contract_id < 0:
+        raise ValueError("Nexus credit contract id must be a nonnegative integer")
+    if type(amount_usdd_units) is not int or amount_usdd_units <= 0:
+        raise ValueError("Nexus credit source units must be an exact positive integer")
+    if (type(fee_nexus_units) is not int
+            or fee_nexus_units < 0
+            or fee_nexus_units > amount_usdd_units):
+        raise ValueError("Nexus credit fee must be exact, nonnegative, and no more than source")
+    if not isinstance(sig, str):
+        raise ValueError("Nexus credit payout signature must be text")
+    if not isinstance(status, str) or not status.strip():
+        raise ValueError("Nexus credit terminal status is required")
+    if fee_nexus_units == 0:
+        if fee_kind is not None:
+            raise ValueError("zero Nexus fee requires fee_kind=None")
+    elif not isinstance(fee_kind, str) or not fee_kind.strip():
+        raise ValueError("positive Nexus fee requires a fee kind")
+    if not sig:
+        if fee_nexus_units != amount_usdd_units or "fee" not in status.lower():
+            raise ValueError("positive-payout Nexus terminal evidence requires a signature")
+
+    terminal_base = (
+        txid, contract_id, timestamp, amount_usdd, amount_usdd_units,
+        from_address, to_address, owner, sig, status,
+    )
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            """SELECT 1 FROM fee_entries
+               WHERE txid = ? AND contract_id = -1 AND amount_usdd_units IS NOT NULL
+               LIMIT 1""",
+            (txid,),
+        ).fetchone():
+            conn.commit()
+            return False
+        if conn.execute(
+            """SELECT 1 FROM nexus_transfer_intents
+               WHERE source_txid = ? AND (source_contract_id = -1 OR source_contract_id = ?)
+               LIMIT 1""",
+            (txid, contract_id),
+        ).fetchone():
+            conn.commit()
+            return False
+        existing_terminal = conn.execute(
+            """SELECT txid, contract_id, timestamp, amount_usdd, amount_usdd_units,
+                      from_address, to_address, owner, sig, status,
+                      payout_solana_units, payout_fee_nexus_units,
+                      payout_receival_account
+               FROM processed_txids WHERE txid = ? AND contract_id = ?""",
+            (txid, contract_id),
+        ).fetchone()
+        source = conn.execute(
+            """SELECT timestamp, amount_usdd, amount_usdd_units, from_address,
+                      to_address, owner_from_address, receival_account,
+                      payout_solana_units, payout_fee_nexus_units, sig
+               FROM unprocessed_txids WHERE txid = ? AND contract_id = ?""",
+            (txid, contract_id),
+        ).fetchone()
+        expected_source = (
+            timestamp, amount_usdd, amount_usdd_units, from_address, to_address, owner,
+        )
+        if source is not None and source[:6] != expected_source:
+            conn.commit()
+            return False
+
+        payout_evidence: tuple[int | None, int | None, str | None]
+        if sig:
+            if source is not None:
+                payout_evidence = (source[7], source[8], source[6])
+            elif existing_terminal is not None:
+                payout_evidence = existing_terminal[10:13]
+            else:
+                conn.commit()
+                return False
+            payout_units, frozen_fee_units, payout_destination = payout_evidence
+            pending_sig = source[9] if source is not None else sig
+            if (pending_sig != sig
+                    or type(payout_units) is not int or payout_units <= 0
+                    or type(frozen_fee_units) is not int or frozen_fee_units < 0
+                    or frozen_fee_units > amount_usdd_units
+                    or frozen_fee_units != fee_nexus_units
+                    or not isinstance(payout_destination, str)
+                    or not payout_destination):
+                conn.commit()
+                return False
+        else:
+            payout_evidence = (None, None, None)
+        terminal = terminal_base + payout_evidence
+
+        fee_rows = conn.execute(
+            """SELECT kind, amount_usdd_units FROM fee_entries
+               WHERE txid = ? AND contract_id = ? AND amount_usdd_units IS NOT NULL""",
+            (txid, contract_id),
+        ).fetchall()
+        expected_fee = ((fee_kind, fee_nexus_units),) if fee_nexus_units > 0 else ()
+        if tuple(fee_rows) != expected_fee and fee_rows:
+            conn.commit()
+            return False
+        if existing_terminal is not None:
+            exact = existing_terminal == terminal and tuple(fee_rows) == expected_fee
+            conn.commit()
+            return exact
+        for table in ("refunded_txids", "quarantined_txids"):
+            if conn.execute(
+                f"SELECT 1 FROM {table} WHERE txid = ? AND contract_id = ?",
+                (txid, contract_id),
+            ).fetchone():
+                conn.commit()
+                return False
+        if fee_nexus_units > 0 and not fee_rows:
+            conn.execute(
+                """INSERT INTO fee_entries
+                   (sig, txid, kind, amount_usdc_units, amount_usdd_units, contract_id, timestamp)
+                   VALUES (NULL, ?, ?, NULL, ?, ?, ?)""",
+                (txid, fee_kind, fee_nexus_units, contract_id, int(time.time())),
+            )
+        conn.execute(
+            """INSERT INTO processed_txids
+               (txid, contract_id, timestamp, amount_usdd, amount_usdd_units,
+                from_address, to_address, owner, sig, status, payout_solana_units,
+                payout_fee_nexus_units, payout_receival_account)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            terminal,
+        )
+        deleted = conn.execute(
+            "DELETE FROM unprocessed_txids WHERE txid = ? AND contract_id = ?",
+            (txid, contract_id),
+        ).rowcount
+        if source is not None and deleted != 1:
+            raise RuntimeError("exact pending Nexus credit changed during finalization")
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_processed_nexus_credit(txid: str, contract_id: int) -> dict | None:
+    """Return complete terminal evidence for one exact nonlegacy Nexus source credit."""
+    if type(contract_id) is not int or contract_id < 0:
+        raise ValueError("Nexus credit contract id must be a nonnegative integer")
+    columns = (
+        "txid", "contract_id", "timestamp", "amount_usdd", "amount_usdd_units",
+        "from_address", "to_address", "owner", "sig", "status",
+        "payout_solana_units", "payout_fee_nexus_units", "payout_receival_account",
+    )
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT " + ", ".join(columns)
+            + " FROM processed_txids WHERE txid = ? AND contract_id = ?",
+            (str(txid or ""), contract_id),
+        ).fetchone()
+        return dict(zip(columns, row)) if row is not None else None
+    finally:
+        conn.close()
+
+
 ## Fee tracking
 
 def add_fee_entry(sig: str | None, txid: str | None, kind: str, amount_usdc_units: int | None = None, amount_usdd_units: int | None = None):
@@ -2170,7 +2682,9 @@ def get_unprocessed_txids(limit: int = 1000) -> List[Tuple]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT txid, contract_id, timestamp, amount_usdd, from_address, to_address, owner_from_address, confirmations_credit, status, receival_account, sig, amount_usdd_units, hold_reason
+        SELECT txid, contract_id, timestamp, amount_usdd, from_address, to_address,
+               owner_from_address, confirmations_credit, status, receival_account, sig,
+               amount_usdd_units, hold_reason, payout_solana_units, payout_fee_nexus_units
         FROM unprocessed_txids
         ORDER BY timestamp ASC
         LIMIT ?
@@ -2322,6 +2836,8 @@ def get_unprocessed_txids_as_dicts(limit: int = 1000) -> list[dict]:
             "sig": t[10] if len(t) > 10 else None,
             "amount_usdd_units": t[11] if len(t) > 11 else None,
             "hold_reason": t[12] if len(t) > 12 else None,
+            "payout_solana_units": t[13] if len(t) > 13 else None,
+            "payout_fee_nexus_units": t[14] if len(t) > 14 else None,
         }
         for t in tuples
     ]
