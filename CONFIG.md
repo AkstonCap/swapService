@@ -1,183 +1,265 @@
-# Configuration Reference (swapService)
+# swapService Configuration Reference
 
-Canonical, human‑readable reference for all environment variables consumed by the service (`config.py`) plus a few operational conventions. For a quick starting template see `.env.example`.
+This reference follows the current code in [`src/config.py`](src/config.py), with runtime-only settings called out separately. `.env.example` is a template; this file defines semantics and validation.
 
-Legend:
-- Req: Required at startup (service raises if missing)
-- Type: str | int | bool | decimal (token units) | pubkey
-- Default: Value assumed if unset (blank = none / must supply)
+## Runtime scope
 
-## Core Required
+One process configures exactly one pair:
 
-| Var | Req | Type | Default | Purpose / Notes |
-|-----|-----|------|---------|-----------------|
-| SOLANA_RPC_URL | Y | str |  | HTTPS RPC endpoint (rate limit mindful). |
-| VAULT_KEYPAIR | Y | path |  | JSON keypair file for Solana vault signer. |
-| VAULT_USDC_ACCOUNT | Y | pubkey |  | SPL USDC token account (ATA) holding liquidity. |
-| USDC_MINT | Y | pubkey |  | USDC mint (mainnet or devnet). |
-| NEXUS_PIN | Y | str |  | PIN authorizing Nexus profile operations. Never log it; in production it is sent only in an HTTPS POST body, never a child process argument. |
-| NEXUS_USDD_TREASURY_ACCOUNT | Y | str |  | USDD treasury account receiving user USDD credits & paying refunds. |
-| SOL_MAIN_ACCOUNT | Y | pubkey |  | Base SOL account (used in some balance / backing logic). |
+- one Solana mint/account pair using the classic SPL Token Program;
+- one Nexus token/treasury pair identified by token name and, for production identity checks, immutable register address.
 
-## Bridged Token Pair
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| SOLANA_TOKEN_MINT | pubkey |  | Mint of the Solana-side token. Alias: `USDC_MINT`. |
-| SOLANA_VAULT_ACCOUNT | pubkey |  | Vault SPL token account (ATA) for that mint. Alias: `VAULT_USDC_ACCOUNT`. |
-| SOLANA_TOKEN_SYMBOL | str | USDC | Display ticker; published in the registration record. |
-| SOLANA_TOKEN_DECIMALS | int | 6 | Alias: `USDC_DECIMALS`. |
-| NEXUS_TOKEN_NAME | str | USDD | Display name passed to `finance/debit/token from=<token>`. |
-| NEXUS_TOKEN_REGISTER_ADDRESS | str |  | Immutable address returned by trusted `finance/get/token`; required for terminal DEBIT read-back. Absent/mismatched values hold rather than finalize. |
-| NEXUS_TOKEN_DECIMALS | int | 6 | Alias: `USDD_DECIMALS`. |
-| DEPOSIT_MEMO_PREFIX | str | `nexus:` | Memo prefix depositors use to name their Nexus destination. |
-| SERVICE_PROVIDER | str |  | Operator name/domain, published on-chain. |
-| SERVICE_VERSION | str | 1.0.0 | Published on-chain. |
-| SERVICE_CONTACT | str |  | URL or contact handle, published on-chain. |
+Gross conversion is 1:1 in whole token units before fees. `config.rescale_units()` converts base units when token decimals differ. `config.SWAP_PAIR` is an immutable startup object containing the selected identities, custody accounts, precisions, fee policy and memo prefix.
 
-## Decimals
-| Var | Req | Type | Default | Notes |
-|-----|-----|------|---------|-------|
-| USDC_DECIMALS | N | int | 6 | Override only if non‑standard wrapped mint. |
-| USDD_DECIMALS | N | int | 6 | Nexus USDD decimals. |
+This does not implement native SOL, Token-2022, arbitrary token programs, general-chain routing, automatic discovery or simultaneous pairs. Provider-v2 and multi-pair/general-chain support remain planned; see [ASSET_STANDARD.md](ASSET_STANDARD.md#provider-swapservice-asset-standard-v2-planned).
 
-## Nexus Accounts (Optional / Conditional)
-| Var | Req | Type | Default | Notes |
-|-----|-----|------|---------|-------|
-| NEXUS_CLI_PATH | N | path | ./nexus | CLI fallback used only outside production; executable path when no API URL is configured. |
-| NEXUS_API_URL | Production: Y | https URL |  | Nexus HTTPS API base URL, e.g. `https://127.0.0.1:8443`. Must not embed credentials, a query, or a fragment. |
-| NEXUS_API_USER | Production: Y | str |  | HTTP Basic-auth user configured as `apiuser` in `nexus.conf`. |
-| NEXUS_API_PASSWORD | Production: Y | secret |  | HTTP Basic-auth password configured as `apipassword`; never log it. |
-| NEXUS_MULTIUSER | N | bool | false | Set true only if `nexus.conf` has `multiuser=1`. Controls whether `session=<id>` is included in the HTTPS POST body for session-scoped API calls. |
-| NEXUS_SESSION | N | str |  | Session id from `sessions/create/local`. **Required when NEXUS_MULTIUSER=true** — every finance/*, assets/*, market/*, supply/* call needs it. Never sent in single-user mode (the API rejects it). Credential: redacted from logs and alerts; production sends it only in the HTTPS request body. |
-| NEXUS_USDD_LOCAL_ACCOUNT | N | str |  | Receives micro USDD credits / congestion fees. |
-| NEXUS_USDD_QUARANTINE_ACCOUNT | N | str |  | Destination for quarantined failed USDD refunds. If unset, quarantined USDD stays in the treasury and keeps counting toward the backing ratio. |
-| NEXUS_USDD_FEES_ACCOUNT | N | str |  | If separating fee accrual from local account. |
-| NEXUS_TOKEN_NAME | N | str | USDD | Sanity validation of token name on mint/credit path. |
-| NEXUS_RPC_HOST | N | str | http://127.0.0.1:8399 | Node / gateway host if used. |
+## Required startup keys
 
-## Poll Intervals & State
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| POLL_INTERVAL | int | 10 | Legacy/global fallback if chain‑specific not set. |
-| SOLANA_POLL_INTERVAL | int | POLL_INTERVAL | Poll cadence (s) for Solana path. Faster (~12–20s) recommended. |
-| NEXUS_POLL_INTERVAL | int | POLL_INTERVAL | Poll cadence (s) for Nexus path. Match/block (~50–60s) to reduce empties. |
-| STATE_DB_PATH | str | swap_service.db | SQLite database path for all state persistence. |
-| FEES_STATE_FILE | str | fees_state.json | Legacy USDC fee accumulator file (fees.py). |
+New configurations should use the canonical spelling in the first column.
 
-> **Note:** Prior JSONL file config vars (`PROCESSED_SIG_FILE`, `UNPROCESSED_SIGS_FILE`, etc.) are deprecated. All state is now stored in the SQLite database at `STATE_DB_PATH`. Fee tracking uses both `fee_entries` table and optional `FEES_STATE_FILE`.
+| Canonical key | Legacy alias | Type | Required | Meaning |
+|---|---|---:|---:|---|
+| `SOLANA_RPC_URL` | — | URL | yes | Solana RPC endpoint. |
+| `VAULT_KEYPAIR` | — | path | yes | JSON keypair for the Solana vault owner/signer. |
+| `SOLANA_VAULT_ACCOUNT` | `VAULT_USDC_ACCOUNT` | pubkey | yes | Classic SPL token account holding the configured Solana token. |
+| `SOLANA_TOKEN_MINT` | `USDC_MINT` | pubkey | yes | Configured classic SPL mint. |
+| `SOL_MAIN_ACCOUNT` | — | pubkey | yes | Solana vault owner/base account. |
+| `NEXUS_PIN` | — | secret | yes | Nexus profile PIN. |
+| `NEXUS_TREASURY_ACCOUNT` | `NEXUS_USDD_TREASURY_ACCOUNT` | string | yes | Treasury account for the configured Nexus token. |
 
-## Timeouts / Budgets
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| SOLANA_DEPOSIT_COMMITMENT | string | finalized | Commitment for ingesting deposits and settling our own payouts. `confirmed` is not rooted and can be reorged after USDD is minted against it (permanently unbacked supply). Relax only deliberately. |
-| SOLANA_FINALIZED_ABOVE_UNITS | int | 0 | If the commitment above is relaxed, deposits ≥ this many USDC base units still require finalization. 0 disables the carve-out. |
-| SOLANA_RPC_TIMEOUT_SEC | int | 8 | Per RPC HTTP call. |
-| SOLANA_TX_FETCH_TIMEOUT_SEC | int | 12 | Individual tx signature fetch. |
-| SOLANA_POLL_TIME_BUDGET_SEC | int | 15 | Soft cap per Solana loop. |
-| SOLANA_MAX_TX_FETCH_PER_POLL | int | 120 | Upper bound; tune with spam. |
-| NEXUS_CLI_TIMEOUT_SEC | int | 20 | CLI process timeout. |
-| NEXUS_POLL_TIME_BUDGET_SEC | int | 15 | Soft cap per Nexus loop. |
-| NEXUS_TRANSFER_MIN_CONFIRMATIONS | int | 10 | Shared minimum for direct Nexus transaction read-back before mint or transfer evidence can become terminal. **Must be > 0.** Current startup code does not enforce that bound, so zero/negative values are a release blocker and forbidden in production. Validate the production value against target-node finality semantics. |
-| METRICS_BUDGET_SEC | int | 5 | Budget for metrics gathering. |
-| METRICS_INTERVAL_SEC | int | 30 | Emit frequency. |
-| REFUND_TIMEOUT_SEC | int | 3600 | Seconds to wait for mapping (USDD→USDC) before refund path. |
-| STALE_DEPOSIT_QUARANTINE_SEC | int | 86400 | Max age before deposit forced to refund/quarantine. |
-| SOLANA_CONFIRM_TIMEOUT_SEC | int | 600 | Wait for outbound USDC confirmation. |
-| STALE_ROW_SEC | int | 86400 | Age trigger for stale state record handling. |
-| HEARTBEAT_MIN_INTERVAL_SEC | int | max(10,POLL) | Prevent spam updates (>=10s). |
-| HEARTBEAT_WATERLINE_SAFETY_SEC | int | 120 | Safety margin subtracted when filtering old items. |
-| ACTION_RETRY_COOLDOWN_SEC | int | 300 | Minimum seconds between retry attempts of the same action (now enforced). |
+“Required” here means import of `src.config` fails when no accepted spelling has a non-empty value. Solana pubkeys are parsed during import. Production adds the controls in [Production admission](#production-admission).
 
-## Fees & Thresholds
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| FLAT_FEE_USDC | decimal | **0.5** | Fixed fee on the **Nexus→Solana** path, represented in Solana output base units. Must be exactly representable at both configured token precisions. |
-| FLAT_FEE_USDD | decimal | 0.1 | Fixed fee on the **Solana→Nexus** path, represented in Nexus output base units; the same token value is converted independently to Solana base units for refunds. Must be exactly representable at both configured precisions. |
-| DYNAMIC_FEE_BPS | int | 10 | Applied to the input amount in each direction, in that input token’s base-unit scale (0 = disable). |
-| MIN_DEPOSIT_USDC | decimal | 0.2 | Minimum Solana-side input (default = 2x the Solana-equivalent `FLAT_FEE_USDD`); values below the floor are raised at startup and logged. |
-| MIN_CREDIT_USDD | decimal | 1.0 | Minimum Nexus-side input (default = 2x the Nexus-equivalent `FLAT_FEE_USDC`); values below the floor are raised at startup and logged. Credits below it are recorded and booked as fees. |
-| DUST_CREDIT_USDD | decimal | 0.01 | Nexus-side anti-DoS floor (default = one tenth of the Nexus-equivalent `FLAT_FEE_USDC`). Credits below it are ignored; credits up to `MIN_CREDIT_USDD` remain traceable. |
-| MICRO_DEPOSIT_FEE_PCT | int | 100 | Percent of micro deposit retained (100 = all). |
-| MICRO_CREDIT_FEE_PCT | int | 100 | Percent of micro credit retained. |
-| FEE_NEXUS_DISPOSITION | decimal | 0 | Canonical fee in decimal Nexus token units for an explicitly authorized durable refund/quarantine disposition. Alias: `NEXUS_CONGESTION_FEE_USDD`; conflicting values fail startup. **Currently not applied automatically:** automatic Nexus dispositions remain disabled pending target-node and fault-injection acceptance. |
+## Canonical keys and legacy aliases
 
-## Production Admission, Exposure Caps & Alerting
+`_compat_env()` accepts either spelling below. If both are explicitly non-empty, their strings must be identical; otherwise startup raises instead of choosing precedence.
 
-`SWAP_PRODUCTION_MODE` defaults to `false` for local development and test networks. Its accepted
-values are `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive; surrounding
-whitespace is accepted). Any other present value fails startup rather than silently disabling the
-production gate. When it is `true`, startup refuses to open the state database or start polling
-unless both single-swap caps, the daily Solana payout cap, one alert route, and both chain-side
-quarantine destinations are configured with non-zero/non-empty values. This is a configuration
-admission check, not proof that the alert route is deliverable; test the configured channel as part
-of the live acceptance matrix.
+| Canonical key | Legacy alias | Default | Purpose |
+|---|---|---:|---|
+| `SOLANA_VAULT_ACCOUNT` | `VAULT_USDC_ACCOUNT` | required | Solana custody token account. |
+| `SOLANA_TOKEN_MINT` | `USDC_MINT` | required | Solana mint identity. |
+| `SOLANA_TOKEN_DECIMALS` | `USDC_DECIMALS` | `6` | Solana token precision. |
+| `NEXUS_TOKEN_DECIMALS` | `USDD_DECIMALS` | `6` | Nexus token precision. |
+| `NEXUS_TREASURY_ACCOUNT` | `NEXUS_USDD_TREASURY_ACCOUNT` | required | Nexus treasury custody account. |
+| `SOLANA_QUARANTINE_ACCOUNT` | `USDC_QUARANTINE_ACCOUNT` | empty | Self-owned Solana quarantine token account. |
+| `SOLANA_FEE_ACCOUNT` | `USDC_FEES_ACCOUNT` | empty | Optional Solana fee account; empty leaves fees in vault. |
+| `NEXUS_QUARANTINE_ACCOUNT` | `NEXUS_USDD_QUARANTINE_ACCOUNT` | empty | Nexus destination for an explicitly authorized disposition. |
+| `NEXUS_FEE_ACCOUNT` | `NEXUS_USDD_FEES_ACCOUNT` | empty | Optional Nexus fee-account setting. |
+| `FEE_FLAT_TO_SOLANA` | `FLAT_FEE_USDC` | `0.5` | Fee deducted from Nexus→Solana output, in Solana token units. |
+| `FEE_FLAT_TO_NEXUS` | `FLAT_FEE_USDD` | `0.1` | Fee deducted from Solana→Nexus output, in Nexus token units. |
+| `FEE_REFUND_SOLANA` | `FLAT_FEE_USDD` | value of `FEE_FLAT_TO_NEXUS` | Fee deducted from an automated Solana-side refund. |
+| `FEE_NEXUS_DISPOSITION` | `NEXUS_CONGESTION_FEE_USDD` | `0` | Fee term for a separately authorized Nexus disposition; not applied automatically. |
+| `FEE_BPS` | `DYNAMIC_FEE_BPS` | `10` | Proportional swap fee in basis points. |
 
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| SWAP_PRODUCTION_MODE | bool | false | Enables mandatory production startup controls. |
-| MAX_SWAP_USDC | decimal | 0 | Largest single USDC→USDD deposit accepted; larger is refunded. 0 disables. Required > 0 in production mode. |
-| MAX_SWAP_USDD | decimal | 0 | Largest single USDD→USDC credit accepted; larger is refunded. 0 disables. Required > 0 in production mode. |
-| DAILY_PAYOUT_CAP_USDC | decimal | 0 | Rolling 24h ceiling on total outbound USDC, enforced at the single send choke point. 0 disables. Required > 0 in production mode. |
-| ALERT_WEBHOOK_URL | str |  | Alerts POSTed here as JSON. Required in production mode unless `ALERT_COMMAND` is set. |
-| ALERT_COMMAND | str |  | Executable receiving the same JSON on stdin. Required in production mode unless `ALERT_WEBHOOK_URL` is set. |
-| ALERT_MIN_INTERVAL_SEC | int | 300 | Per-event dedupe window. |
-| USDC_QUARANTINE_ACCOUNT | pubkey |  | Self-owned Solana SPL token account for failed USDC refunds. Required in production mode. |
-| NEXUS_USDD_QUARANTINE_ACCOUNT | str |  | Self-owned Nexus token account for the separately authorized durable-intent quarantine disposition. Required in production mode. |
+The old `FLAT_FEE_USDD` feeds two compatibility surfaces: Nexus output fee and Solana refund fee. To configure those independently, set `FEE_FLAT_TO_NEXUS` and `FEE_REFUND_SOLANA` and omit `FLAT_FEE_USDD`.
 
-## Operator Dashboard (read-only UI)
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| DASHBOARD_HOST | str | 127.0.0.1 | Bind address. Anything non-loopback requires DASHBOARD_TOKEN; the dashboard refuses to start otherwise. |
-| DASHBOARD_PORT | int | 8787 | |
-| DASHBOARD_TOKEN | str |  | Bearer token. Required for non-loopback binds; recommended always. Supply only in `Authorization: Bearer <token>` (normally injected by a TLS reverse proxy); query-string tokens are rejected. |
+The following threshold/timeout pairs use first-non-empty fallback rather than `_compat_env()`. Canonical wins if both are set; unlike the table above, a disagreement is **not** rejected:
 
-## Micro / Advanced Handling Flags
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| SKIP_OWNER_LOOKUP_FOR_MICRO_USDD | bool | true | Avoid expensive owner queries for tiny credits. |
-| MICRO_CREDIT_COUNT_AGAINST_LIMIT | bool | false | If true micro credits consume per-loop quota. |
+| Canonical key | Legacy fallback | Default |
+|---|---|---|
+| `MIN_DEPOSIT_SOLANA_TOKEN` | `MIN_DEPOSIT_USDC` | derived |
+| `MIN_CREDIT_NEXUS_TOKEN` | `MIN_CREDIT_USDD` | derived |
+| `DUST_CREDIT_NEXUS_TOKEN` | `DUST_CREDIT_USDD` | derived |
+| `SOLANA_CONFIRM_TIMEOUT_SEC` | `USDC_CONFIRM_TIMEOUT_SEC` | `600` |
+| `UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC` | `UNPROCESSED_PROCESS_BUDGET_SEC` | `30` |
 
-## Heartbeat & Waterlines
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| HEARTBEAT_ENABLED | bool | true | Enable updating heartbeat asset field. |
-| NEXUS_HEARTBEAT_ASSET_ADDRESS | str |  | Asset address to update. |
-| NEXUS_HEARTBEAT_ASSET_NAME | str |  | (Optional) Name; may be used by tooling. |
-| HEARTBEAT_WATERLINE_ENABLED | bool | true | Enforce skipping items older than waterline. |
-| HEARTBEAT_WATERLINE_SOLANA_FIELD | str | last_safe_timestamp_solana | Field name on asset. |
-| HEARTBEAT_WATERLINE_NEXUS_FIELD | str | last_safe_timestamp_nexus | Field name on asset. MUST match the asset (format=basic locks fields at creation); a mismatch makes every heartbeat update fail atomically. |
+Prefer only the canonical spelling in new files.
 
-## Backing Safety Monitoring
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| BACKING_DEFICIT_BPS_ALERT | int | 10 | Alert threshold for backing deficit. |
-| BACKING_DEFICIT_PAUSE_PCT | int | 90 | Pause new swaps if backing ratio < this. |
-| BACKING_RECONCILE_INTERVAL_SEC | int | 3600 | Minimum spacing between read-only backing/surplus checks. |
-| BACKING_SURPLUS_MINT_THRESHOLD_USDC | decimal | 20 | Minimum vault balance for a read-only backing-surplus operator alert. It does not authorize a mint. |
+## Pair identity and custody
 
-## Quarantine & Accounts
-| Var | Type | Default | Notes |
-|-----|------|---------|-------|
-| USDC_QUARANTINE_ACCOUNT | pubkey |  | Holds USDC from failed refund attempts. Required in production mode; repeated above with other admission controls. |
-| NEXUS_USDD_QUARANTINE_ACCOUNT | str |  | Holds Nexus-side credits for a separately authorized durable-intent quarantine disposition. Required in production mode; repeated above with other admission controls. |
+| Key | Type | Default | Notes |
+|---|---:|---:|---|
+| `SOLANA_TOKEN_SYMBOL` | string | `USDC` | Display metadata only; mint identity controls money paths. The default is historical, not universal support branding. |
+| `SOLANA_TOKEN_DECIMALS` | int | `6` | Precision used for Solana base-unit parsing and formatting. |
+| `NEXUS_TOKEN_NAME` | string | `USDD` | Nexus token name/symbol passed to token debit operations. The default is historical. |
+| `NEXUS_TOKEN_REGISTER_ADDRESS` | string | empty | Immutable Nexus token register identity used for debit evidence and account validation; mandatory in production. |
+| `NEXUS_TOKEN_DECIMALS` | int | `6` | Precision used for Nexus base-unit parsing and formatting. |
+| `DEPOSIT_MEMO_PREFIX` | string | `nexus:` | Prefix on Solana deposits before the Nexus destination. |
+| `SOLANA_QUARANTINE_ACCOUNT` | pubkey string | empty | Must be a self-owned classic SPL account for the configured mint. Required in production. |
+| `SOLANA_FEE_ACCOUNT` | pubkey string | empty | Optional configured-mint fee account. |
+| `NEXUS_QUARANTINE_ACCOUNT` | string | empty | Required in production, but movement requires the separate operator-intent workflow. |
+| `NEXUS_FEE_ACCOUNT` | string | empty | Optional Nexus fee-account setting. Automatic surplus mint is disabled. |
+| `NEXUS_USDD_LOCAL_ACCOUNT` | string | empty | Literal legacy-named compatibility setting used by Nexus local-balance helpers; no generic alias exists yet. It does not enable automatic refunds. |
 
-## Operational Philosophy
-- All monetary thresholds are enforced before expensive lookups (DoS mitigation).
-- Idempotency uses on‑chain memos (Solana) plus processed sets; Nexus path uses txid + owner + asset mapping.
-- Micro traffic is downgraded: immediate fee capture, optional owner lookup skip, aggregated reporting.
+### `SWAP_PAIR` mapping
 
-## Adding New Variables
-1. Add to `config.py` with sane default.  
-2. Document here with description + default.  
-3. Update `.env.example`.  
-4. (If sensitive) do NOT add a real value—leave placeholder.  
+The immutable object is assembled as follows:
 
-## Minimal Required Set (Barebones)
-At a minimum your `.env` must define: `SOLANA_RPC_URL`, `VAULT_KEYPAIR`, `VAULT_USDC_ACCOUNT`, `USDC_MINT`, `NEXUS_PIN`, `NEXUS_USDD_TREASURY_ACCOUNT`, `SOL_MAIN_ACCOUNT`.
+- `SWAP_PAIR.solana`: mint, display symbol, decimals, vault, quarantine and fee account;
+- `SWAP_PAIR.nexus`: immutable register address, token name/symbol, decimals, treasury, quarantine and fee account;
+- `SWAP_PAIR.fees`: destination flat fees, Solana refund fee, Nexus disposition fee and basis points;
+- `SWAP_PAIR.deposit_memo_prefix`: configured memo prefix.
 
-## Validation Behavior
-`config.py` raises on startup if any required var is missing; optional vars fall back to defaults above. Boolean parsing: values in ("1","true","yes","on") are treated as True case‑insensitively.
+Legacy Python attributes and persisted database names remain for compatibility. They do not change the configured values.
 
----
-See [docs/SECURITY.md](docs/SECURITY.md) for secure handling recommendations (permissions,
-rotation, and secrets hygiene).
+## Fees, minimums and limits
+
+All decimal settings below are whole-token values. They are converted to integer base units during configuration. A value not exactly representable at the relevant configured precision raises `ValueError`.
+
+| Key | Default | Unit/domain | Runtime behavior |
+|---|---:|---|---|
+| `FEE_FLAT_TO_NEXUS` | `0.1` | Nexus output token | Deducted from Solana→Nexus output. |
+| `FEE_FLAT_TO_SOLANA` | `0.5` | Solana output token | Deducted from Nexus→Solana output. |
+| `FEE_REFUND_SOLANA` | Nexus-output flat fee value | Solana token | Deducted from automated Solana deposit refunds/quarantine moves. |
+| `FEE_NEXUS_DISPOSITION` | `0` | Nexus token | Stored in canonical fee policy; no automatic Nexus refund/quarantine path applies it. |
+| `FEE_BPS` | `10` | basis points | Applied to successful swaps; valid range is `0..4999`. |
+| `MIN_DEPOSIT_SOLANA_TOKEN` | derived | Solana input token | At least twice the Solana-scale equivalent of `FEE_FLAT_TO_NEXUS`; smaller configured values are raised. |
+| `MIN_CREDIT_NEXUS_TOKEN` | derived | Nexus input token | At least twice the Nexus-scale equivalent of `FEE_FLAT_TO_SOLANA`; smaller configured values are raised. |
+| `DUST_CREDIT_NEXUS_TOKEN` | derived | Nexus input token | Default is max(one Nexus base unit, one tenth of the Nexus-scale Solana-output flat fee). Credits below it are ignored; credits below the minimum but at/above dust are durably booked as fees. |
+| `MAX_SWAP_USDC` | `0` | Solana token | Literal legacy-named active key; `0` disables outside production. Oversized Solana deposits follow the Solana refund path. |
+| `MAX_SWAP_USDD` | `0` | Nexus token | Literal legacy-named active key; `0` disables outside production. Oversized Nexus credits are held for operator disposition, not automatically refunded. |
+| `DAILY_PAYOUT_CAP_USDC` | `0` | Solana token | Legacy-named rolling 24-hour check in `send_solana_token()` (refund/quarantine paths). **The main Nexus→Solana payout helper bypasses this check.** `0` disables outside production; a positive production value does not close the bypass. |
+
+There are currently no generic environment aliases for the three cap keys; preserve their literal spelling until code adds and validates a migration path.
+
+`MICRO_DEPOSIT_FEE_PCT` and `MICRO_CREDIT_FEE_PCT` are parsed with default `100`, but current processing does not consume them as configurable percentages. Do not publish a non-100 policy based on those variables. `MAX_DEPOSITS_PER_LOOP` is also parsed (default `100`) but the current Solana poll path uses explicit processing bounds instead; do not rely on it as an enforced tuning knob.
+
+## Nexus transport and identity
+
+| Key | Default | Notes |
+|---|---:|---|
+| `NEXUS_CLI_PATH` | `./nexus` | Local/development compatibility transport when no API URL is configured. |
+| `NEXUS_API_URL` | empty | When set, operations use HTTPS POST. Production requires HTTPS with hostname and no userinfo, query or fragment. |
+| `NEXUS_API_USER` | empty | HTTP Basic-auth user; required in production. |
+| `NEXUS_API_PASSWORD` | empty | HTTP Basic-auth password; required in production. |
+| `NEXUS_MULTIUSER` | `false` | If true, session-scoped operations include `NEXUS_SESSION`. |
+| `NEXUS_SESSION` | empty | Required in production when multiuser mode is true; deliberately omitted in single-user mode. |
+| `NEXUS_CLI_TIMEOUT_SEC` | `20` | Nexus operation timeout. |
+| `NEXUS_TRANSFER_MIN_CONFIRMATIONS` | `10` | Must be a positive integer; zero, negative and non-integer values fail configuration. |
+| `NEXUS_RPC_HOST` | `http://127.0.0.1:8399` | Parsed compatibility setting; current main transport is selected by `NEXUS_API_URL` or `NEXUS_CLI_PATH`. |
+
+The operator-intent CLI in [`nexus_transfer_operator.py`](nexus_transfer_operator.py) is separate from the service loop. Automatic Nexus refund/quarantine debits remain disabled. A timeout, nonzero result or unparseable execution response is outcome-unknown and must not be blindly retried.
+
+## Polling, timeouts and state
+
+| Key | Default | Notes |
+|---|---:|---|
+| `POLL_INTERVAL` | `10` | Legacy/global seconds fallback. |
+| `SOLANA_POLL_INTERVAL` | `POLL_INTERVAL` | Solana loop cadence. |
+| `NEXUS_POLL_INTERVAL` | `POLL_INTERVAL` | Nexus loop cadence. |
+| `SOLANA_RPC_TIMEOUT_SEC` | `8` | Solana RPC timeout. |
+| `SOLANA_TX_FETCH_TIMEOUT_SEC` | `12` | Individual transaction fetch timeout. |
+| `SOLANA_POLL_TIME_BUDGET_SEC` | `15` | Solana watchdog join budget. Over-budget work is not killed; its next run is skipped until completion. |
+| `NEXUS_POLL_TIME_BUDGET_SEC` | `15` | Nexus enumeration watchdog join budget. |
+| `UNPROCESSED_TXIDS_PROCESS_BUDGET_SEC` | `30` | Nexus queued-processing watchdog join budget. |
+| `SOLANA_MAX_TX_FETCH_PER_POLL` | `120` | Core Solana transaction-fetch bound. |
+| `MAX_CREDITS_PER_LOOP` | `100` | Checked between Nexus transactions; sibling CREDIT contracts within one transaction can exceed the value. This is not a strict per-contract ceiling. |
+| `MAX_ACTION_ATTEMPTS` | `3` | Persistent action retry budget. Nexus transfer intents still prohibit blind debit retry. |
+| `ACTION_RETRY_COOLDOWN_SEC` | `300` | Minimum retry spacing. |
+| `REFUND_TIMEOUT_SEC` | `3600` | Mapping wait before Nexus credit moves to refund hold/review. It does not trigger an automatic Nexus debit. |
+| `STALE_DEPOSIT_QUARANTINE_SEC` | `86400` | Age before eligible stale Solana rows are marked for quarantine handling. |
+| `SOLANA_CONFIRM_TIMEOUT_SEC` | `600` | Outbound Solana confirmation timeout. |
+| `STALE_ROW_SEC` | `86400` | General stale-row age threshold. |
+| `METRICS_BUDGET_SEC` | `5` | Parsed setting; the current main metrics block uses explicit per-call timeouts rather than this value. |
+| `METRICS_INTERVAL_SEC` | `30` | Metrics emission cadence setting. |
+| `STATE_DB_PATH` | `swap_service.db` | Authoritative SQLite database; read directly by `src/state_db.py`. |
+| `FEES_STATE_FILE` | `fees_state.json` | Legacy JSON fee accumulator. SQLite fee entries are authoritative on drift. |
+
+`HELIUS_RPC_URL` and `HELIUS_API_KEY` are read directly by `src/solana_client.py`. Full URL wins; otherwise the key is used to construct the Helius endpoint. If neither is set, core RPC is used. `POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES` and `FEE_EVENTS_FILE` appear as Python `getattr()` compatibility hooks but are not loaded from environment by `src/config.py`; documenting them as `.env` options would be incorrect.
+
+### Solana finality
+
+| Key | Default | Notes |
+|---|---:|---|
+| `SOLANA_DEPOSIT_COMMITMENT` | `finalized` | Used for deposit admission and outbound settlement. `confirmed` is not rooted and can be reorged. |
+| `SOLANA_FINALIZED_ABOVE_UNITS` | `0` | Raw Solana base-unit threshold that always requires finalization if the general commitment is relaxed. `0` disables this carve-out. |
+
+## Heartbeat and recovery
+
+| Key | Default | Notes |
+|---|---:|---|
+| `HEARTBEAT_ENABLED` | `true` | Consulted by service-record publication and heartbeat validation. Main startup recovery and polling still depend on the name-addressed asset when false. |
+| `NEXUS_HEARTBEAT_ASSET_NAME` | empty | Current live lookup identity. In practice required for complete startup recovery. |
+| `NEXUS_HEARTBEAT_ASSET_ADDRESS` | empty | Recorded configuration only; current runtime does not use it to select the asset. Address-based provider-v2 is planned. |
+| `HEARTBEAT_MIN_INTERVAL_SEC` | `max(10, POLL_INTERVAL)` | Parsed and clamped to at least 10 seconds; current live update functions do not consult it. |
+| `HEARTBEAT_WATERLINE_ENABLED` | `true` | Controls Nexus live-poller cutoff use. Startup recovery still requires both waterlines. |
+| `HEARTBEAT_WATERLINE_SOLANA_FIELD` | `last_safe_timestamp_solana` | Top-level field name on the current v1 asset. |
+| `HEARTBEAT_WATERLINE_NEXUS_FIELD` | `last_safe_timestamp_nexus` | Top-level field name on the current v1 asset. |
+| `HEARTBEAT_WATERLINE_SAFETY_SEC` | `120` | Safety margin used when advancing/filtering checkpoints. |
+
+The two field names must be non-empty and distinct at runtime and must already exist on the `format=basic` asset. Values parse as non-negative integers, but **startup admission requires both to be strictly positive**. Missing/zero checkpoints or incomplete chain enumeration makes recovery incomplete and the entrypoint exits nonzero. Do not initialize to “now” to bypass custody history.
+
+## Backing and alerting
+
+| Key | Default | Notes |
+|---|---:|---|
+| `BACKING_DEFICIT_BPS_ALERT` | `10` | Deficit alert threshold. |
+| `BACKING_DEFICIT_PAUSE_PCT` | `90` | New-exposure pause floor. Existing refund/quarantine/confirmation work continues. |
+| `BACKING_RECONCILE_INTERVAL_SEC` | `3600` | Minimum spacing for read-only backing/surplus checks. |
+| `BACKING_SURPLUS_MINT_THRESHOLD_USDC` | `20` | Literal legacy-named active setting in Solana token units. Surplus at/above this threshold is alert-only; automatic mint/rebalance is disabled. |
+| `ALERT_WEBHOOK_URL` | empty | JSON webhook route. |
+| `ALERT_COMMAND` | empty | Executable receiving alert JSON on stdin. |
+| `ALERT_MIN_INTERVAL_SEC` | `300` | Per-event deduplication interval. |
+
+An unavailable, malformed, incomplete or discrepant balance reconciliation latches new exposure paused until a later explicitly healthy result.
+
+## Production admission
+
+`SWAP_PRODUCTION_MODE` defaults to `false`. It is the only boolean parsed strictly: accepted values are `1/true/yes/on` and `0/false/no/off`, case-insensitively with surrounding whitespace ignored. Any other present value raises.
+
+When true, startup refuses before polling unless all of these are present:
+
+- `MAX_SWAP_USDC > 0`;
+- `MAX_SWAP_USDD > 0`;
+- `DAILY_PAYOUT_CAP_USDC > 0`;
+- `SOLANA_QUARANTINE_ACCOUNT`;
+- `NEXUS_QUARANTINE_ACCOUNT`;
+- `NEXUS_TOKEN_REGISTER_ADDRESS`;
+- either `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`;
+- valid `NEXUS_API_URL`, plus `NEXUS_API_USER` and `NEXUS_API_PASSWORD`;
+- `NEXUS_SESSION` when `NEXUS_MULTIUSER=true`.
+
+This validates configuration presence, not endpoint reachability or alert delivery. Live operation remains gated on the target-node and both-chain acceptance work tracked in [docs/EVALUATION.md](docs/EVALUATION.md).
+
+Other booleans (`NEXUS_MULTIUSER`, `HEARTBEAT_ENABLED`, `HEARTBEAT_WATERLINE_ENABLED`, `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`) use permissive parsing: only `1/true/yes/on` means true; any other value becomes false. Avoid typos even where code does not reject them.
+
+## Service identity and dashboard
+
+| Key | Default | Notes |
+|---|---:|---|
+| `SERVICE_PROVIDER` | empty | Published operator identity; current record displays `unnamed-operator` when empty. |
+| `SERVICE_VERSION` | `1.0.0` | Published v1 service version. |
+| `SERVICE_CONTACT` | empty | Published contact; current record substitutes `-` when empty. |
+| `DASHBOARD_HOST` | `127.0.0.1` | Read directly by dashboard runtime. Non-loopback requires a token. |
+| `DASHBOARD_PORT` | `8787` | Dashboard listen port. |
+| `DASHBOARD_TOKEN` | empty | Bearer token; required for non-loopback binding. Send in `Authorization`, not a query string. |
+| `SWAP_LOCK_PATH` | `<STATE_DB_PATH>.lock` | Read directly by `src/main.py`; singleton process lock path. |
+
+The dashboard is read-only and can start without chain credentials. It uses configured symbols/decimals for display; legacy database columns remain unchanged.
+
+## Literal legacy interfaces
+
+These names must be written literally when interacting with current compatibility surfaces:
+
+- active env keys with no generic alias: `MAX_SWAP_USDC`, `MAX_SWAP_USDD`, `DAILY_PAYOUT_CAP_USDC`, `BACKING_SURPLUS_MINT_THRESHOLD_USDC`, `NEXUS_USDD_LOCAL_ACCOUNT`;
+- parsed legacy settings `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD` and `MICRO_CREDIT_COUNT_AGAINST_LIMIT` are not consumed by current credit admission: accepted below-minimum credits still perform owner lookup and count toward processing; there is no micro aggregation flush;
+- hidden CLI aliases: `quarantine_viewer.py --usdc` / `--usdd` (prefer `--solana` / `--nexus`);
+- database columns, retry-budget keys, reservation kinds and status strings documented in source as frozen upgrade interfaces.
+
+Do not mass-rename these in an operator migration. They are compatibility identifiers, not universal token branding.
+
+## Validation summary
+
+At configuration import/startup, current code enforces:
+
+1. required keys have at least one non-empty accepted spelling;
+2. canonical/legacy `_compat_env()` values do not conflict;
+3. Solana address strings parse as pubkeys;
+4. numeric values parse in their declared integer/decimal domain;
+5. fee values are exactly representable and non-negative;
+6. `FEE_BPS` is from 0 through 4999;
+7. `NEXUS_TRANSFER_MIN_CONFIRMATIONS` is a positive integer;
+8. minimums are floored at twice the relevant flat fee;
+9. strict production-mode syntax and production controls pass;
+10. startup recovery returns explicit complete authoritative evidence before polling.
+
+Some integer settings do not have dedicated positivity/range validation. Configuration acceptance alone is not a production safety claim.
+
+## Source references
+
+- Pair construction, aliases, defaults and validation: [`src/config.py`](src/config.py)
+- Production gate and runtime order: [`src/main.py`](src/main.py)
+- Mandatory recovery and positive checkpoints: [`src/startup_recovery.py`](src/startup_recovery.py)
+- Classic SPL Token Program enforcement: [`src/solana_client.py`](src/solana_client.py)
+- Nexus transport and held transfer intents: [`src/nexus_client.py`](src/nexus_client.py), [`nexus_transfer_operator.py`](nexus_transfer_operator.py)
+- Setup procedure: [SETUP.md](SETUP.md)
+- [docs/SECURITY.md](docs/SECURITY.md)

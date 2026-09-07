@@ -1,11 +1,11 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
 **Date:** 2026-09-07
-**Repair baseline:** `6568446d551c785a2b96d16217b468e78a93defd`; current safety repair is an uncommitted working-tree candidate.
+**Documentation/code comparison baseline:** `0851b774d1cbe4eabcdabe2cccb04a0307aa9d7c` (includes the committed safety repair and immutable mint-recipient validation). This documentation refresh is local and uncommitted.
 **Status:** Current issue register and repair priority for `swapService`
 **Architecture-plan update:** 2026-09-07 (source identity, atomic fees and recovery safety repaired locally; provider-v2 remains planned).
 
-This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The baseline independent evidence is in [`DEVELOPMENT_REVIEW_2026-09-07.md`](DEVELOPMENT_REVIEW_2026-09-07.md). The [post-change report](POST_CHANGE_REVIEW_2026-09-07.md) controls current repair status and verification; dated sections 10–12 below are historical snapshots, not current open-finding assertions.
+This document replaces the old June code-level audit as the current engineering evaluation. Historical findings and their original line references remain available in [`AUDIT_FINDINGS.md`](AUDIT_FINDINGS.md) and [`RISK_ASSESSMENT.md`](RISK_ASSESSMENT.md). The baseline independent evidence is in [`DEVELOPMENT_REVIEW_2026-09-07.md`](DEVELOPMENT_REVIEW_2026-09-07.md). The [post-change report](POST_CHANGE_REVIEW_2026-09-07.md) records the earlier repair and its verification at that snapshot; its publication state and test counts are historical. Dated sections 10–12 below are historical snapshots, not current open-finding assertions. Current local documentation verification is recorded in section 8; no exact-head CI or live-chain approval is implied.
 
 ## 1. Executive verdict
 
@@ -62,7 +62,7 @@ evidence remains held. These are local code repairs, not target-chain production
 | Installed-SDK recovery request construction | Signature-typed transaction lookups and recovery cursor are locally verified through real SDK encoders with a mocked provider; target-chain acceptance remains required |
 | Exact mixed-decimal money math | Existing local regression coverage retained; target-chain matrix required |
 | Complete local engineering gate | See final command results in the post-change report; do not substitute prior-head CI |
-| Exact-candidate CI and live devnet/testnet matrix | Not run for this uncommitted repair |
+| Exact-candidate CI and live devnet/testnet matrix | Not established by this local documentation review; require separate verification before release |
 
 ---
 
@@ -496,16 +496,22 @@ resolve ambiguous outcome against chain -> finalize local state
 
 A timeout is not failure, an empty bounded scan is not absence, and a warning is not a safety control. This rule already protects the repaired Solana→Nexus debit path; it must also govern Nexus refunds, quarantine transfers, fee movements and any future automated maintenance action.
 
-### Target deployment configuration (partially implemented; incomplete)
+### Current configurable pair and remaining architecture work
 
-The existing generic token variables are only a partial compatibility layer. Runtime and
-operator surfaces still contain USDC/USDD-specific aliases, defaults, labels and account names,
-and the fee policy is spread across direction-specific values, micro-amount percentages and an
-inert congestion-fee setting. A fork therefore cannot yet be called completely token-pair or
-fee-policy configurable.
+**Implemented now:** one configurable classic-SPL-token/Nexus-token pair per deployment, with
+explicit mint/register and custody settings, independent decimals, display labels, directional flat
+fees, one shared basis-point rate, refund/disposition fee representations, and input minimum/dust
+settings. `src/config.py` builds the immutable `SWAP_PAIR`; public record fields are derived by
+`build_service_record()`. The mint recipient validator checks immutable Nexus token-register
+identity, not ticker equality. USDC/USDD defaults and retained compatibility names do **not** make
+the runtime a fixed-pair bridge. Current user and operator docs describe this implemented model.
 
-The current code now has an immutable `SwapPairConfig` foundation, conflict-detecting aliases and
-several canonical fee/custody consumers. The target architecture requires that object to be passed
+**Still incomplete:** this is not arbitrary-chain/Token-2022/native-SOL support, multi-pair routing,
+provider-v2 discovery or a fully versioned configuration/terms contract. Some settings remain
+outside `SWAP_PAIR`, and several environment/schema names deliberately retain legacy spellings.
+The conversion/backing model is 1:1 in whole-token units before fees and rounding, not market pricing.
+
+The target architecture requires the canonical object to be passed
 to every money, reconciliation, dashboard and publication path. It must contain, for each
 chain side, the network/cluster, canonical token identity (Nexus register address or Solana mint),
 display symbol, decimals, custody accounts and quarantine/fee destinations. Symbols are display
@@ -707,13 +713,14 @@ same change.
 1. ✅ Inventory every USDC/USDD literal, legacy config attribute, account name, database label,
    dashboard label, helper script default and public example. Classify each as runtime semantics,
    display-only metadata, migration alias or frozen persisted compatibility state.
-2. Introduce canonical chain-neutral token, custody and fee-policy configuration. Require explicit
+2. **Partly implemented:** canonical `SWAP_PAIR`, token/custody identities and directional fee policy
+   exist. Complete the remaining validation/consumer coverage; require explicit
    production token identities and fee terms; retain legacy names only through one conflict-detecting
    compatibility adapter.
-3. Route payout, refund, micro-amount handling, fee collection, fee accounting, thresholds,
-   reconciliation, alerts, dashboard and public terms through the same validated configuration.
-   Remove or implement the currently inert congestion-fee setting rather than continuing to publish
-   a setting that does not affect execution.
+3. **Partly implemented:** selected-pair payout math, public terms and display metadata exist.
+   Finish routing micro-amount handling, fee collection/accounting, thresholds, reconciliation and
+   alerts through one validated configuration contract. Exposed disposition/congestion terms must
+   describe actual authorized behavior, not imply an automatic Nexus refund path.
 4. Add startup validation for exact representability at both token precisions, non-negative fee
    values, coherent minima/dust/caps, correct mint/account ownership and a deterministic
    configuration/terms fingerprint.
@@ -729,8 +736,9 @@ same change.
 8. Add tests for two or more records owned by one signature chain, multiple token pairs, duplicate
    type matches, wrong-owner/type/service-id records, address/name disagreement, altered on-chain
    terms, every zero/non-zero fee component and legacy/canonical configuration conflicts.
-9. Update `.env.example`, `CONFIG.md`, `SETUP.md`, `README.md`, the dashboard and inspection output
-   only when the implementation exists; until then, label the v2 contract as planned.
+9. Current-pair documentation is aligned with the already implemented runtime in this
+   documentation refresh. Keep the v2 contract labelled planned; update example configuration,
+   dashboard and inspection output for v2 only when that implementation and migration exist.
 
 **Required verification:** focused configuration tests must cover every fee component and conflict
 case; provider-record tests must cover schema completeness, size budget, address-only updates and
@@ -747,9 +755,13 @@ hyphenated `distordia-type` field and address-based read/update calls before v1 
 
 ---
 
-## 8. Verification snapshot
+## 8. Historical verification snapshot (superseded)
 
-| Check | Current result |
+The following pre-repair results are retained as audit evidence, **not current working-tree
+status**. Subsequent repair evidence is in the dated reports linked above. The current
+documentation-refresh verification is recorded separately below.
+
+| Check | Recorded pre-repair result |
 |---|---|
 | `tests/legacy_smoke.py` | Enforced as an isolated pytest case |
 | `tests/legacy_token_pair.py` | Enforced as an isolated pytest case with exact thresholds, public terms and bidirectional outputs for 6/6, 8/6, 6/8, 9/6 and 0/0 |
@@ -767,6 +779,31 @@ hyphenated `distordia-type` field and address-based read/update calls before v1 
 | `ruff`, `pyflakes`, `mypy`, `pip-audit`, `bandit` | Not installed in the local environment |
 | Local mocked safety probes | Reproduced sibling deletion at operator finalization and paid-credit requeue after wipeout reconstruction |
 | Live integration | Not run |
+
+### Documentation-refresh verification — 2026-09-07
+
+**Newly confirmed unresolved code gap — daily payout cap bypass:**
+`src/solana_client.py:979-999` checks the daily limit in `send_solana_token()`, used by
+refund/quarantine sends. The main Nexus→Solana path at `src/swap_nexus.py:365-366` instead calls
+`send_solana_token_to_account_with_sig()` (`src/solana_client.py:1568-1607`), which does not check
+that cap. Positive-cap startup validation therefore does not provide a service-wide ceiling.
+The operator docs now state this limitation; runtime behavior is unchanged. Repair must cover
+every actual payout path with cap accounting and regression tests, without weakening frozen-term
+or ambiguous-outcome handling. This remains a production-acceptance blocker despite green tests.
+
+Scope: README, setup/configuration and example environment, current asset contract, state-machine
+and security guides, developer guidance, this evaluation and the literal inventory. Historical
+reports retain their original findings and test counts. No runtime/test/dependency changes are
+part of this refresh. This is not target-chain acceptance or a new production-readiness approval.
+
+| Check | Documentation candidate result |
+|---|---|
+| Runtime/test/dependency hash comparison | 39 baseline files unchanged |
+| Documented `register_service.py --show --json` | Passed using a synthetic 8/6-decimal fixture: configured `DOCS_SOL`/`DOCS_NEX` symbols, mint/register, `docs:` memo and public terms; no network |
+| Full pytest against a disposable candidate Git index | 247 passed, 33 subtests passed |
+| Dependency check, Python compilation, Markdown links, literal inventory and whitespace | Passed against the documentation candidate |
+| Real Git index | Unchanged; no staging, commit or push to the real index |
+| CI / live node acceptance | Not run or claimed by this documentation refresh |
 
 ## 9. Definition of deployment-ready
 

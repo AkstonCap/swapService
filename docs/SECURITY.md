@@ -8,6 +8,19 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Reduce DoS / spam impact.
 - Ensure recoverability after crashes.
 
+## Supported security boundary
+
+One process protects one configured pair: one classic SPL Token Program mint and one Nexus token
+register, assembled as `config.SWAP_PAIR`. `SOLANA_TOKEN_MINT`, `SOLANA_VAULT_ACCOUNT`,
+`SOLANA_TOKEN_SYMBOL`, `SOLANA_TOKEN_DECIMALS`, `NEXUS_TOKEN_NAME`,
+`NEXUS_TOKEN_REGISTER_ADDRESS`, `NEXUS_TREASURY_ACCOUNT`, and `NEXUS_TOKEN_DECIMALS` are the
+canonical pair settings. Symbols are display metadata; authorization and reconciliation use the
+mint/register identities and custody addresses.
+
+Multi-pair routing, provider schema v2, additional destination chains, and Token-2022 are not
+implemented. `src/solana_client.py` uses the classic Token Program id in account validation, ATA
+derivation, and transfer instructions. Do not advertise or configure a Token-2022 mint.
+
 ## Key Material & Secrets
 | Item | Guidance |
 |------|----------|
@@ -27,20 +40,39 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Maintain checksum (optional) of state directory for tamper detection.
 
 ## Idempotency Controls
-- Solana: on‑chain memo includes Nexus address; `processed_sigs` database table prevents replay on restart.
-- Nexus: credit txid + owner + asset mapping triple must align; mismatched owner mapping is ignored.
+- Solana→Nexus: the Solana signature is the persisted source identity; a unique Nexus `reference`
+  and the legacy-valued `reservations.kind="usdc_to_usdd_debit"` are stored before the debit.
+- Nexus→Solana: admission and lifecycle state preserve `(txid, contract_id)`. The owner-verified
+  mapping uses the literal v1 fields `txid_toService` and `receival_account`; new payouts carry
+  `nexus_txid:<txid>:<contract_id>`.
+- Before a Solana payout RPC, `payout_solana_units` and `payout_fee_nexus_units` are frozen on the
+  exact source row. Terminal state requires successful finalized transaction evidence matching the
+  source memo, signature, vault signer/source, configured mint, recipient, and integer output.
+- Persisted USDC/USDD database columns, status values, reservation kinds, and retry-key prefixes are
+  compatibility contracts. Renaming one without an explicit migration can reset retry exclusion or
+  hide an in-flight reservation.
 - Do not manually edit processed markers unless fully aware of consequences (risk: double payout). Instead, quarantine and reconcile manually.
 
 ## DoS & Spam Mitigation
-- Thresholds: `MIN_DEPOSIT_USDC` / `MIN_CREDIT_USDD` discard micro attempts early; keep them aggressive enough.
-- Micro fee policy (100%): converts spam into negligible cost overhead.
-- Per-loop caps: `MAX_DEPOSITS_PER_LOOP`, `MAX_CREDITS_PER_LOOP` prevent runaway processing within a single cycle.
-- Owner lookup skipping for micros curtails expensive Nexus queries.
+- Thresholds: `MIN_DEPOSIT_SOLANA_TOKEN`, `MIN_CREDIT_NEXUS_TOKEN`, and
+  `DUST_CREDIT_NEXUS_TOKEN` bound micro work. The `*_USDC`/`*_USDD` spellings are legacy aliases.
+- Accepted below-minimum credits are retained fully as fees; true dust is ignored.
+- `MAX_CREDITS_PER_LOOP` is checked between Nexus transactions, not between sibling CREDIT
+  contracts; it is not a strict per-contract batch ceiling. Accepted below-minimum credits count
+  toward processing and still perform owner lookup.
+- `MAX_DEPOSITS_PER_LOOP`, `MICRO_CREDIT_COUNT_AGAINST_LIMIT`, and
+  `SKIP_OWNER_LOOKUP_FOR_MICRO_USDD` are parsed but do not control these current admission paths.
+  Use actual fetch/time budgets; do not assume micro aggregation or owner-lookup skipping.
 - Consider raising `SOLANA_POLL_INTERVAL` or lowering `SOLANA_MAX_TX_FETCH_PER_POLL` under sustained attack.
 
 ## Refund Safety
-- Attempts are bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between them. After exhaustion, USDC may move to `USDC_QUARANTINE_ACCOUNT`; USDD→USDC credits instead remain held because automatic Nexus refunds and quarantine moves are disabled.
-- Any future Nexus account debit must first create a durable intent containing source, destination, exact base units and a unique reference. Timeout, non-zero CLI exit or unparsed output is `outcome_unknown` and requires positive chain-reference resolution; it is never retried blindly.
+- Attempts are bounded by `MAX_ACTION_ATTEMPTS`, with `ACTION_RETRY_COOLDOWN_SEC` enforced between
+  them. After exhaustion, the configured Solana token may move to `SOLANA_QUARANTINE_ACCOUNT`
+  (`USDC_QUARANTINE_ACCOUNT` is the legacy alias); Nexus→Solana credits instead remain held because
+  automatic Nexus refunds and quarantine moves are disabled.
+- Any held-credit Nexus disposition debit must first create a durable intent containing source,
+  destination, exact base units and a unique reference. Timeout, non-zero CLI exit or unparsed
+  output is `outcome_unknown` and requires positive chain-reference resolution; it is never retried blindly.
 - The only supported Nexus held-credit disposition is `nexus_transfer_operator.py`: a named
   operator prepares an intent, confirms its exact reference, authorizes it, then issues one
   debit. Finalization also requires the exact positively observed remote txid and records
@@ -48,15 +80,30 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Keep quarantine accounts separate from active treasury/vault to simplify reconciliation and avoid accidental reuse.
 
 ## Heartbeat & Liveness
-- Optional heartbeat asset shows last poll timestamp; monitor externally (alert if stale > 3 × max(intervals)).
-- Waterlines: enable to bound historical scan after assured data integrity, reducing time for catchup after downtime.
+- The current runtime selects its v1 heartbeat/registration by `NEXUS_HEARTBEAT_ASSET_NAME`, not
+  by `NEXUS_HEARTBEAT_ASSET_ADDRESS`. A fresh `last_poll_timestamp` proves only liveness.
+- Canonical waterline defaults are `last_safe_timestamp_solana` and
+  `last_safe_timestamp_nexus`. Custom configured names must exactly match the fixed basic-asset
+  field set.
+- Startup is fail closed: a readable heartbeat, positive checkpoints, and complete Solana and Nexus
+  reconstruction are mandatory before any poller or other chain activity. Missing/zero checkpoints,
+  malformed/legacy payout evidence, and incomplete scans abort startup.
+- Live empty Nexus enumeration does not advance the checkpoint. Any nonzero mutable offset page
+  request also holds because it cannot prove a snapshot-stable range.
 
 ## Exposure Limits
-- `MAX_SWAP_USDC` / `MAX_SWAP_USDD` cap a single swap; oversized items are refunded.
-- `DAILY_PAYOUT_CAP_USDC` is a rolling 24h ceiling enforced at the one function every USDC
-  payment passes through, so a runaway loop or stolen key cannot drain the vault at once.
-- Deposits are ingested at `finalized` by default; a reorged `confirmed` deposit would
-  otherwise leave permanently unbacked USDD.
+- `MAX_SWAP_USDC` / `MAX_SWAP_USDD` are legacy-named current settings that cap the configured
+  Solana/Nexus inputs. On the Nexus side, "refund" means an operator hold until a separately
+  authorized durable disposition; it is not an automatic treasury debit.
+- **Known cap bypass:** `DAILY_PAYOUT_CAP_USDC` is checked inside `send_solana_token()` for
+  refund/quarantine sends. The main Nexus→Solana payout uses
+  `send_solana_token_to_account_with_sig()`, which does not perform this check. A positive cap
+  required by production configuration is therefore **not an enforced service-wide ceiling**.
+  This remains a code repair and acceptance-test requirement, not a documentation fix.
+- Even a correctly centralized service cap cannot stop an attacker who has stolen the signer
+  key and submits transactions outside the service.
+- Deposits are ingested at `finalized` by default; a reorged `confirmed` deposit could otherwise
+  leave permanently unbacked Nexus-token supply.
 
 ## Logging & Monitoring
 - Configure `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`. Without one, backing-deficit pauses,
@@ -70,9 +117,12 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 - Alerting: high refund failure rate, backing ratio breach (< BACKING_DEFICIT_PAUSE_PCT), stale heartbeat.
 
 ## Backing & Reconciliation
-- Periodically audit vault USDC vs issued USDD (accounting for fees & quarantined amounts).
+- Periodically audit the configured Solana vault against issued Nexus supply (accounting for fees,
+  held credits, independently configured decimals, and quarantined amounts).
 - Use `BACKING_DEFICIT_BPS_ALERT` & `BACKING_DEFICIT_PAUSE_PCT` to fail safe (pause swaps) on deficit.
-- Surplus logic (mint to local) only when threshold met; review before enabling.
+- Reconciliation failure, malformed/incomplete evidence, or discrepancy latches new exposure paused;
+  only a later explicitly healthy read-back clears it.
+- Surplus handling is alert-only. There is no automated Solana DEX swap or Nexus mint/rebalance path.
 
 ## Secrets Rotation
 - Rotate Solana keypair cautiously: drain funds to new account, update env, restart, archive old key offline.
@@ -82,8 +132,13 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 1. Stop service if running partially.
 2. Backup state directory.
 3. Review last N lines of log around crash for partially executed action (send/mint). 
-4. Re-run service: built-in idempotency should skip already completed steps.
-5. Compare on-chain balances vs internal fee state; adjust if discrepancy.
+4. Re-run only with the configured named heartbeat available and both positive waterlines. Startup
+   must report `recovery_complete=true`; any incomplete result is a stop condition, not permission
+   for a bounded fallback scan.
+5. Verify `sending`/awaiting rows against full finalized payout evidence and frozen terms. Never
+   infer non-payment from a missing signature lookup and never manually resubmit an ambiguous send.
+6. Compare on-chain balances and exact source liabilities with the internal payout/fee state. Hold
+   and investigate discrepancies; do not "adjust" terminal rows without an audited migration.
 
 ## Hardening Roadmap (Advanced)
 - Run Solana RPC privately or via authenticated provider (rate limit & data consistency).
@@ -95,9 +150,9 @@ Focused reference for running the swap service securely. Complements `SETUP.md` 
 | Threat | Mitigation |
 |--------|------------|
 | Replay / double payout | Processed signature / txid markers & idempotent logic. |
-| Spam micros | Threshold + 100% fee + aggregation. |
+| Spam micros | Dust filtering, full retention of accepted sub-minimum credits, and actual processing budgets. |
 | Key compromise | File perms, minimal SOL exposure, optional HSM. |
-| Refund abuse (craft invalid for free liquidity) | Flat fees on USDC path, congestion fee on Nexus refunds, attempt caps. |
+| Refund abuse (craft invalid for free liquidity) | Solana-side refund fee, bounded attempts, and operator-authorized Nexus dispositions. |
 | State tampering | File perms + optional checksums + offsite backups. |
 | Resource exhaustion | Per-loop caps, time budgets, separate intervals. |
 

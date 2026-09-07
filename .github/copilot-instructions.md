@@ -1,206 +1,96 @@
-# Copilot Instructions: swapService
+# Engineering Guidance: swapService
 
-## Project Overview
-Bidirectional USDC ↔ USDD swap bridge between Solana (USDC) and Nexus blockchain (USDD). Service monitors deposits on both chains to treasury accounts, validates mapping metadata, applies fees, executes cross-chain transfers, and handles refunds with idempotency guarantees.
+## Scope and source of truth
+
+This is a custodial bridge for **one configurable Solana SPL token / Nexus token pair per deployment**, not a fixed-ticker exchange or multi-pair routing engine. The historical `USDC` / `USDD` display defaults and compatibility names do not select token identity. Current configuration and behavior come from [`src/config.py`](../src/config.py) and the runtime, not from dated audit reports.
+
+Use [`README.md`](../README.md) for user instructions, [`SETUP.md`](../SETUP.md) for operations, [`CONFIG.md`](../CONFIG.md) for settings, and [`docs/EVALUATION.md`](../docs/EVALUATION.md) for current release gates. The provider-v2 schema is planned; do not implement or advertise it merely because an example appears in [`ASSET_STANDARD.md`](../ASSET_STANDARD.md).
 
 ## Architecture
 
-### Core Components
-- **[src/main.py](../src/main.py)**: Main polling loop, orchestrates both swap directions with separate intervals
-- **[src/swap_solana.py](../src/swap_solana.py)**: USDC→USDD pipeline (vault deposits with memo parsing)
-- **[src/swap_nexus.py](../src/swap_nexus.py)**: USDD→USDC pipeline (asset-mapped receival accounts)
-- **[src/state_db.py](../src/state_db.py)**: SQLite state management (processed/unprocessed/refunded sets)
-- **[src/solana_client.py](../src/solana_client.py)**: Solana RPC wrapper with Helius enrichment support
-- **[src/nexus_client.py](../src/nexus_client.py)**: Nexus CLI subprocess wrapper
-- **[src/startup_recovery.py](../src/startup_recovery.py)**: Waterline-based disaster recovery from heartbeat asset
+| Component | Responsibility |
+|---|---|
+| [`src/config.py`](../src/config.py) | Canonical immutable `SWAP_PAIR`, fee policy, compatible environment inputs |
+| [`src/main.py`](../src/main.py) | Production admission, mandatory recovery, reconciliation/exposure gate and chain polling |
+| [`src/swap_solana.py`](../src/swap_solana.py) | Solana input admission and checkpoint handling |
+| [`src/swap_nexus.py`](../src/swap_nexus.py) | Nexus credit admission, asset mapping, frozen Solana payout terms and finalization |
+| [`src/solana_client.py`](../src/solana_client.py) | Classic SPL transfers, RPC/Helius reads, Solana processing and payout evidence |
+| [`src/nexus_client.py`](../src/nexus_client.py) | Nexus API/development-CLI boundary, token-register validation, durable transfer operations and public registration |
+| [`src/state_db.py`](../src/state_db.py) | SQLite lifecycle state, exact source identity, claims, transfer intents and atomic fees/finalization |
+| [`src/startup_recovery.py`](../src/startup_recovery.py) | Evidence-driven reconstruction from validated custody checkpoints |
+| [`src/nexus_memo.py`](../src/nexus_memo.py) | Strict composite payout memo and evidence types |
+| [`nexus_transfer_operator.py`](../nexus_transfer_operator.py) | Explicit exact-source disposition workflow; not an automatic refund loop |
 
-### Data Flow
-**USDC → USDD**: User sends USDC to vault with memo `nexus:<USDD_ACCOUNT>` → Service validates memo, checks account exists → Applies fees → Debits USDD to recipient via Nexus CLI → Marks processed  
-**USDD → USDC**: User sends USDD to treasury → Publishes Nexus asset with `txid_toService` + `receival_account` → Service queries assets by (txid, owner) → Validates Solana receival account → Sends USDC → Marks processed  
-**Refunds**: Invalid memo/mapping, missing ATA, or timeout triggers refund to original sender (minus fees)
+Detailed states and actual persisted strings are in [`docs/STATE_MACHINES.md`](../docs/STATE_MACHINES.md). Do not rename them based on a documentation label.
 
-### State Management Pattern
-- **Append-only DB tables**: `processed_sigs`, `processed_txids`, `unprocessed_sigs`, `unprocessed_txids`, `refunded_sigs`, `quarantined_sigs`
-- **Idempotency**: Transaction signatures/txids are primary keys; duplicate processing prevented by DB constraints
-- **Waterlines**: Heartbeat asset stores `last_safe_timestamp_solana` and `last_safe_timestamp_usdd` to bound historical reprocessing after restart
-- **Attempt tracking**: Retry counter with exponential cooldown in `attempt_state` table (see `MAX_ACTION_ATTEMPTS`, `ACTION_RETRY_COOLDOWN_SEC`)
+## Configurable identity, units and compatibility
 
-## Critical Conventions
+- Route by `SWAP_PAIR.solana.mint` and `SWAP_PAIR.nexus.register_address`, with the corresponding custody accounts. A symbol/ticker match alone is not authorization.
+- Prefer implemented canonical environment keys such as `SOLANA_TOKEN_MINT`, `SOLANA_VAULT_ACCOUNT`, `NEXUS_TOKEN_REGISTER_ADDRESS` and `NEXUS_TREASURY_ACCOUNT`. Consult the exact alias/precedence policy before adding an input: not every historic setting has a generic alias.
+- Conflicting canonical/legacy identity, custody, precision and fee values are rejected by `_compat_env`; do not replace that with silent precedence.
+- Token precision is independently configurable on each side. The backing model is 1:1 in **whole-token units**, not base units and not market value.
+- Keep money as integer base units; use the existing exact conversion helpers and conservatively round liabilities up and payouts down. Do not assume equal decimals or floating-point equivalence.
+- Fees are directional: Nexus output, Solana output, Solana refund and separately authorized Nexus disposition are distinct amounts/scales. Use `SWAP_PAIR.fees` and the existing formatting helpers rather than a universal flat fee.
+- Effective minimums include fee-derived floors. Dust and sub-minimum policy are separate; never let a filter silently hide qualifying deposits while advancing a checkpoint.
+- Legacy environment attributes, SQLite columns, retry/reservation keys and lifecycle values can be compatibility contracts. Preserve them until an explicit migration and recovery tests establish that renaming cannot replay an in-flight action.
+- Mint configurability does not add native-SOL or Token-2022 transfer support. The implemented Solana transfer program is classic SPL Token.
 
-### Configuration System
-All config lives in [src/config.py](../src/config.py) loading from `.env`. Use `getattr(config, "VAR_NAME", default)` for optional vars. Required vars validated at startup (see `REQUIRED_ENV` list). Chain-specific poll intervals: `SOLANA_POLL_INTERVAL` (fast, 12-20s) vs `NEXUS_POLL_INTERVAL` (aligned to block time, 50-60s).
+## Money and state invariants
 
-### Logging Convention
-Structured, single-line prints with prefix: `[SWAP_USDC]`, `[USDD_PROCESS_START]`, `[WATERLINE_ADVANCED]`. Use `_log(kind, **fields)` helpers (not traditional logger). Critical: Never log `NEXUS_PIN` or private keys.
+### Solana input → Nexus output
 
-### Fee Calculation
-Applies to both directions: `FLAT_FEE_TO_SOLANA_UNITS` + `DYNAMIC_FEE_BPS` (basis points of amount). Micro deposits below thresholds (`MIN_DEPOSIT_USDC`, `MIN_CREDIT_USDD`) treated as 100% fee (`MICRO_DEPOSIT_FEE_PCT`). See [src/fees.py](../src/fees.py) for aggregation.
+Validate finalized deposit evidence, the configured memo prefix and the recipient account's immutable Nexus token register. Store exact output terms and a durable reference before a transaction-generating call. Resolve uncertain outcomes from attributable chain evidence; an empty history or timeout is not proof that a debit did not happen.
 
-### Nexus CLI Interaction Pattern
-Subprocess calls with timeout protection (see `_run()` in [nexus_client.py](../src/nexus_client.py)). Use `_parse_json_lenient()` for resilient CLI output parsing. Always inject PIN via CLI args, never environment. Asset queries use `register/list/assets` with `where` filters for `txid_toService` + owner validation.
+### Nexus input → Solana output
 
-### Nexus API Scope (Important)
-The `finance/*` and `assets/*` APIs only query registers (accounts, tokens, assets) owned by the **currently logged-in user**. To query registers owned by other users (e.g., verifying a user's asset mapping or checking third-party account balances), you **must use the `register/*` API** instead. Examples:
-- `register/get/finance:account address=<ADDRESS>` — Query any account by address
-- `register/get/finance:token address=<ADDRESS>` — Query any token by address  
-- `register/get/assets:asset address=<ADDRESS>` — Query any asset by address
-- `register/list/assets` with `where` filters — Search assets across all users
+Asset mapping remains the existing `txid_toService` plus matching sender `owner`, with `receival_account` pointing to the configured mint's existing token-account address. This payout path does not resolve owner wallets to ATAs or create accounts. Internal source identity is the exact `(txid, contract_id)` pair, not a transaction-wide delete key.
 
-### USDD→USDC Asset Standard
-Users must create a mutable Nexus asset with fields `txid_toService` and `receival_account`. The service queries assets by `txid_toService` AND `owner` to verify the USDD sender owns the mapping. Full specification in [ASSET_STANDARD.md](../ASSET_STANDARD.md). Recommended format: `basic` (simplest). Create once, update `txid_toService` per swap.
+Freeze terms and claim the exact source before submission. Outbound memos use `nexus_txid:<txid>:<contract_id>`. Submission does not create a processed terminal row. Finalization requires full successful finalized evidence matching source, signature, vault, mint, recipient and frozen output; it commits per-contract fees, terminal evidence and exact queue removal atomically. Preserve siblings.
 
-### Solana Signature Scanning
-Prefer Helius enhanced RPC (`fetch_incoming_deposits_via_helius`) over raw `getSignaturesForAddress` to batch fetch memos efficiently. **Performance**: Helius uses 1-2 API calls vs N+1 for core RPC (50-100x faster for 100 deposits). Automatic fallback to core RPC when Helius unavailable. See [solana_client.py](../src/solana_client.py). Memos format: `nexus:<NEXUS_ADDRESS>` or `refundSig:<ORIGINAL_SIG>`.
+### Holds and operator disposition
 
-### Startup Recovery Flow
-On every service start: fetch waterlines from heartbeat asset → rebuild missing unprocessed entries from on-chain history → scan sent transaction memos for `processedTxid:` and `refundSig:` patterns → seed reference counter if missing. Fully idempotent; safe to run multiple times. See [startup_recovery.py](../src/startup_recovery.py).
+Automatic Nexus refunds and treasury-to-quarantine transfers are disabled. Mapping timeouts and ambiguous outcomes remain liabilities, not retry/refund permission. The operator protocol requires an exact source contract, durable intent, independent authorization, one execution claim and authoritative resolution/finalization. A claimed interrupted operation becomes `outcome_unknown`, not a new attempt.
 
-### USDD credit transaction json format (on Nexus)
-Example of an incoming token transaction (credit) json element on Nexus, picked from `finance/transactions/account name=<account/token>` API output:
-```json
-{
-  "txid": "0158ff8567753c244555bba8083f3285fa5150745879a7634f85f16178959ef825b1ab33328c1bc319cd18f2effbaa57981d27xxaf2bfa99a9988dd24da9d1e1",
-  "type": "tritium user",
-  "version": 4,
-  "sequence": 5,
-  "timestamp": 1764967240,
-  "blockhash": "c80095c84743cabee3353e4e9590eaxx177c2aca67cb2ee0bc565479bb72e65b6eeca67e62b0d82969ab321eaadf8bd4e80aa448fb95c79ab7729e1b3e3cfc9c0a6b74ea3ec82eb52804df059bf020cf4a1359aed9104f0f2f083e57a3ef5735883f44916d86c1e312adb88fcfe3d17efa698538eb7ccba6f43b55d788cb857a",
-  "confirmations": 41277,
-  "contracts": [
-    {
-      "id": 0,
-      "OP": "CREDIT",
-      "for": "DEBIT",
-      "txid": "01b88ff8707638acff63e05ca48dec9c79d5b9d754b065ae8f35e0b6cb8b90c694b54ddfeee934e87b257e028c81cdf1dxx328ca881cbd185bddd12dd9097c46",
-      "contract": 0,
-      "from": {
-        "address": "8BsvE6DAsRD1j1DpHfRNW3xxKB1srkAMQABVJd39MQeguoVBK2U",
-        "name": "DISTxx",
-        "local": true,
-        "mine": false,
-        "type": "ACCOUNT"
-      },
-      "to": {
-        "address": "8CuyRASoeBCRgcuA56Awyixxf34vRad5kB9b9H88bUVSJGfB5B7",
-        "name": "distxx",
-        "user": "xxxxx",
-        "local": true,
-        "mine": true,
-        "type": "ACCOUNT"
-      },
-      "amount": 1.0,
-      "token": "8DgWXw9dV9BgVNQpKwNZ3zJRbU8SKxjW4j1v9fn8Yma7HihMjeA",
-      "ticker": "DIST"
-    }
-  ]
-}
-```
+Existing Solana refund/quarantine mechanisms are separate; do not infer an automatic Nexus refund from them. Never present a held status as evidence that funds have actually moved.
 
-## Developer Workflows
+## Recovery and checkpoints
 
-### Running Service
+- Startup must receive affirmative complete recovery before exposure-producing work. Missing or zero custody checkpoints, malformed records and incomplete scans refuse startup; do not turn those failures into warnings.
+- Default top-level heartbeat fields are `last_safe_timestamp_solana` and `last_safe_timestamp_nexus`; configured overrides must match the actual asset. Old nested payloads are not interchangeable.
+- The component that proved complete enumeration owns checkpoint advancement. A processing-only pass has no scan evidence.
+- Any requested nonzero mutable Nexus offset holds the live checkpoint, including a short or empty later page. Positive persisted credits do not prove complete coverage.
+- Composite payout reconstruction must combine attributable payout evidence with the exact source credit; never fabricate zero-amount terminal records or guess legacy contract identity.
+- Repeated scans/restarts cannot make incomplete history authoritative. Do not initialize waterlines to the current time to bypass recovery.
+
+## External call boundaries
+
+Use existing helpers rather than writing a second transport or bypassing a durable intent:
+
+- Production Nexus calls use authenticated HTTPS configured by `NEXUS_API_URL`, `NEXUS_API_USER` and `NEXUS_API_PASSWORD`. The CLI is a development compatibility path; never require production PIN/session secrets in child-process arguments.
+- Public account/asset lookups use the project's `register/*` helpers. Owned-account mutations use the appropriate `finance/*` or `assets/*` methods. Verify the target node's actual API contract; do not invent generic `register/create/asset`, `register/write/asset` or `finance/history` calls.
+- Distinguish token-supply debits from a holder's account debit. Serialize Nexus base-unit values to exact whole-token amount strings at the API boundary using existing code, not float conversion.
+- With the installed Solana SDK, `Client.get_transaction` takes `solders.signature.Signature`; the `before` cursor for `get_signatures_for_address` is also a `Signature`. A string accepted by a mock is not SDK compatibility proof.
+- Use the existing timeout/error wrappers for reads. Never blindly retry a non-idempotent financial call on transport failure.
+- Use structured, secret-redacted logging and alerts. Never log PINs, sessions, passwords, RPC credentials or keypair contents.
+
+## Verification workflow
+
+Tests are automated; **mainnet observation is not the test strategy**. Use an environment with the declared dependencies installed:
+
 ```bash
-python swapService.py  # Delegates to src.main.run()
+python -m pytest -q
+python -m compileall -q src tests
+python -m pip check
+python scripts/check_markdown_links.py
+python scripts/check_token_pair_inventory.py
 ```
-Startup prints: vault/treasury balances, recovery stats, then enters dual polling loop.
 
-### Testing Locally
-Use `sol_testclient.py` for Solana deposit simulation. No automated test suite; testing is manual + mainnet observation. Before deploying changes, test with minimal poll intervals and watch logs for new prefixes.
+The inventory check reads the Git index, including documentation. Verify the intended candidate with a disposable index if user changes must remain unstaged; a check against an unchanged index does not validate working-tree edits. Preserve existing work and do not commit/push unless explicitly requested.
 
-### Adding New Config Variable
-1. Add to `.env.example` with comment
-2. Load in [src/config.py](../src/config.py) with `os.getenv()` and type conversion
-3. Document in [CONFIG.md](../CONFIG.md) table
-4. Add validation in `REQUIRED_ENV` if mandatory
+For SDK changes, include the real-installed-SDK subprocess regression in `tests/test_solana_sdk_boundary.py`; most other safety tests intentionally stub SDK modules. The real-SDK test can skip when the dependency is absent, so run it in the installed-dependency environment and verify it actually executes.
 
-### Modifying State Schema
-1. Update table schema in `state_db.init_db()` with `CREATE TABLE IF NOT EXISTS`
-2. SQLite auto-migration via IF NOT EXISTS; no explicit migration files
-3. Add corresponding query/insert functions in [state_db.py](../src/state_db.py)
-4. Document schema changes in commit message if breaking existing state
+Add failing regressions before changing money behavior. Cover acceptance-before-timeout, crash before remote-ID persistence, duplicate invocation, exact sibling isolation, rollback and recovery. Keep tests offline with temporary databases and mocked external transports; do not start the service, use production credentials or call a live chain to inspect documentation.
 
+For a schema change, test both a fresh database and an existing-data migration, repeated initialization, immutable evidence and exact-source finalization. `CREATE TABLE IF NOT EXISTS` alone does not migrate an existing schema.
 
-### Debugging Stalled Swaps
-1. Check heartbeat asset for waterline staleness: `nexus register/get/asset address=<HEARTBEAT_ASSET_ADDRESS>`
-2. Query unprocessed tables: `sqlite3 swap_service.db "SELECT * FROM unprocessed_sigs WHERE status='pending';"`
-3. Check refund/quarantine tables for failed attempts: `sqlite3 swap_service.db "SELECT * FROM quarantined_sigs;"`
-4. Check fee entries: `sqlite3 swap_service.db "SELECT * FROM fee_entries ORDER BY timestamp DESC LIMIT 20;"`
-
-## Security & Safety
-
-### Idempotency Guarantees
-- **Solana sends**: Memo contains unique reference (`processedTxid:<txid>` or `refundSig:<sig>`); startup recovery scans memos to rebuild processed sets
-- **Nexus debits**: Transaction inclusion checked via `finance/history` with txid confirmation tracking
-- **Asset mapping**: Owner validation (sender's signature chain must match asset owner) prevents txid hijacking
-
-### DoS Mitigation
-Micro deposits (< `MIN_DEPOSIT_USDC`) aggregated as fees without full processing (`MICRO_DEPOSIT_FEE_PCT=100`). Skip expensive owner lookups for micro USDD credits (`SKIP_OWNER_LOOKUP_FOR_MICRO_USDD=true`). Per-loop caps: `MAX_DEPOSITS_PER_LOOP`, `MAX_CREDITS_PER_LOOP`.
-
-### Backing Management
-Optional backing ratio alerts: `BACKING_DEFICIT_BPS_ALERT`, `BACKING_DEFICIT_PAUSE_PCT`. Service pauses swaps if USDC vault < issued USDD by threshold. See [balance_reconciler.py](../src/balance_reconciler.py) for account-level reconciliation.
-
-### File Permissions
-Vault keypair must be mode 600. State DB and `.env` should be readable only by service user. Never commit `.env` or `*.json` state files.
-
-## Common Patterns
-
-### Timeout Protection
-All external operations wrapped with time budgets: `SOLANA_POLL_TIME_BUDGET_SEC`, `NEXUS_CLI_TIMEOUT_SEC`. Use `_safe_call(fn, timeout_sec=5)` or thread-based watchdog (see [main.py](../src/main.py)).
-
-### Decimal Handling
-Use `Decimal` for token amounts, never floats. Convert to base units (multiply by `10**DECIMALS`) before storing. Format with `ROUND_DOWN` to prevent dust overflows. See `_parse_decimal_amount()` and `_format_token_amount()` in [swap_nexus.py](../src/swap_nexus.py).
-
-### Amount Unit Conventions (Critical)
-**Solana (USDC)**: All amounts are in **base units** (integers). 10.5 USDC = `10500000` base units with 6 decimals. The SPL Token program operates exclusively in base units. All `solana_client.py` functions use base units.
-
-**Nexus (USDD)**: The **Nexus CLI expects token units** (human-readable amounts like `"10.5"`), NOT base units. However, internally the service stores USDD amounts as base units for consistency.
-
-**Conversion Functions**:
-- `_format_nexus_amount(amount_units: int) -> str`: Converts base units → token unit string for CLI
-- `get_nexus_send_amount(amount_usdc: int) -> float`: Returns USDD in **token units** (ready for CLI)
-
-**Function Parameter Conventions**:
-| Function | Parameter Type | Description |
-|----------|---------------|-------------|
-| `debit_nexus_token_with_txid()` | `amount_usdd: float` | Token units (passed directly to CLI) |
-| `refund_nexus_token()` | `amount_usdd_units: int` | Base units (converted via `_format_nexus_amount`) |
-| `transfer_nexus_between_accounts()` | `amount_usdd_units: int` | Base units (converted via `_format_nexus_amount`) |
-| Solana `send_solana_token*()` functions | `amount_base_units: int` | Base units |
-
-**USDC→USDD Flow**: `amount_usdc` (base units) → `get_nexus_send_amount()` → `net_amount` (token units) → `debit_nexus_token_with_txid()` → CLI  
-**USDD→USDC Refund Flow**: `amt_dec` (Decimal) → multiply by `10**DECIMALS` → `amt_units` (int base units) → `refund_nexus_token()` → `_format_nexus_amount()` → CLI
-
-### Status Lifecycle Transitions
-USDC→USDD: `ready for processing` → `debited, awaiting confirmation` → `processed` (via `processed_sigs`)  
-USDC→USDD Failures: `to be refunded` → `refund sent, awaiting confirmation` → `refund_confirmed` (via `refunded_sigs`)  
-USDC→USDD Quarantine: `to be quarantined` → `quarantined` (via `quarantined_sigs`)  
-USDC→USDD Stale: After `STALE_DEPOSIT_QUARANTINE_SEC`, stuck deposits marked `to be quarantined`
-
-USDD→USDC: `pending_receival` → `ready for processing` → `sending` → `sig created, awaiting confirmations` → `processed`  
-USDD→USDC Mapping Timeout: `pending_receival` → `trade balance to be checked` → `collecting refund` → `refunded`  
-USDD→USDC Failures: `refund pending` → `refunded` or `quarantined` after max attempts  
-
-Timeout handlers: `check_unconfirmed_debits()` marks stuck debits for refund after `SOLANA_CONFIRM_TIMEOUT_SEC`
-
-### Reading Documentation Files
-- User-facing swap guide: [README.md](../README.md)
-- Operator setup: [SETUP.md](../SETUP.md)
-- Full config reference: [CONFIG.md](../CONFIG.md)
-- Security hardening: [SECURITY.md](../docs/SECURITY.md)
-- Nexus API patterns: `Nexus API docs/` directory
-
-## Integration Points
-
-### Solana Dependencies
-- **solana-py** (v0.36.9) + **solders** (v0.26.0): RPC client + transaction building
-- **Helius RPC**: Optional enhanced API for batch transaction enrichment with memos (`parseTransactions` endpoint)
-- **SPL Token Program**: ATA derivation and USDC transfers
-
-### Nexus Dependencies
-- **Nexus CLI**: External binary (`./nexus`) invoked via subprocess; expects `--pin=<PIN>` on privileged operations
-- **Asset mapping**: Uses `register/list/assets` with WHERE filters, `register/get/asset` for heartbeat
-- **Finance operations**: `finance/debit/token` for USDD transfers, `finance/history` for confirmation checks
-
-### External RPC Requirements
-- Solana: Stable mainnet RPC with `getSignaturesForAddress`, `getTransaction`, `getAccountInfo` support. Rate limits respected via `SOLANA_RPC_TIMEOUT_SEC`.
-- Nexus: Local node or gateway at `NEXUS_RPC_HOST` (default `http://127.0.0.1:8399`)
+A read-only dashboard and green local tests do not approve custody operations. Live target-chain finality, history coverage, migration and operational acceptance remain separate release gates.

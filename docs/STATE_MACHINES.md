@@ -1,6 +1,6 @@
 # Swap Service State Machines
 
-State machine diagrams for both swap directions in the bidirectional USDC ↔ USDD swap service.
+State machine diagrams for both directions of the service's single configured Solana SPL token ↔ Nexus token pair.
 
 > **Accuracy note (2026-06-15):** this document was re-derived directly from the code. The
 > previous version contained transitions the code does not perform (notably an
@@ -100,6 +100,14 @@ State machine diagrams for both swap directions in the bidirectional USDC ↔ US
 
 ## Current safety repair — 2026-09-07 working tree
 
+The runtime supports exactly one pair selected by `config.SWAP_PAIR`: one classic SPL Token
+Program mint and one Nexus token register. Symbols are display metadata. Multi-pair routing and
+Token-2022 are not implemented. Persisted USDC/USDD column names, status values, reservation kinds,
+and retry keys remain literal compatibility contracts and are shown unchanged where applicable.
+Canonical pair inputs are `SOLANA_TOKEN_MINT`, `SOLANA_VAULT_ACCOUNT`, `SOLANA_TOKEN_SYMBOL`,
+`SOLANA_TOKEN_DECIMALS`, `NEXUS_TOKEN_NAME`, `NEXUS_TOKEN_REGISTER_ADDRESS`,
+`NEXUS_TREASURY_ACCOUNT`, and `NEXUS_TOKEN_DECIMALS`.
+
 The dated notes above are baseline history. The [post-change report](POST_CHANGE_REVIEW_2026-09-07.md)
 controls current implementation evidence. Both operator dispositions and payouts bind the exact
 Nexus source `(txid, contract_id)`. Legacy identity remains held. Startup requires complete recovery
@@ -116,14 +124,14 @@ book its unique fee and remove that source. Missing/mismatched evidence, missing
 failed liquidity reads and ambiguous signatures hold rather than resubmit or refund.
 Only pending admission resolves a destination; it cannot reopen an operator hold.
 
-## USDC → USDD State Machine (Solana to Nexus)
+## Solana token → Nexus token state machine
 
 ```mermaid
 flowchart TD
-    START((Start)) --> Detected[USDC deposit fetched at 'finalized']
+    START((Start)) --> Detected[Configured SPL-token deposit fetched at configured commitment]
     Detected --> ReadyForProcessing["ready for processing"]
 
-    ReadyForProcessing -->|invalid memo / bad Nexus account / over MAX_SWAP_USDC| ToBeRefunded["to be refunded"]
+    ReadyForProcessing -->|invalid memo / bad Nexus account / over legacy-named `MAX_SWAP_USDC` cap| ToBeRefunded["to be refunded"]
     ReadyForProcessing -->|"net after fees ≤ 0"| ProcessedAsFees["processed, amount after fees <= 0 ✓"]
     ReadyForProcessing -->|"reserve + persist reference"| DebitInFlight["debit in flight"]
 
@@ -138,18 +146,18 @@ flowchart TD
 
     ToBeRefunded -->|"net ≤ 0"| ProcessedAsFees
     ToBeRefunded -->|"no/invalid sender address"| ToBeQuarantined
-    ToBeRefunded -->|USDC refund sent| RefundSent["refund sent, awaiting confirmation"]
+    ToBeRefunded -->|Solana-token refund sent| RefundSent["refund sent, awaiting confirmation"]
     ToBeRefunded -->|send failed| ToBeQuarantined
     RefundSent -->|finalized| RefundConfirmed["refund_confirmed ✓"]
 
-    ToBeQuarantined -->|USDC moved to quarantine| QuarantineSent["quarantine sent, awaiting confirmation"]
+    ToBeQuarantined -->|Solana token moved to quarantine| QuarantineSent["quarantine sent, awaiting confirmation"]
     ToBeQuarantined -->|send failed| QuarantineFailed["quarantine failed ✗"]
     QuarantineSent -->|finalized| QuarantineConfirmed["quarantine_confirmed ✓"]
 
     Stale["age > STALE_DEPOSIT_QUARANTINE_SEC<br/>(while 'ready for processing')"] --> ToBeQuarantined
 ```
 
-### USDC → USDD State Descriptions
+### Solana token → Nexus token state descriptions
 
 | State | Description | Table | Status value |
 |-------|-------------|-------|--------------|
@@ -161,45 +169,45 @@ flowchart TD
 | **Processed** | One exact DEBIT contract passed the local confirmation/read-back checks; terminal evidence includes `txid` and `contract_id` | `processed_sigs` | `"debit_confirmed"` |
 | **ProcessedAsFees** | Amount after fees ≤ 0 | `processed_sigs` | `"processed, amount after fees <= 0"` |
 | **ToBeRefunded** | Validation failed or amount exceeds the configured cap; ambiguity alone never refunds | `unprocessed_sigs` | `"to be refunded"` |
-| **RefundSent** | USDC refund broadcast | `unprocessed_sigs` | `"refund sent, awaiting confirmation"` |
+| **RefundSent** | Solana-token refund broadcast | `unprocessed_sigs` | `"refund sent, awaiting confirmation"` |
 | **RefundConfirmed** | Refund finalized | `refunded_sigs` | `"awaiting confirmation"` → `"refund_confirmed"` |
-| **ToBeQuarantined** | Refund impossible or attempts spent | `unprocessed_sigs` | `"to be quarantined"` |
-| **QuarantineSent** | USDC moved to `USDC_QUARANTINE_ACCOUNT` | `unprocessed_sigs` | `"quarantine sent, awaiting confirmation"` |
+| **ToBeQuarantined** | Solana-side refund impossible or attempts spent | `unprocessed_sigs` | `"to be quarantined"` |
+| **QuarantineSent** | Solana token moved to `SOLANA_QUARANTINE_ACCOUNT` (`USDC_QUARANTINE_ACCOUNT` is the legacy alias) | `unprocessed_sigs` | `"quarantine sent, awaiting confirmation"` |
 | **QuarantineConfirmed** | Quarantine finalized | `quarantined_sigs` | `"awaiting confirmation"` → `"quarantine_confirmed"` |
 | **QuarantineFailed** | Quarantine send failed | `unprocessed_sigs` | `"quarantine failed"` |
 
 > **Ambiguity is never treated as failure.** `debit_nexus_token_with_txid()` returns `(False, None)`
 > both when the CLI failed *and* when it succeeded but the response could not be parsed.
-> Refunding on that signal would mint USDD **and** return the USDC. Instead the row goes to
+> Refunding on that signal could issue the Nexus token **and** return the Solana token. Instead the row goes to
 > `debit unverified` and `resolve_unverified_debits()` asks the chain, keyed on the unique
 > per-attempt `reference` persisted *before* the call.
 
 ---
 
-## USDD → USDC State Machine (Nexus to Solana)
+## Nexus token → Solana token state machine
 
 ```mermaid
 flowchart TD
-    START((Start)) --> Credit[USDD credit to treasury detected]
+    START((Start)) --> Credit[Configured Nexus-token CREDIT to treasury detected]
 
-    Credit -->|"< DUST_CREDIT_USDD"| Ignored["ignored entirely — no row, no accounting"]
-    Credit -->|"dust ≤ amount < MIN_CREDIT_USDD"| FeesRecorded["processed as fees ✓<br/>(recorded: sender, amount, txid)"]
+    Credit -->|"< DUST_CREDIT_NEXUS_TOKEN"| Ignored["ignored entirely — no row, no accounting"]
+    Credit -->|"dust ≤ amount < MIN_CREDIT_NEXUS_TOKEN"| FeesRecorded["processed as fees ✓<br/>(recorded: sender, amount, txid)"]
     Credit -->|"amount ≤ flat + dynamic fee"| FeesRecorded
-    Credit -->|"> MAX_SWAP_USDD"| RefundPending["refund pending"]
+    Credit -->|"> legacy-named MAX_SWAP_USDD cap"| RefundPending["refund pending"]
     Credit -->|normal| Pending["pending_receival"]
 
-    Pending -->|"asset found, owner matches, valid USDC account"| Ready["ready for processing"]
+    Pending -->|"asset found, owner matches, valid configured-mint token account"| Ready["ready for processing"]
     Pending -->|"lookup failed / malformed / incomplete"| Pending
     Pending -->|owner mismatch| Pending
     Pending -->|"complete mapping has invalid receival_account"| RefundPending
     Pending -->|"complete absence after REFUND_TIMEOUT_SEC"| RefundHold["refund held for operator review"]
 
-    Ready -->|"vault cannot cover payout"| Ready
+    Ready -->|"configured Solana vault cannot cover payout"| Ready
     Ready -->|"net ≤ 0"| FeesRecorded
     Ready -->|attempt| Sending["sending"]
     Ready -.->|"paused (backing deficit)"| Ready
 
-    Sending -->|"USDC sent, sig stored"| Awaiting["sig created, awaiting confirmations"]
+    Sending -->|"Solana token sent, sig stored"| Awaiting["sig created, awaiting confirmations"]
     Sending -->|"unknown send outcome: hold, never blindly retry"| Sending
     Sending -->|"legacy attempt cap reached: operator hold, no automatic debit"| RefundPending
     Sending -->|"crash recovery: exact finalized payout evidence"| Awaiting
@@ -221,15 +229,15 @@ flowchart TD
     RefundPending -->|legacy state| RefundHold
 ```
 
-### USDD → USDC State Descriptions
+### Nexus token → Solana token state descriptions
 
 | State | Description | Table | Status value |
 |-------|-------------|-------|--------------|
-| **Ignored** | Below `DUST_CREDIT_USDD` — spam floor, deliberately no trace | — | — |
-| **FeesRecorded** | Below `MIN_CREDIT_USDD` or ≤ fees; **recorded per `(txid, contract_id)`** so funds stay traceable; fee journal and terminal classification commit atomically per source contract | `processed_txids` | `"processed as fees"` |
+| **Ignored** | Below `DUST_CREDIT_NEXUS_TOKEN` (legacy alias `DUST_CREDIT_USDD`) — spam floor, deliberately no trace | — | — |
+| **FeesRecorded** | Below `MIN_CREDIT_NEXUS_TOKEN` (legacy alias `MIN_CREDIT_USDD`) or ≤ fees; **recorded per `(txid, contract_id)`** so funds stay traceable; fee journal and terminal classification commit atomically per source contract | `processed_txids` | `"processed as fees"` |
 | **Pending** | Credit queued by exact `(txid, contract_id)`, awaiting asset mapping | `unprocessed_txids` | `"pending_receival"` |
 | **Ready** | Mapping resolved and owner-verified | `unprocessed_txids` | `"ready for processing"` |
-| **Sending** | Exact payout/fee terms frozen and one-shot source claimed before RPC; ambiguous results never reopen READY | `unprocessed_txids` | `"sending"` |
+| **Sending** | Exact `payout_solana_units` / `payout_fee_nexus_units` frozen and one-shot source claimed before RPC; ambiguous results never reopen READY | `unprocessed_txids` | `"sending"` |
 | **Awaiting** | Awaiting full finalized payout evidence matching the frozen terms; a stored signature alone is insufficient | `unprocessed_txids` | `"sig created, awaiting confirmations"` |
 | **Processed** | Exact successful finalized payout evidence matches source identity, vault, mint, recipient and output; atomic fee journal and exact source removal | `processed_txids` | `"processed"` |
 | **TradeBal** | Legacy mapping-timeout recheck; complete absence now holds | `unprocessed_txids` | `"trade balance to be checked"` |
@@ -240,9 +248,9 @@ flowchart TD
 | **IntentOutcome** | CLI result is submitted or unknown. A submitted outbound txid can resolve from one exact direct transaction contract only after the configured confirmation threshold; an `outcome_unknown` reference-only row remains held because the live-offset history scan cannot prove a complete range. | `nexus_transfer_intents` | `"submitted"` / `"outcome_unknown"` |
 | **IntentCompleted** | Exact outbound txid/contract/reference/endpoints/units and distinct source contract identity are retained. Finalization still requires explicit operator evidence. | `nexus_transfer_intents` | `"completed"` |
 | **Disposition** | Atomic exact-source terminal state, audit and queue deletion preserve sibling liabilities. Conflicting evidence or legacy source identity refuses finalization. | transfer + terminal table | `"refund_confirmed_by_operator"` / `"quarantine_confirmed_by_operator"` |
-| **Quarantined** | Ambiguous USDC payout confirmation, manual review | `unprocessed_txids` | `"quarantined"` |
+| **Quarantined** | Ambiguous Solana-token payout evidence, manual review | `unprocessed_txids` | `"quarantined"` |
 
-> **A USDC-confirmation timeout quarantines — it does not refund.** The USDC may in fact
+> **A Solana-payout confirmation timeout quarantines — it does not refund.** The Solana token may in fact
 > have been sent and only the lookup failed; refunding would pay twice.
 
 ### Processing Priority Order (`process_unprocessed_txids`)
@@ -260,15 +268,15 @@ flowchart TD
 
 ## Paused Mode (Backing Deficit)
 
-When `fees.maintain_backing_and_bounds()` reports a deficit (vault USDC below
-`BACKING_DEFICIT_PAUSE_PCT`% of circulating USDD), the loop does **not** skip the cycle.
+When `fees.maintain_backing_and_bounds()` reports a deficit (configured Solana-vault backing below
+`BACKING_DEFICIT_PAUSE_PCT`% of configured Nexus-token circulation), the loop does **not** skip the cycle.
 It runs both pollers with `paused=True`:
 
 | Continues | Stops |
 |-----------|-------|
-| USDC refunds, quarantine, confirmation checks | New deposit ingestion |
-| USDD holds and evidence-only ambiguity resolution | USDC→USDD debits |
-| Waterline held (no fetch ⇒ no advance) | USDD→USDC USDC sends |
+| Solana-token refunds, quarantine, confirmation checks | New deposit ingestion |
+| Nexus-credit holds and evidence-only ambiguity resolution | Solana→Nexus debits |
+| Waterline held (no fetch ⇒ no advance) | Nexus→Solana payouts |
 
 A failure of the backing check itself also fails safe to paused. A `backing_deficit_pause`
 alert is emitted.
@@ -279,17 +287,16 @@ alert is emitted.
 
 | Timeout | Config | Default | Applies to | Handler |
 |---------|--------|---------|-----------|---------|
-| Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **USDD→USDC only** | `process_unprocessed_txids()` P1 |
-| Debit-confirmation observation window | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDC→USDD; a negative/incomplete lookup still holds for manual resolution | `check_unconfirmed_debits()` |
-| USDC-confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | USDD→USDC → **quarantine** | `process_unprocessed_txids()` P3 |
-| Ambiguous Nexus debit | N/A | held until positive reference evidence or manual resolution | USDC→USDD; a negative, failed or incomplete lookup never authorizes an automatic retry/refund | `resolve_unverified_debits()` |
-| Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | USDC→USDD | `_process_stale_deposits()` |
+| Asset-mapping timeout | `REFUND_TIMEOUT_SEC` | 3600s | **Nexus→Solana only** | `process_unprocessed_txids()` P1 |
+| Solana-payout confirmation timeout | `SOLANA_CONFIRM_TIMEOUT_SEC` | 600s | Nexus→Solana → **quarantine** | `process_unprocessed_txids()` P3 |
+| Ambiguous Nexus debit | N/A | held until positive reference evidence or manual resolution | Solana→Nexus; a negative, failed or incomplete lookup never authorizes an automatic retry/refund | `resolve_unverified_debits()` |
+| Stale deposit | `STALE_DEPOSIT_QUARANTINE_SEC` | 86400s | Solana→Nexus | `_process_stale_deposits()` |
 
 **Retry:** `MAX_ACTION_ATTEMPTS` (3) attempts, with `ACTION_RETRY_COOLDOWN_SEC` (300s)
 enforced between them. `should_attempt()` returns False for *either* reason;
 `attempts_exhausted()` distinguishes them, so a cooldown never causes a premature
-quarantine. After exhaustion, eligible USDC-side actions may move USDC to
-`USDC_QUARANTINE_ACCOUNT`. USDD-side automatic treasury-to-quarantine transfers
+quarantine. After exhaustion, eligible Solana-side actions may move the configured token to
+`USDC_QUARANTINE_ACCOUNT`. Nexus-side automatic treasury-to-quarantine transfers
 remain disabled; the source enters an operator hold and can move only through the
 audited durable-intent workflow.
 
@@ -299,28 +306,44 @@ audited durable-intent workflow.
 
 | Table | Purpose |
 |-------|---------|
-| `unprocessed_sigs` / `processed_sigs` / `refunded_sigs` / `quarantined_sigs` | USDC→USDD lifecycle |
-| `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | USDD→USDC lifecycle, composite primary key `(txid, contract_id)`; legacy rows use `-1` |
+| `unprocessed_sigs` / `processed_sigs` / `refunded_sigs` / `quarantined_sigs` | Solana→Nexus lifecycle (legacy column names retained) |
+| `unprocessed_txids` / `processed_txids` / `refunded_txids` / `quarantined_txids` | Nexus→Solana lifecycle (legacy column names retained), composite primary key `(txid, contract_id)`; legacy rows use `-1` |
 | `attempts` | Retry counters + `last_timestamp` (cooldown) |
 | `nexus_transfer_intents` / `nexus_transfer_audit_events` | Immutable outbound Nexus debit inputs, exact `(source_txid, source_contract_id)` identity and operator evidence; legacy source identities remain held |
 | `reservations` | Cross-worker mutual exclusion on money actions |
 | `counters` | Atomic Nexus debit `reference` sequence |
-| `payouts` | Outbound USDC ledger for the rolling 24h cap |
+| `payouts` | Outbound Solana-token ledger for the rolling 24h cap |
 | `fee_entries` / `fee_summary` | Authoritative fee ledger |
 | `waterline_proposals` / `heartbeat` | Waterline plumbing and last known-good values |
 | `accounts` | Cached balances |
 
 SQLite runs in **WAL** mode (set in `init_db()`).
 
+### Frozen persisted compatibility values
+
+These names still contain the original pair labels because changing a persisted key could reset a
+retry budget or bypass an in-flight reservation. Current callers therefore retain:
+
+```text
+reservations.kind: usdc_to_usdd_debit
+attempts.action_key prefixes:
+  usdd_debit:  usdc_refund:  usdc_quarantine_send:  usdc_quarantine:
+  usdc_send:   usdd_refund:  usdd_refund_unresolved:
+  usdd_refund_pending:  usdd_collect_refund:
+```
+
+For a current Nexus payout the argument passed to `payout_attempt_key()` is composite, producing
+`usdc_send:<txid>:<contract_id>`. Older Nexus disposition keys remain txid-only compatibility data.
+
 ### Idempotency Guarantees
 
-**USDC → USDD**
+**Solana token → Nexus token**
 - Solana signature is the primary key; `processed`/`refunded`/`quarantined` sets are checked before acting.
 - A unique `reference` is persisted **before** each debit and is the on-chain lookup key for ambiguity resolution.
 - `reserve_action("usdc_to_usdd_debit", sig)` prevents two workers acting on one deposit.
 - Refund/quarantine sends carry `refundSig:<sig>` / `quarantinedSig:<sig>` memos, checked on-chain before a retry re-sends.
 
-**USDD → USDC**
+**Nexus token → Solana token**
 - Live admission, wipeout Nexus admission and all four lifecycle tables use
   `(txid, contract_id)`. Valid sibling CREDIT contracts can therefore be queued and normally
   terminalized independently; legacy pre-migration rows retain `contract_id=-1`.
@@ -363,8 +386,13 @@ The Nexus poller applies the same proof rule:
 | Full page budget or processing budget exhausted | held (`pagination_truncated`), even when active rows exist |
 | Unprocessed credits exist after a complete poll | poller may pin behind the oldest |
 | Complete scan with persisted page data | may advance to the oldest scanned timestamp minus safety |
-| Empty successful unfiltered response | **held** (`empty_result`); absence from a live endpoint is not proof of a complete stable range |
+| Empty successful unfiltered response | **held** (`empty_enumeration_unproven`); absence from a live endpoint is not proof of a complete stable range |
 | Processing pass | always held; it has no scan evidence and never proposes a waterline |
+
+That empty-result rule is the **live poller** rule. Startup's bounded
+`fetch_deposits_since()` currently reports an empty first page as complete for the requested
+checkpoint range, while refusing any scan that requests a later mutable-offset page. This
+difference is current code behavior, not proof that target-node empty-history semantics are safe.
 
 A missing Nexus transaction or reference is **never** an automatic proof of
 non-execution: the history endpoint is live and offset pagination has no snapshot
@@ -378,35 +406,36 @@ resolution rather than authorizing retry or refund.
 
 | Component | File | Function |
 |-----------|------|----------|
-| USDC→USDD polling | `src/swap_solana.py` | `poll_solana_deposits()` |
+| Solana→Nexus polling | `src/swap_solana.py` | `poll_solana_deposits()` |
 | Waterline advance | `src/swap_solana.py` | `_advance_solana_waterline()` |
-| USDC→USDD processing | `src/solana_client.py` | `process_unprocessed_solana_deposits()` |
+| Solana→Nexus processing | `src/solana_client.py` | `process_unprocessed_solana_deposits()` |
 | Ambiguity resolution | `src/nexus_client.py` | `resolve_unverified_debits()`, `find_nexus_debit_by_reference()` |
-| USDC refunds / quarantine | `src/solana_client.py` | `process_solana_deposits_refunding()`, `process_solana_deposits_quarantine()` |
-| USDD→USDC polling | `src/swap_nexus.py` | `poll_nexus_deposits()` |
-| USDD→USDC processing | `src/swap_nexus.py` | `process_unprocessed_txids()` |
-| USDD quarantine transfer | `src/nexus_client.py` | `quarantine_nexus_token()` |
+| Solana-token refunds / quarantine | `src/solana_client.py` | `process_solana_deposits_refunding()`, `process_solana_deposits_quarantine()` |
+| Nexus→Solana polling | `src/swap_nexus.py` | `poll_nexus_deposits()` |
+| Nexus→Solana processing | `src/swap_nexus.py` | `process_unprocessed_txids()` |
+| Legacy Nexus quarantine helper (not called by the automatic loop) | `src/nexus_client.py` | `quarantine_nexus_token()` |
 | Held-credit operator disposition | `nexus_transfer_operator.py` | `prepare`, `authorize`, `execute`, `resolve`, `finalize` |
 | Alerting | `src/alerts.py` | `critical()`, `warning()`, `info()` |
 | Startup recovery | `src/startup_recovery.py` | `perform_startup_recovery()` |
 
-### Status Constants (`src/swap_nexus.py`)
+### Status constants (`src/swap_nexus.py`)
 
 ```python
-USDD_STATUS_PENDING          = "pending_receival"
-USDD_STATUS_READY            = "ready for processing"
-USDD_STATUS_SENDING          = "sending"
-USDD_STATUS_AWAITING         = "sig created, awaiting confirmations"
-USDD_STATUS_REFUNDED         = "refunded"
-USDD_STATUS_PROCESSED        = "processed"
-USDD_STATUS_FEES             = "processed as fees"
-USDD_STATUS_REFUND_PENDING   = "refund pending"
-USDD_STATUS_QUARANTINED      = "quarantined"
-USDD_STATUS_TRADE_BAL_CHECK  = "trade balance to be checked"
-USDD_STATUS_COLLECTING_REFUND = "collecting refund"
+NEXUS_STATUS_PENDING          = "pending_receival"
+NEXUS_STATUS_READY            = "ready for processing"
+NEXUS_STATUS_SENDING          = "sending"
+NEXUS_STATUS_AWAITING         = "sig created, awaiting confirmations"
+NEXUS_STATUS_REFUNDED         = "refunded"
+NEXUS_STATUS_PROCESSED        = "processed"
+NEXUS_STATUS_FEES             = "processed as fees"
+NEXUS_STATUS_REFUND_PENDING   = "refund pending"
+NEXUS_STATUS_REFUND_HOLD      = "refund held for operator review"
+NEXUS_STATUS_QUARANTINED      = "quarantined"
+NEXUS_STATUS_TRADE_BAL_CHECK  = "trade balance to be checked"
+NEXUS_STATUS_COLLECTING_REFUND = "collecting refund"
 ```
 
-USDC-side statuses are string literals in `src/solana_client.py` / `src/nexus_client.py`
+Solana-side statuses are string literals in `src/solana_client.py` / `src/nexus_client.py`
 (listed in the table above) rather than named constants.
 
 > **Known inconsistency:** `_process_stale_deposits()` also matches a `'memo unresolved'`
@@ -425,11 +454,11 @@ SELECT status, COUNT(*) FROM unprocessed_txids GROUP BY status;
 SELECT sig, reference, status FROM unprocessed_sigs
 WHERE status IN ('debit in flight','debit unverified');
 
--- rolling 24h outbound USDC vs cap
+-- rolling 24h outbound Solana-token units vs cap
 SELECT COALESCE(SUM(amount_usdc_units),0) FROM payouts
 WHERE timestamp >= strftime('%s','now') - 86400;
 
--- quarantined USDD actually moved?
+-- legacy-named Nexus quarantine records (automatic moves are disabled)
 SELECT txid, amount_usdd, status FROM quarantined_txids ORDER BY timestamp DESC;
 ```
 
