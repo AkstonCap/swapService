@@ -987,37 +987,66 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             )
             continue
 
-        amount_nexus_debited = float(Decimal(nexus_out_base) / (Decimal(10) ** config.USDD_DECIMALS))
-
-        # Bug #10 fix: Track fees when debit is confirmed.
-        # The fee is what the deposit gave up: deposit in, minus what was credited out.
-        # Those are on different scales (Solana base units vs Nexus base units), so the
-        # credited side is converted first - rounded up, so the recorded fee is never
-        # overstated. Exact integer arithmetic throughout, no float scaling.
+        # The fee is what the deposit gave up: deposit in minus exact Nexus output,
+        # converted to the Solana scale conservatively. Finalization commits fee,
+        # completed evidence, queue removal and the optional receipt obligation together.
         try:
-            solana_in_base = int(amount_usdc_units or 0)
-            credited_in_solana_base = config.nexus_units_to_solana(int(nexus_out_base))
+            solana_in_base = int(amount_usdc_units)
+            credited_in_solana_base = config.nexus_units_to_solana(nexus_out_base)
             fee_solana_units = max(0, solana_in_base - credited_in_solana_base)
-            if fee_solana_units > 0:
-                state_db.add_fee_entry(
-                    sig=sig,
-                    txid=txid,
-                    kind="swap_solana_to_nexus",
-                    amount_usdc_units=fee_solana_units,
-                    amount_usdd_units=None
+        except Exception as exc:
+            _log("nexus_fee_record_failed", level=logging.ERROR, sig=sig, txid=txid,
+                 error=str(exc))
+            continue
+
+        receipt_payload = None
+        expected_owner = None
+        receipt_asset_name = None
+        if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
+            from . import swap_receipts
+            expected_owner = swap_receipts.expected_provider_owner()
+            if not expected_owner:
+                _log("nexus_receipt_owner_held", level=logging.WARNING, sig=sig, txid=txid,
+                     reason="provider_registration_owner_unavailable")
+                continue
+            try:
+                receipt_payload = swap_receipts.build_receipt(
+                    source_signature=sig,
+                    solana_mint=str(config.SWAP_PAIR.solana.mint),
+                    solana_vault=str(config.SWAP_PAIR.solana.vault_account),
+                    nexus_token=str(config.SWAP_PAIR.nexus.register_address),
+                    nexus_account=nexus_destination,
+                    output_txid=txid_text,
+                    output_contract_id=exact_contracts[0].contract_id,
+                    output_units=nexus_out_base,
+                    reference=reference,
                 )
-        except Exception as e:
-            _log("nexus_fee_record_failed", level=logging.ERROR, sig=sig, txid=txid, error=str(e))
-        
-        state_db.mark_processed_sig(
-            sig, timestamp, int(amount_usdc_units or 0), txid, amount_nexus_debited,
-            "debit_confirmed", reference,
-            amount_usdd_units=nexus_out_base,
+                receipt_asset_name = swap_receipts.receipt_name(sig)
+            except ValueError as exc:
+                _log("nexus_receipt_evidence_held", level=logging.WARNING, sig=sig,
+                     txid=txid, reason=str(exc))
+                continue
+
+        finalized = state_db.finalize_confirmed_solana_payout(
+            sig=sig,
+            timestamp=timestamp,
+            amount_solana_units=solana_in_base,
+            output_txid=txid_text,
+            output_units=nexus_out_base,
             nexus_destination=nexus_destination,
             memo=memo,
-            contract_id=exact_contracts[0].contract_id,
+            reference=reference,
+            output_contract_id=exact_contracts[0].contract_id,
+            fee_solana_units=fee_solana_units,
+            receipt_payload=receipt_payload,
+            expected_owner=expected_owner,
+            receipt_name=receipt_asset_name,
+            nexus_decimals=config.USDD_DECIMALS,
         )
-        state_db.remove_unprocessed_sig(sig)
+        if not finalized:
+            _log("nexus_payout_finalization_held", level=logging.WARNING, sig=sig,
+                 txid=txid, reason="source_or_terminal_evidence_conflict")
+            continue
         processed_count += 1
         
         current_time = time.monotonic()
@@ -1757,6 +1786,7 @@ SERVICE_RECORD_IMMUTABLE = (
     "nexus_token", "nexus_treasury_address", "nexus_token_register_address",
     "solana_token", "solana_vault_address", "solana_vault_mint",
 )
+SERVICE_RECORD_OPTIONAL_IMMUTABLE = ("receipt_schema",)
 SERVICE_RECORD_MUTABLE = (
     "last_poll_timestamp", "last_safe_timestamp_solana", "last_safe_timestamp_nexus",
     "status", "version", "contact",
@@ -1863,6 +1893,8 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         "min_to_nexus": format_solana_units(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
         "min_to_solana": format_nexus_units(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }
+    if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
+        rec["receipt_schema"] = "nexus-swap-receipt-v1"
     return rec
 
 

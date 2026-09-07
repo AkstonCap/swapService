@@ -101,6 +101,45 @@ alone is not settlement: finalization requires a successful finalized transactio
 signer, mint, recipient, amount, memo, transaction id, and contract id match the frozen evidence.
 Unknown or mismatched outcomes hold rather than resubmit or refund.
 
+## Solana→Nexus payout receipt asset (opt-in current extension)
+
+When `NEXUS_SWAP_RECEIPTS_ENABLED=true`, confirmed Solana→Nexus payouts enqueue one durable
+`nexus-swap-receipt-v1` publication obligation. Publication is separate from money movement and is
+disabled by default. The asset is created with `format=JSON`; its `json=` parameter contains the
+following 11 definitions in this order, each with `type: "string"` and `mutable: false`:
+
+| Field | Exact meaning |
+|---|---|
+| `distordiaType` | Exact discriminator `nexusSwapReceipt` |
+| `schema` | Exact schema `nexus-swap-receipt-v1` |
+| `source_signature` | Full finalized Solana deposit signature |
+| `solana_mint` | Canonical configured Solana mint |
+| `solana_vault` | Canonical configured Solana vault token account |
+| `nexus_token` | Canonical configured Nexus token register address |
+| `nexus_account` | Exact Nexus payout account parsed from the source memo |
+| `output_txid` | Confirmed Nexus DEBIT transaction id |
+| `output_contract_id` | Canonical unsigned decimal string identifying that DEBIT contract |
+| `output_units` | Positive canonical unsigned decimal string in Nexus base units |
+| `reference` | Canonical unsigned decimal string copied from the exact DEBIT evidence |
+
+The Nexus built-in `owner` is not a custom schema field and is never sent as an `owner=` creation
+argument. Nexus derives it from the authenticated publisher profile. Before creation, the service
+reads its registration owner and requires it to equal the owner frozen with the receipt obligation.
+
+Readers retain the snake-case field contract above and query by the explicit Nexus query parameter:
+
+```text
+register/list/assets:asset/owner,address,distordiaType,schema,source_signature,solana_mint,solana_vault,nexus_token,nexus_account,output_txid,output_contract_id,output_units,reference
+where=results.source_signature=<FULL_SOLANA_SIGNATURE>
+```
+
+A receipt is evidence only when exactly one result matches every frozen field and the provider owner.
+The full Solana signature and exact Nexus `(output_txid, output_contract_id)` bind source to output;
+the sequential `reference` is supplemental evidence and is never sufficient by itself. Clients must
+also verify the referenced Nexus DEBIT and its spendable CREDIT/finality. Failed, malformed,
+incomplete, owner-mismatched, or duplicate receipt readback remains unresolved. A timeout or crash
+after crossing the durable create boundary never causes a blind second create.
+
 ## Current registration / heartbeat assets (v1)
 
 The service currently addresses a heartbeat by `NEXUS_HEARTBEAT_ASSET_NAME`; the configured
