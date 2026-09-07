@@ -74,7 +74,7 @@ Excluded surfaces are explicit:
 | `src/dashboard.py` | Display metadata | Dashboard labels/fallbacks must consume canonical display symbols and never control custody or routing. |
 <!-- token-pair-inventory: src/main.py:96,98,100,108,109,110,111,309,310,323,326,365,366,368,372,435,450,492 -->
 | `src/main.py` | Runtime semantics + Display metadata | Production admission and output must use canonical identities/terms, preserving only compatibility names where migration requires them. |
-<!-- token-pair-inventory: src/nexus_client.py:264,320,325,399,485,963,1699 -->
+<!-- token-pair-inventory: src/nexus_client.py:347,352,426,512,990,1726 -->
 | `src/nexus_client.py` | Runtime semantics + Display metadata | Require immutable Nexus register identity for authorization/reconciliation; retain token name only where the Nexus API requires it and for presentation. |
 <!-- token-pair-inventory: src/solana_client.py:275,365,617,725,747,807,931,1008,1012,1021,1022,1026,1410,1414,1458,1471,1533,1544,1545,1549,1579,1588,1589,1593,1618,1629,1726,1785,1786,1920,1923,1975,2102,2240,2251,2273,2274,2278,2305,2313,2314,2318 -->
 | `src/solana_client.py` | Runtime semantics + Frozen compatibility state | Route transfers, payout caps and persisted labels through the canonical pair object without renaming live state prematurely. |
