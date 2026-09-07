@@ -23,7 +23,7 @@ import sys
 
 from src import config, nexus_client as nc
 
-IMMUTABLE = set(nc.SERVICE_RECORD_IMMUTABLE)
+IMMUTABLE = set(nc.SERVICE_RECORD_IMMUTABLE) | set(nc.SERVICE_RECORD_OPTIONAL_IMMUTABLE)
 
 
 def _print_record(rec: dict) -> None:

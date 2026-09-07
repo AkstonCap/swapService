@@ -427,6 +427,15 @@ def parse_strict_boolean(name: str, value: str | None = None, *, default: bool =
 
 PRODUCTION_MODE = parse_strict_boolean("SWAP_PRODUCTION_MODE", default=False)
 
+# Public receipt assets cost NXS and are therefore strictly opt-in. Publication never
+# participates in payout retry/refund decisions; ambiguous creates use readback only.
+NEXUS_SWAP_RECEIPTS_ENABLED = parse_strict_boolean(
+    "NEXUS_SWAP_RECEIPTS_ENABLED", default=False
+)
+NEXUS_SWAP_RECEIPT_TIMEOUT_SEC = _positive_int_env(
+    "NEXUS_SWAP_RECEIPT_TIMEOUT_SEC", "20"
+)
+
 # --- Exposure caps (defence in depth against a bug or a compromised key) ---
 # Largest single swap accepted. Oversized items are refunded rather than paid out.
 # 0 disables the cap.

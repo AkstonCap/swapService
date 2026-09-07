@@ -567,6 +567,16 @@ def run():
             if _stop_event.is_set():
                 break
             _run_with_watchdog(lambda: process_unprocessed_txids(paused=bool(should_pause)), "nexus_process", NEXUS_PROCESS_BUDGET)
+
+            # Receipt creation is a separately durable, non-money side effect. It is
+            # disabled by default and never feeds payout retry/refund decisions.
+            if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
+                from . import swap_receipts
+                _run_with_watchdog(
+                    swap_receipts.publish_pending_receipts,
+                    "swap_receipts",
+                    getattr(config, "NEXUS_SWAP_RECEIPT_TIMEOUT_SEC", 20),
+                )
             
             if _stop_event.is_set():
                 break

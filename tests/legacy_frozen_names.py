@@ -120,6 +120,9 @@ EXPECTED_SCHEMA = {
                       "refund_sig", "refunded_units", "status"],
     "refunded_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
                        "owner_from_address", "confirmations_credit", "status", "sig"],
+    # Additive durable publication journal. It never authorizes or retries a payout.
+    "swap_receipts": ["source_signature", "receipt_name", "expected_owner", "payload_json",
+                      "status", "asset_address", "created_timestamp", "updated_timestamp"],
     "reservations": ["kind", "key", "timestamp"],
     "unprocessed_sigs": ["sig", "timestamp", "memo", "from_address", "amount_usdc_units",
                          "amount_usdd_units", "status", "txid", "reference"],

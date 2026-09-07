@@ -324,6 +324,22 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_payouts_ts ON payouts(timestamp)")
 
+    # Public receipt publication is a separate, non-monetary side effect. Its frozen
+    # payload is committed with payout finalization so a crash cannot lose the obligation.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS swap_receipts (
+            source_signature TEXT PRIMARY KEY,
+            receipt_name TEXT NOT NULL UNIQUE,
+            expected_owner TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            asset_address TEXT,
+            created_timestamp INTEGER NOT NULL,
+            updated_timestamp INTEGER NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_swap_receipts_status ON swap_receipts(status, created_timestamp)")
+
     # Hot-path indexes. Every poll filters these tables by status and orders by
     # timestamp; without an index each is a full scan + sort. Measured at 20k rows:
     # ~2.6-3.1x faster status queries, and get_unprocessed_sigs() drops from a 34ms
@@ -1503,6 +1519,230 @@ def remove_unprocessed_sig(sig: str):
     cursor.execute("DELETE FROM unprocessed_sigs WHERE sig = ?", (sig,))
     conn.commit()
     conn.close()
+
+
+_SWAP_RECEIPT_COLUMNS = (
+    "source_signature", "receipt_name", "expected_owner", "payload_json", "status",
+    "asset_address", "created_timestamp", "updated_timestamp",
+)
+
+
+def _canonical_receipt_payload(payload: dict) -> tuple[str, str]:
+    import json
+    if not isinstance(payload, dict):
+        raise ValueError("swap receipt payload must be an object")
+    source = payload.get("source_signature")
+    if not isinstance(source, str) or not source:
+        raise ValueError("swap receipt requires a full source signature")
+    return source, json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def enqueue_swap_receipt(payload: dict, expected_owner: str, receipt_name: str, *, conn=None) -> dict:
+    """Persist one immutable publication obligation; exact replay is idempotent."""
+    source, encoded = _canonical_receipt_payload(payload)
+    owner, name = str(expected_owner or "").strip(), str(receipt_name or "").strip()
+    if not owner or not name:
+        raise ValueError("swap receipt owner and deterministic name are required")
+    owns = conn is None
+    db = conn or sqlite3.connect(DB_PATH)
+    now = int(time.time())
+    try:
+        existing = db.execute(
+            "SELECT " + ", ".join(_SWAP_RECEIPT_COLUMNS)
+            + " FROM swap_receipts WHERE source_signature = ?", (source,),
+        ).fetchone()
+        if existing is not None:
+            row = dict(zip(_SWAP_RECEIPT_COLUMNS, existing))
+            if (row["receipt_name"], row["expected_owner"], row["payload_json"]) != (name, owner, encoded):
+                raise ValueError("existing swap receipt obligation conflicts with exact payout evidence")
+            return row
+        db.execute(
+            """INSERT INTO swap_receipts
+               (source_signature, receipt_name, expected_owner, payload_json, status,
+                created_timestamp, updated_timestamp)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+            (source, name, owner, encoded, now, now),
+        )
+        if owns:
+            db.commit()
+        row = get_swap_receipt(source, conn=db)
+        if row is None:
+            raise RuntimeError("could not read persisted swap receipt obligation")
+        return row
+    except Exception:
+        if owns:
+            db.rollback()
+        raise
+    finally:
+        if owns:
+            db.close()
+
+
+def get_swap_receipt(source_signature: str, *, conn=None) -> dict | None:
+    owns = conn is None
+    db = conn or sqlite3.connect(DB_PATH)
+    try:
+        row = db.execute(
+            "SELECT " + ", ".join(_SWAP_RECEIPT_COLUMNS)
+            + " FROM swap_receipts WHERE source_signature = ?", (source_signature,),
+        ).fetchone()
+        return dict(zip(_SWAP_RECEIPT_COLUMNS, row)) if row is not None else None
+    finally:
+        if owns:
+            db.close()
+
+
+def list_swap_receipts_for_publication(limit: int = 100) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT " + ", ".join(_SWAP_RECEIPT_COLUMNS)
+            + " FROM swap_receipts WHERE status IN ('pending','creating','verifying') "
+              "ORDER BY created_timestamp ASC LIMIT ?", (int(limit),),
+        ).fetchall()
+    return [dict(zip(_SWAP_RECEIPT_COLUMNS, row)) for row in rows]
+
+
+def claim_swap_receipt(source_signature: str) -> bool:
+    """Cross the no-blind-recreate boundary before invoking assets/create."""
+    with sqlite3.connect(DB_PATH) as conn:
+        changed = conn.execute(
+            """UPDATE swap_receipts SET status='creating', updated_timestamp=?
+               WHERE source_signature=? AND status='pending'""",
+            (int(time.time()), source_signature),
+        ).rowcount
+        return changed == 1
+
+
+def update_swap_receipt_publication(source_signature: str, status: str,
+                                    asset_address: str | None = None) -> bool:
+    if status not in {"verifying", "published"}:
+        raise ValueError("invalid swap receipt publication status")
+    address = str(asset_address or "").strip() or None
+    if status == "published" and not address:
+        raise ValueError("published swap receipt requires an asset address")
+    with sqlite3.connect(DB_PATH) as conn:
+        changed = conn.execute(
+            """UPDATE swap_receipts SET status=?, asset_address=COALESCE(?, asset_address),
+                      updated_timestamp=?
+               WHERE source_signature=? AND status IN ('creating','verifying')""",
+            (status, address, int(time.time()), source_signature),
+        ).rowcount
+        return changed == 1
+
+
+def finalize_confirmed_solana_payout(
+    *, sig: str, timestamp: int, amount_solana_units: int, output_txid: str,
+    output_units: int, nexus_destination: str, memo: str, reference: int,
+    output_contract_id: int, fee_solana_units: int,
+    receipt_payload: dict | None = None, expected_owner: str | None = None,
+    receipt_name: str | None = None, nexus_decimals: int = 6,
+) -> bool:
+    """Atomically archive exact confirmed payout, fee and optional receipt obligation."""
+    ints = (timestamp, amount_solana_units, output_units, reference, output_contract_id,
+            fee_solana_units, nexus_decimals)
+    if (any(type(value) is not int for value in ints) or output_units <= 0
+            or output_contract_id < 0 or fee_solana_units < 0 or nexus_decimals < 0):
+        raise ValueError("confirmed payout requires exact integer evidence")
+    if receipt_payload is not None:
+        required_fields = {
+            "distordiaType", "schema", "source_signature", "solana_mint", "solana_vault",
+            "nexus_token", "nexus_account", "output_txid", "output_contract_id",
+            "output_units", "reference",
+        }
+        expected_receipt_evidence = {
+            "distordiaType": "nexusSwapReceipt",
+            "schema": "nexus-swap-receipt-v1",
+            "source_signature": sig,
+            "nexus_account": nexus_destination,
+            "output_txid": output_txid,
+            "output_contract_id": str(output_contract_id),
+            "output_units": str(output_units),
+            "reference": str(reference),
+        }
+        if (not isinstance(receipt_payload, dict)
+                or set(receipt_payload) != required_fields
+                or any(not isinstance(value, str) or not value for value in receipt_payload.values())
+                or any(receipt_payload.get(key) != value
+                       for key, value in expected_receipt_evidence.items())):
+            raise ValueError("swap receipt does not match exact confirmed payout evidence")
+        expected_name = "swap-receipt-" + hashlib.sha256(sig.encode("utf-8")).hexdigest()[:32]
+        if (not str(expected_owner or "").strip()
+                or str(receipt_name or "") != expected_name):
+            raise ValueError("swap receipt does not match provider owner or deterministic name")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute(
+            """SELECT timestamp, amount_usdc_units, memo, status, txid, reference,
+                      amount_usdd_units FROM unprocessed_sigs WHERE sig=?""", (sig,),
+        ).fetchone()
+        expected_source = (timestamp, amount_solana_units, memo,
+                           "debited, awaiting confirmation", output_txid,
+                           reference, output_units)
+        terminal = conn.execute(
+            """SELECT timestamp, amount_usdc_units, txid, amount_usdd_units,
+                      nexus_destination, memo, status, reference, contract_id
+               FROM processed_sigs WHERE sig=?""", (sig,),
+        ).fetchone()
+        expected_terminal = (timestamp, amount_solana_units, output_txid, output_units,
+                             nexus_destination, memo, "debit_confirmed", reference,
+                             output_contract_id)
+        if source is None:
+            if terminal != expected_terminal:
+                conn.commit()
+                return False
+            if receipt_payload is not None:
+                # A terminal row created before receipts were enabled lacks a frozen
+                # provider/pair snapshot. Never invent that historical context. Only an
+                # already-durable obligation may be validated as an idempotent replay.
+                if get_swap_receipt(sig, conn=conn) is None:
+                    conn.commit()
+                    return False
+                enqueue_swap_receipt(
+                    receipt_payload, expected_owner or "", receipt_name or "", conn=conn
+                )
+            conn.commit()
+            return True
+        if source != expected_source:
+            conn.commit()
+            return False
+        if fee_solana_units:
+            fee_rows = conn.execute(
+                "SELECT amount_usdc_units FROM fee_entries "
+                "WHERE sig=? AND kind='swap_solana_to_nexus'", (sig,),
+            ).fetchall()
+            if fee_rows and fee_rows != [(fee_solana_units,)]:
+                conn.commit()
+                return False
+            if not fee_rows:
+                conn.execute(
+                    """INSERT INTO fee_entries
+                       (sig, txid, kind, amount_usdc_units, amount_usdd_units, timestamp)
+                       VALUES (?, ?, 'swap_solana_to_nexus', ?, NULL, ?)""",
+                    (sig, output_txid, fee_solana_units, int(time.time())),
+                )
+        from decimal import Decimal
+        amount_display = float(Decimal(output_units) / (Decimal(10) ** nexus_decimals))
+        conn.execute(
+            """INSERT INTO processed_sigs
+               (sig, timestamp, amount_usdc_units, txid, amount_usdd, amount_usdd_units,
+                nexus_destination, memo, status, reference, contract_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'debit_confirmed', ?, ?)""",
+            (sig, timestamp, amount_solana_units, output_txid, amount_display, output_units,
+             nexus_destination, memo, reference, output_contract_id),
+        )
+        if receipt_payload is not None:
+            enqueue_swap_receipt(receipt_payload, expected_owner or "", receipt_name or "", conn=conn)
+        if conn.execute("DELETE FROM unprocessed_sigs WHERE sig=?", (sig,)).rowcount != 1:
+            raise RuntimeError("exact pending Solana deposit changed during finalization")
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 ## Processed Signatures
