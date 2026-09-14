@@ -128,8 +128,7 @@ def test_failed_liquidity_read_cannot_submit_payout(tmp_path):
     with isolated_state(tmp_path):
         queue_ready()
         with patch.object(solana_client, "get_token_account_balance", side_effect=RuntimeError("RPC down")), \
-                patch.object(solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "sig")) as send, \
-                patch.object(solana_client, "get_signatures_confirmation", return_value={}):
+                patch.object(solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "sig")) as send:
             swap_nexus.process_unprocessed_txids()
         send.assert_not_called()
         assert state_db.get_unprocessed_txids_as_dicts()[0]["comment"] == swap_nexus.NEXUS_STATUS_READY
@@ -170,6 +169,72 @@ def test_payout_does_not_book_fee_before_confirmation(tmp_path):
         assert row["payout_fee_nexus_units"] == 100
         assert row["payout_solana_units"] == 1000 - 100
         evidence_lookup.assert_called_once_with("payout-signature", "payout-credit", 0)
+
+
+def test_primary_payout_reserves_cap_before_rpc_and_holds_when_exhausted(tmp_path):
+    with isolated_state(tmp_path):
+        queue_ready()
+        with patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 899, create=True), patch.object(
+            solana_client, "get_token_account_balance", return_value=1_000_000
+        ), patch.object(
+            solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "payout-signature")
+        ) as send:
+            swap_nexus.process_unprocessed_txids()
+
+        send.assert_not_called()
+        row = state_db.get_unprocessed_txids_as_dicts()[0]
+        assert row["comment"] == swap_nexus.NEXUS_STATUS_PAYOUT_CAP_HOLD
+        assert row["hold_reason"] == "rolling Solana payout cap exhausted"
+        assert state_db.payout_budget_used(86400) == 0
+
+
+def test_primary_payout_submission_and_confirmation_use_one_budget_obligation(tmp_path):
+    evidence = NexusPayoutEvidence(
+        txid="payout-credit", contract_id=0, solana_signature="payout-signature",
+        to_token_account="receiver", amount_solana_units=900,
+    )
+    with isolated_state(tmp_path):
+        queue_ready()
+        with patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 900, create=True), patch.object(
+            solana_client, "get_token_account_balance", return_value=1_000_000
+        ), patch.object(
+            solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "payout-signature")
+        ), patch.object(
+            solana_client, "get_nexus_payout_evidence", return_value=evidence
+        ):
+            swap_nexus.process_unprocessed_txids()
+            swap_nexus.process_unprocessed_txids()
+
+        with sqlite3.connect(state_db.DB_PATH) as conn:
+            events = conn.execute(
+                """SELECT event, signature, amount_usdc_units
+                   FROM solana_payout_budget_events
+                   WHERE obligation_id = 'nexus:payout-credit:0' ORDER BY id"""
+            ).fetchall()
+
+    assert events == [
+        ("reserved", None, 900),
+        ("submitted", "payout-signature", 900),
+        ("confirmed", "payout-signature", 900),
+    ]
+
+
+def test_primary_payout_keeps_capacity_reserved_when_submission_ledger_write_fails(tmp_path):
+    with isolated_state(tmp_path):
+        queue_ready()
+        with patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 900, create=True), patch.object(
+            solana_client, "get_token_account_balance", return_value=1_000_000
+        ), patch.object(
+            solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "payout-signature")
+        ), patch.object(
+            state_db, "record_solana_payout_submission", return_value=False
+        ):
+            swap_nexus.process_unprocessed_txids()
+
+        row = state_db.get_unprocessed_txids_as_dicts()[0]
+        assert row["comment"] == swap_nexus.NEXUS_STATUS_SENDING
+        assert row["sig"] is None
+        assert state_db.payout_budget_used(86400) == 900
 
 
 def test_memo_recovery_cannot_finalize_an_unconfirmed_payout(tmp_path):

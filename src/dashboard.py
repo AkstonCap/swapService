@@ -49,20 +49,23 @@ except Exception:
 # raw state-machine label into an instruction that is safe for the operator to follow.
 SIG_ISSUE_STATUSES = (
     "debit unverified", "debit in flight", "debited, awaiting confirmation",
-    "to be refunded", "refund sent, awaiting confirmation", "to be quarantined",
-    "quarantine sent, awaiting confirmation", "quarantine failed", "refund pending",
+    "to be refunded", "refund submission held", "refund sent, awaiting confirmation",
+    "to be quarantined", "quarantine submission held", "quarantine sent, awaiting confirmation",
+    "quarantine failed", "refund pending",
 )
 TXID_ISSUE_STATUSES = (
     "quarantined", "refund pending", "refund held for operator review", "collecting refund",
-    "trade balance to be checked", "sending", "sig created, awaiting confirmations",
+    "trade balance to be checked", "payout cap held", "sending", "sig created, awaiting confirmations",
 )
 SIG_OPERATOR_ACTIONS = {
     "debit in flight": "verify Nexus debit before any disposition",
     "debit unverified": "verify Nexus debit before any disposition",
     "debited, awaiting confirmation": "verify Nexus debit before any disposition",
     "to be refunded": "automatic Solana refund pending; inspect if stale",
+    "refund submission held": "verify the ambiguous Solana refund before any disposition",
     "refund sent, awaiting confirmation": "verify Solana refund before any disposition",
     "to be quarantined": "automatic Solana quarantine pending; inspect if stale",
+    "quarantine submission held": "verify the ambiguous Solana quarantine before any disposition",
     "quarantine sent, awaiting confirmation": "verify Solana quarantine before any disposition",
     "quarantine failed": "inspect failed Solana quarantine before retrying",
     "refund pending": "inspect refund evidence before retrying",
@@ -72,6 +75,7 @@ TXID_OPERATOR_ACTIONS = {
     "refund pending": "do not retry Nexus refund; inspect on-chain evidence",
     "collecting refund": "do not retry Nexus refund; inspect on-chain evidence",
     "trade balance to be checked": "verify receival mapping and treasury balance before disposition",
+    "payout cap held": "wait for cap capacity; do not retry manually",
     "sending": "verify Solana payout by Nexus txid memo before any disposition",
     "sig created, awaiting confirmations": "verify Solana payout before any disposition",
     "quarantined": "verify payout outcome before any disposition",
@@ -143,12 +147,19 @@ def api_summary() -> dict:
         cap = int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0)
     except Exception:
         cap = 0
-    spent = snap.get("payouts_24h_units")
-    if spent is None:
-        spent = _scalar(
-            "SELECT COALESCE(SUM(amount_usdc_units),0) FROM payouts WHERE timestamp >= ?",
-            (now - 86400,),
-        )
+    # The durable ledger includes held/reserved exposure and reconstructed payouts;
+    # the legacy payouts table alone can understate the rolling cap after a crash.
+    try:
+        spent = state_db.payout_budget_used(86400)
+    except Exception:
+        # Preserve read-only dashboard availability if an old/corrupt database cannot
+        # yet expose the durable ledger; never let a UI query affect money-path state.
+        spent = snap.get("payouts_24h_units")
+        if spent is None:
+            spent = _scalar(
+                "SELECT COALESCE(SUM(amount_usdc_units),0) FROM payouts WHERE timestamp >= ?",
+                (now - 86400,),
+            )
 
     snap_age = (now - int(snap["timestamp"])) if snap.get("timestamp") else None
 

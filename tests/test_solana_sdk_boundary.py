@@ -105,6 +105,45 @@ def _run_real_sdk_checks() -> int:
             },
         }
 
+    def disposition_transactions() -> tuple[dict, dict]:
+        source_token = "Vote111111111111111111111111111111111111111"
+        memo = f"swapService:v1:refund:{signature_b}"
+        payout = transaction(signature_a, memo)
+        payout["transaction"]["message"]["instructions"].insert(0, {
+            "program": "spl-token",
+            "parsed": {"type": "transferChecked", "info": {
+                "source": str(config.VAULT_USDC_ACCOUNT),
+                "destination": source_token,
+                "mint": str(config.USDC_MINT),
+                "tokenAmount": {"amount": "100"},
+            }},
+        })
+        source = transaction(signature_b, "nexus:recipient")
+        source["blockTime"] = 90
+        source["transaction"]["message"]["accountKeys"] = [
+            {"pubkey": str(config.VAULT_USDC_ACCOUNT), "signer": False, "writable": True},
+            {"pubkey": source_token, "signer": True, "writable": True},
+        ]
+        source["transaction"]["message"]["instructions"].insert(0, {
+            "program": "spl-token",
+            "parsed": {"type": "transferChecked", "info": {
+                "source": source_token,
+                "destination": str(config.VAULT_USDC_ACCOUNT),
+                "mint": str(config.USDC_MINT),
+                "tokenAmount": {"amount": "110"},
+            }},
+        })
+        source["meta"]["preTokenBalances"] = [{
+            "accountIndex": 0, "mint": str(config.USDC_MINT),
+            "uiTokenAmount": {"amount": "1"},
+        }]
+        source["meta"]["postTokenBalances"] = [{
+            "accountIndex": 0, "mint": str(config.USDC_MINT),
+            "uiTokenAmount": {"amount": "111"},
+        }]
+        source["meta"]["innerInstructions"] = []
+        return payout, source
+
     def entry(
         signature: str,
         *,
@@ -157,6 +196,27 @@ def _run_real_sdk_checks() -> int:
     assert result["complete"] is True, result
     assert result["reason"] is None, result
     assert len(requests_for(provider, "getTransaction")) == 1
+
+    # Current disposition recovery performs both transaction reads through the real SDK,
+    # including the memo-named source signature and finalized commitment.
+    payout_tx, source_tx = disposition_transactions()
+    provider = OfflineProvider(
+        [[entry(signature_a)]],
+        {signature_a: payout_tx, signature_b: source_tx},
+    )
+    with patch.object(solana_client, "_get_client", return_value=client_with(provider)):
+        result = solana_client.scan_memos_since_timestamp(50, max_signatures=10)
+    assert result["complete"] is True, result
+    disposition = result["solana_dispositions"][("refund", signature_b)]
+    assert disposition["source_amount_solana_units"] == 110
+    transaction_requests = requests_for(provider, "getTransaction")
+    assert len(transaction_requests) == 2
+    for request in transaction_requests:
+        assert request["params"][1] == {
+            "encoding": "jsonParsed",
+            "commitment": "finalized",
+            "maxSupportedTransactionVersion": 0,
+        }
 
     # The second-page cursor must also pass through the real SDK as Signature, not str.
     first_page = [
@@ -216,26 +276,22 @@ def _run_real_sdk_checks() -> int:
     assert recent["refund_sigs"] == {"deposit-signature": signature_a}, recent
     assert len(requests_for(provider, "getTransaction")) == 1
 
-    # The two inherited core-RPC transaction readers share the same SDK boundary.
+    # The authoritative core scanner builds a typed getTransaction request too.
     provider = OfflineProvider(
         [[entry(signature_a)]],
         {signature_a: transaction(signature_a)},
     )
-    with patch.object(solana_client, "_get_client", return_value=client_with(provider)):
-        core_transactions = solana_client.core_get_transactions_for_address(
-            str(config.VAULT_USDC_ACCOUNT)
-        )
-    assert core_transactions == [transaction(signature_a)]
-
-    provider = OfflineProvider(
-        [[entry(signature_a)]],
-        {signature_a: transaction(signature_a)},
-    )
-    with patch.object(solana_client, "_get_client", return_value=client_with(provider)):
-        deposits = solana_client._fetch_deposits_core_rpc(
-            str(config.VAULT_USDC_ACCOUNT), 50, 1, 1
-        )
-    assert deposits == []
+    with patch.object(solana_client, "_get_client", return_value=client_with(provider)), patch.object(
+        solana_client.state_db, "get_solana_deposit_scan_cursor", return_value=None,
+    ):
+        try:
+            solana_client._scan_incoming_deposits_core(
+                str(config.VAULT_USDC_ACCOUNT), since_ts=50, page_size=2,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("missing exact vault evidence must hold the deposit scan")
     assert len(requests_for(provider, "getTransaction")) == 1
 
     print("real installed Solana SDK signature-boundary checks: PASS")

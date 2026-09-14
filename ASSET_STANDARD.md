@@ -140,6 +140,19 @@ also verify the referenced Nexus DEBIT and its spendable CREDIT/finality. Failed
 incomplete, owner-mismatched, or duplicate receipt readback remains unresolved. A timeout or crash
 after crossing the durable create boundary never causes a blind second create.
 
+> **Receipt release gate:** current upstream Nexus API documentation pinned at core commit
+> [`1185145534a20ed4d2288e4513c505f271be536d`](https://github.com/Nexusoft/LLL-TAO/blob/1185145534a20ed4d2288e4513c505f271be536d/docs/API/COMMANDS/ASSETS.MD)
+> states that asset creation costs 1 NXS and the deterministic optional name another 1 NXS on
+> mainnet. Receipt publication is therefore a financial side effect even though it never moves bridged tokens. The current runtime
+> has no separate NXS receipt budget/accounting control, and the target node has not verified JSON
+> creation, global Query DSL filtering, projection shape, indexing delay or duplicate readback.
+> Keep `NEXUS_SWAP_RECEIPTS_ENABLED=false` for production until those controls and live tests pass.
+
+An existing v1 `format=basic` provider asset cannot gain the immutable `receipt_schema` field through
+heartbeat updates. Enabling this extension requires a reviewed recreation/migration to a provider
+record created with that field; otherwise receipts may be produced without being advertised by the
+registration. See the [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md).
+
 ## Current registration / heartbeat assets (v1)
 
 The service currently addresses a heartbeat by `NEXUS_HEARTBEAT_ASSET_NAME`; the configured

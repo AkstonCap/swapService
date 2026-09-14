@@ -19,49 +19,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-def _stub(name, **attrs):
-    module = type(sys)(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    sys.modules[name] = module
-
-
-class _PublicKey:
-    @staticmethod
-    def from_string(value):
-        return value
-
-    @staticmethod
-    def find_program_address(seeds, program_id):
-        return ("ATA", 0)
-
-    def __init__(self, *args):
-        pass
-
-
-_stub("solana")
-_stub("solana.rpc")
-_stub("solana.rpc.api", Client=lambda *args, **kwargs: None)
-_stub("solders")
-_stub("solders.pubkey", Pubkey=_PublicKey)
-_stub("solders.keypair", Keypair=object)
-_stub("solders.signature", Signature=_PublicKey)
-_stub("solders.hash", Hash=object)
-_stub("solders.instruction", Instruction=object, AccountMeta=object)
-_stub("solders.transaction", Transaction=object, VersionedTransaction=object)
-_stub("solders.message", Message=object)
-_stub("requests", post=lambda *args, **kwargs: None, get=lambda *args, **kwargs: None)
-_stub("dotenv", load_dotenv=lambda *args, **kwargs: None)
-
 os.environ.setdefault("SOLANA_RPC_URL", "http://127.0.0.1:8899")
 os.environ.setdefault("VAULT_KEYPAIR", "/tmp/nonexistent-keypair.json")
-os.environ.setdefault("VAULT_USDC_ACCOUNT", "VAULT")
-os.environ.setdefault("USDC_MINT", "MINT")
+os.environ.setdefault("VAULT_USDC_ACCOUNT", "11111111111111111111111111111111")
+os.environ.setdefault("USDC_MINT", "11111111111111111111111111111111")
 os.environ.setdefault("SOL_MINT", "SOL")
 os.environ.setdefault("NEXUS_PIN", "1234")
 os.environ.setdefault("NEXUS_USDD_TREASURY_ACCOUNT", "TREASURY")
 os.environ.setdefault("NEXUS_TOKEN_REGISTER_ADDRESS", "TOKEN-REGISTER")
-os.environ.setdefault("SOL_MAIN_ACCOUNT", "OWNER")
+os.environ.setdefault("SOL_MAIN_ACCOUNT", "11111111111111111111111111111111")
 os.environ.setdefault("NEXUS_CLI_PATH", "/bin/false")
 
 from src import (  # noqa: E402
@@ -693,20 +659,24 @@ class CriticalSafetyTests(unittest.TestCase):
             solana_client.state_db, "is_quarantined_sig", return_value=False
         ), patch.object(solana_client.state_db, "refund_attempt_key", return_value="refund-key"), patch.object(
             solana_client.state_db, "get_attempt_count", return_value=0
+        ), patch.object(solana_client.state_db, "prepare_solana_sig_disposition", return_value=True
+        ), patch.object(solana_client.state_db, "record_solana_sig_disposition_submission", return_value=True
         ), patch.object(solana_client.state_db, "record_attempt"), patch.object(
-            solana_client, "_is_token_account_for_mint", return_value=True
+            solana_client, "_resolve_solana_token_destination", return_value="sender-token"
         ), patch.object(solana_client.state_db, "add_fee_entry"
         ), patch.object(solana_client.state_db, "mark_processed_sig"), patch.object(
             solana_client.state_db, "remove_unprocessed_sig"
         ), patch.object(solana_client.state_db, "update_unprocessed_sig_status"), patch.object(
             solana_client.state_db, "mark_refunded_sig"
         ), patch.object(
-            solana_client, "send_solana_token", return_value=(True, "refund-tx")
+            solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "refund-tx")
         ) as send:
             processed = solana_client.process_solana_deposits_refunding(limit=1)
 
         self.assertEqual(processed, 1)
-        send.assert_called_once_with("sender", 93, memo="refundSig:deposit-sig")
+        send.assert_called_once_with(
+            "sender-token", 93, memo="swapService:v1:refund:deposit-sig"
+        )
 
     def test_solana_quarantine_uses_canonical_pair_refund_fee(self):
         """Quarantine output must use the same immutable pair refund fee."""
@@ -725,8 +695,11 @@ class CriticalSafetyTests(unittest.TestCase):
         ), patch.object(solana_client.state_db, "should_attempt", return_value=True), patch.object(
             solana_client.state_db, "quarantine_send_attempt_key", return_value="quarantine-key"
         ), patch.object(solana_client.state_db, "get_attempt_count", return_value=0), patch.object(
-            solana_client.state_db, "record_attempt"), patch.object(
-            solana_client, "_is_token_account_for_mint", return_value=True
+            solana_client.state_db, "prepare_solana_sig_disposition", return_value=True
+        ), patch.object(
+            solana_client.state_db, "record_solana_sig_disposition_submission", return_value=True
+        ), patch.object(solana_client.state_db, "record_attempt"), patch.object(
+            solana_client, "_resolve_solana_token_destination", return_value="quarantine-token"
         ), patch.object(
             solana_client.state_db, "is_processed_sig", return_value=False
         ), patch.object(solana_client.state_db, "is_refunded_sig", return_value=False), patch.object(
@@ -736,13 +709,13 @@ class CriticalSafetyTests(unittest.TestCase):
         ), patch.object(solana_client.state_db, "update_unprocessed_sig_status"), patch.object(
             solana_client.state_db, "mark_quarantined_sig"
         ), patch.object(
-            solana_client, "send_solana_token", return_value=(True, "quarantine-tx")
+            solana_client, "send_solana_token_to_account_with_sig", return_value=(True, "quarantine-tx")
         ) as send:
             processed = solana_client.process_solana_deposits_quarantine(limit=1)
 
         self.assertEqual(processed, 1)
         send.assert_called_once_with(
-            config.USDC_QUARANTINE_ACCOUNT, 93, memo="quarantinedSig:deposit-sig"
+            "quarantine-token", 93, memo="swapService:v1:quarantine:deposit-sig"
         )
 
     def test_solana_poll_money_path_summaries_are_structured_events(self):
@@ -751,9 +724,8 @@ class CriticalSafetyTests(unittest.TestCase):
             "last_safe_timestamp_nexus": 100,
             "last_safe_timestamp_solana": 100,
         }), patch.object(
-            swap_solana.solana_client, "fetch_incoming_deposits_via_helius", return_value=[]
-        ), patch.object(
-            swap_solana.solana_client, "process_helius_deposits", return_value=(2, None)
+            swap_solana.solana_client, "scan_incoming_deposits_with_durable_cursor",
+            return_value=solana_client.SolanaDepositBacklogProgress(True, 2, 200, None),
         ), patch.object(
             swap_solana.solana_client, "process_unprocessed_solana_deposits",
             return_value=[3, 4, 5, 6],
@@ -786,7 +758,7 @@ class CriticalSafetyTests(unittest.TestCase):
 
         check_unconfirmed.assert_called_once_with(17, 8.0)
         self.assertIn(
-            call("SOLANA_DEPOSITS_INGESTED", count=2),
+            call("SOLANA_DEPOSITS_INGESTED", count=2, cursor_complete=True),
             log.call_args_list,
         )
         self.assertIn(
@@ -904,6 +876,7 @@ class CriticalSafetyTests(unittest.TestCase):
         """A production process must not start with disabled loss-limiting controls."""
         with (
             patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "production_pair_configuration_errors", return_value=[]),
             patch.object(config, "MAX_SWAP_SOLANA_UNITS", 0),
             patch.object(config, "MAX_SWAP_NEXUS_UNITS", 0),
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0),
@@ -933,6 +906,7 @@ class CriticalSafetyTests(unittest.TestCase):
         """A production bridge must not authorize Nexus debits by a display ticker alone."""
         with (
             patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "production_pair_configuration_errors", return_value=[]),
             patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
             patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
@@ -955,10 +929,50 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(main.alerts, "critical")
+    def test_production_controls_require_explicit_pair_terms(self, critical):
+        """Production startup must not silently use default token precision or fees."""
+        pair_terms = {
+            "SOLANA_TOKEN_MINT": "solana-mint",
+            "SOLANA_VAULT_ACCOUNT": "solana-vault",
+            "SOLANA_TOKEN_DECIMALS": "6",
+            "NEXUS_TOKEN_REGISTER_ADDRESS": "TOKEN-REGISTER",
+            "NEXUS_TREASURY_ACCOUNT": "nexus-treasury",
+            "FEE_FLAT_TO_NEXUS": "0",
+            "FEE_FLAT_TO_SOLANA": "0",
+            "FEE_REFUND_SOLANA": "0",
+            "FEE_NEXUS_DISPOSITION": "0",
+            "FEE_BPS": "0",
+        }
+        with patch.dict(os.environ, pair_terms, clear=True):
+            with (
+                patch.object(config, "PRODUCTION_MODE", True),
+                patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+                patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+                patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+                patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+                patch.object(config, "ALERT_WEBHOOK_URL", ""),
+                patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+                patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+                patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+                patch.object(config, "NEXUS_API_USER", "api-user"),
+                patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+                patch.object(config, "NEXUS_MULTIUSER", False),
+                patch.object(config, "NEXUS_TOKEN_REGISTER_ADDRESS", "TOKEN-REGISTER"),
+            ):
+                self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=["NEXUS_TOKEN_DECIMALS (or USDD_DECIMALS)"],
+        )
+
+    @patch.object(main.alerts, "critical")
     def test_production_controls_require_https_nexus_api_transport(self, critical):
         """A live bridge must not place Nexus credentials in a child-process argv."""
         with (
             patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "production_pair_configuration_errors", return_value=[]),
             patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
             patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
@@ -987,6 +1001,7 @@ class CriticalSafetyTests(unittest.TestCase):
         """A multiuser Nexus node cannot admit a bridge without its session credential."""
         with (
             patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "production_pair_configuration_errors", return_value=[]),
             patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
             patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
@@ -1009,10 +1024,41 @@ class CriticalSafetyTests(unittest.TestCase):
         )
 
     @patch.object(main.alerts, "critical")
+    def test_production_controls_reject_receipt_nxs_spend_without_its_own_gate(self, critical):
+        """A default-off receipt flag must not become an uncapped production spend path."""
+        with (
+            patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "production_pair_configuration_errors", return_value=[]),
+            patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
+            patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(config, "ALERT_COMMAND", "/usr/local/bin/bridge-alert"),
+            patch.object(config, "ALERT_WEBHOOK_URL", ""),
+            patch.object(config, "USDC_QUARANTINE_ACCOUNT", "SOLANA_QUARANTINE"),
+            patch.object(config, "NEXUS_USDD_QUARANTINE_ACCOUNT", "NEXUS_QUARANTINE"),
+            patch.object(config, "NEXUS_API_URL", "https://127.0.0.1:8443"),
+            patch.object(config, "NEXUS_API_USER", "api-user"),
+            patch.object(config, "NEXUS_API_PASSWORD", "api-password"),
+            patch.object(config, "NEXUS_MULTIUSER", False),
+            patch.object(config, "NEXUS_TOKEN_REGISTER_ADDRESS", "TOKEN-REGISTER"),
+            patch.object(config, "NEXUS_SWAP_RECEIPTS_ENABLED", True),
+        ):
+            self.assertFalse(main.validate_production_controls())
+
+        critical.assert_called_once_with(
+            "production_controls_missing",
+            "refusing production startup because mandatory exposure controls are disabled",
+            missing_controls=[
+                "NEXUS_SWAP_RECEIPTS_ENABLED (receipt NXS-spend controls are not production-ready)"
+            ],
+        )
+
+    @patch.object(main.alerts, "critical")
     def test_production_controls_require_both_quarantine_destinations(self, critical):
         """A live bridge cannot strand either chain's failed-payout funds in its vault."""
         with (
             patch.object(config, "PRODUCTION_MODE", True),
+            patch.object(config, "production_pair_configuration_errors", return_value=[]),
             patch.object(config, "MAX_SWAP_SOLANA_UNITS", 1),
             patch.object(config, "MAX_SWAP_NEXUS_UNITS", 1),
             patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
@@ -3461,7 +3507,10 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertEqual(stats["nexus_waterline"], 1_999_999_000)
         self.assertEqual(stats["solana_waterline"], 1_999_999_500)
         rebuild_nexus.assert_called_once_with(1_999_999_000, paid_nexus_payouts={})
-        rebuild_solana.assert_called_once_with(1_999_999_500)
+        # A fresh heartbeat can be newer than the rolling payout-cap boundary, so
+        # recovery scans that complete 24-hour window separately before going green.
+        self.assertEqual(rebuild_solana.call_args_list[0], call(1_999_999_500))
+        self.assertEqual(rebuild_solana.call_count, 2)
         fallback.assert_not_called()
 
     def test_refunded_nexus_credit_identity_does_not_suppress_a_sibling(self):

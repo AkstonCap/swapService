@@ -52,8 +52,7 @@ checks = [
   ("mark_quarantined_txid(full)",       lambda: state_db.mark_quarantined_txid("tx","",1,2.5,"f","t","o","q")),
   ("get_unprocessed_txids_as_dicts",    lambda: state_db.get_unprocessed_txids_as_dicts()),
   ("get_sigs_pending_debit_verification", lambda: state_db.get_sigs_pending_debit_verification(("a","b"))),
-  ("process_helius_deposits (empty)",   lambda: solana_client.process_helius_deposits([])),
-  ("process_helius_deposits (tuple)",   lambda: solana_client.process_helius_deposits([("S",1,"nexus:a","f",500000)])),
+
   ("process_unprocessed_solana_deposits", lambda: solana_client.process_unprocessed_solana_deposits(10,1.0)),
   ("process_solana_deposits_refunding",   lambda: solana_client.process_solana_deposits_refunding(10,1.0)),
   ("process_solana_deposits_quarantine",  lambda: solana_client.process_solana_deposits_quarantine(10,1.0)),
@@ -74,7 +73,7 @@ print(f"[2] called {len(checks)} real functions")
 import ast
 sigs = {
  "debit_nexus_token_with_txid": nexus_client.debit_nexus_token_with_txid,
- "process_helius_deposits": solana_client.process_helius_deposits,
+
  "mark_quarantined_txid": state_db.mark_quarantined_txid,
  "add_unprocessed_txid": state_db.add_unprocessed_txid,
  "should_attempt": state_db.should_attempt,

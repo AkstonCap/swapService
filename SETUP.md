@@ -184,10 +184,10 @@ Source: [`src/startup_recovery.py`](src/startup_recovery.py) and [`src/main.py`]
 
 ## Production admission controls
 
-> **Unresolved code gap:** the daily-cap check covers `send_solana_token()` refund/quarantine
-> sends, but the main Nexus→Solana payout helper bypasses it. The positive-cap startup requirement
-> below is configuration validation, not proof of an enforced service-wide limit. See
-> [SECURITY.md](docs/SECURITY.md). Production acceptance must close this bypass.
+> **Payout-budget control:** all automated Solana token sends reserve rolling-cap capacity in
+> SQLite before RPC, retain it across submitted or unknown outcomes, and settle it only from the
+> exact confirmed signature. The positive-cap startup requirement is therefore enforced locally;
+> target-chain timeout/crash/finality acceptance remains required. See [SECURITY.md](docs/SECURITY.md).
 
 Set `SWAP_PRODUCTION_MODE=true` only after configuring and testing all controls. Production startup requires:
 
@@ -197,6 +197,7 @@ Set `SWAP_PRODUCTION_MODE=true` only after configuring and testing all controls.
 - `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`;
 - valid Nexus HTTPS API URL, user and password;
 - `NEXUS_SESSION` when multiuser mode is enabled.
+- `NEXUS_SWAP_RECEIPTS_ENABLED=false`; named receipt assets spend NXS. A local pre-create budget ledger exists, but registration migration and target-node acceptance are still unproven.
 
 The production switch accepts only `1/true/yes/on` and `0/false/no/off`, case-insensitively. A typo fails closed. A configured alert route is not proof of delivery; test it separately before live operation.
 

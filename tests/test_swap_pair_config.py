@@ -96,6 +96,33 @@ def test_canonical_fee_and_legacy_alias_conflict_fails_closed(monkeypatch):
         )
 
 
+def test_production_pair_terms_require_explicit_decimal_and_fee_policy(monkeypatch):
+    """Production cannot silently inherit default precision or an old fee schedule."""
+    config = _load_config(monkeypatch)
+    explicit = {
+        "SOLANA_TOKEN_MINT": "solana-mint",
+        "SOLANA_VAULT_ACCOUNT": "solana-vault",
+        "SOLANA_TOKEN_DECIMALS": "6",
+        "NEXUS_TOKEN_REGISTER_ADDRESS": "nexus-token-register",
+        "NEXUS_TREASURY_ACCOUNT": "nexus-treasury",
+        "NEXUS_TOKEN_DECIMALS": "6",
+        "FEE_FLAT_TO_NEXUS": "0",
+        "FEE_FLAT_TO_SOLANA": "0",
+        "FEE_REFUND_SOLANA": "0",
+        "FEE_NEXUS_DISPOSITION": "0",
+        "FEE_BPS": "0",
+    }
+
+    assert config.production_pair_configuration_errors(explicit) == []
+
+    explicit.pop("NEXUS_TOKEN_DECIMALS")
+    explicit.pop("FEE_NEXUS_DISPOSITION")
+    assert config.production_pair_configuration_errors(explicit) == [
+        "NEXUS_TOKEN_DECIMALS (or USDD_DECIMALS)",
+        "FEE_NEXUS_DISPOSITION (or NEXUS_CONGESTION_FEE_USDD)",
+    ]
+
+
 def test_default_nexus_disposition_fee_is_exact_for_zero_decimal_pairs(monkeypatch):
     """An inactive default disposition fee must not reject a valid 0/0 pair."""
     config = _load_config(

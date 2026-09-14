@@ -4,7 +4,7 @@ A custodial, bidirectional bridge for **one operator-configured Solana SPL token
 
 The bridge uses a **1:1 whole-token backing/conversion model before fees and conservative decimal rounding**. It is not a market-price exchange, a multi-pair router, or a general cross-chain adapter. The current Solana transfer implementation uses the classic SPL Token program; configurable mint selection does not imply native-SOL or Token-2022 support.
 
-> **Release safety:** local engineering checks do not establish production readiness. Target-chain, custody, migration and crash/recovery acceptance remain required before real funds are admitted. See the [current evaluation](docs/EVALUATION.md) and [safety repair evidence](docs/POST_CHANGE_REVIEW_2026-09-07.md).
+> **Release safety:** local engineering checks do not establish production readiness. Target-chain, custody, migration and crash/recovery acceptance remain required before real funds are admitted. See the [current evaluation](docs/EVALUATION.md), [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md), and [2026-09-07 safety repair evidence](docs/POST_CHANGE_REVIEW_2026-09-07.md).
 
 ## Documentation
 
@@ -15,7 +15,7 @@ The bridge uses a **1:1 whole-token backing/conversion model before fees and con
 | Asset/client integrations | [ASSET_STANDARD.md](ASSET_STANDARD.md) |
 | Developers | [runtime state machines](docs/STATE_MACHINES.md), [engineering guidance](.github/copilot-instructions.md) |
 | Security and release decisions | [SECURITY.md](docs/SECURITY.md), [EVALUATION.md](docs/EVALUATION.md) |
-| Previous verification | [2026-09-07 repair report](docs/POST_CHANGE_REVIEW_2026-09-07.md), [baseline review](docs/DEVELOPMENT_REVIEW_2026-09-07.md) |
+| Current and previous verification | [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md), [2026-09-07 repair report](docs/POST_CHANGE_REVIEW_2026-09-07.md), [baseline review](docs/DEVELOPMENT_REVIEW_2026-09-07.md) |
 
 Dated review/audit reports retain their original snapshots, token examples and test counts. They are historical evidence, not a substitute for checking the current code and deployment.
 
@@ -88,9 +88,11 @@ Solana-side refund and quarantine mechanisms exist for eligible failed deposits,
 
 ## Nexus token → Solana token
 
-> **Known operator-safety limitation:** the configured daily payout cap does not cover this
-> direction's current send helper. It is checked on refund/quarantine sends only. See
-> [the cap bypass in SECURITY.md](docs/SECURITY.md); configuring a positive cap is not a fix.
+> **Payout-budget control:** all automated Solana token sends—including Nexus→Solana
+> payouts, Solana refunds and quarantine sends—reserve the configured rolling cap in
+> SQLite before RPC. Pending, submitted and unknown outcomes continue to consume
+> capacity. A timeout or missing returned signature becomes an operator hold, not a
+> retry or cap release. Target-chain crash/finality acceptance is still required.
 
 1. Use an **existing token-account address for the configured Solana mint**. The payout path does not resolve a wallet-owner address to its ATA and does not create missing token accounts.
 2. Send the configured Nexus token from your token account to the verified service treasury, respecting the deployment's effective minimum. Normal holders use the account-debit flow, not a token-creator supply-debit example.

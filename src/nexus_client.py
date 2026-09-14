@@ -13,7 +13,7 @@ from urllib.request import (
     build_opener,
 )
 from . import config
-from . import state_db, nexus_client, nexus_memo, structured_logging
+from . import state_db, nexus_client, nexus_memo, receipt_contract, structured_logging
 import time
 
 
@@ -1000,32 +1000,32 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             continue
 
         receipt_payload = None
-        expected_owner = None
+        receipt_evidence = None
+        receipt_error = None
         receipt_asset_name = None
         if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
             from . import swap_receipts
-            expected_owner = swap_receipts.expected_provider_owner()
-            if not expected_owner:
-                _log("nexus_receipt_owner_held", level=logging.WARNING, sig=sig, txid=txid,
-                     reason="provider_registration_owner_unavailable")
-                continue
+            frozen_receipt_evidence = {
+                "source_signature": sig,
+                "solana_mint": str(config.SWAP_PAIR.solana.mint),
+                "solana_vault": str(config.SWAP_PAIR.solana.vault_account),
+                "nexus_token": str(config.SWAP_PAIR.nexus.register_address),
+                "nexus_account": nexus_destination,
+                "output_txid": txid_text,
+                "output_contract_id": exact_contracts[0].contract_id,
+                "output_units": nexus_out_base,
+                "reference": reference,
+            }
+            receipt_asset_name = swap_receipts.receipt_name(sig)
             try:
-                receipt_payload = swap_receipts.build_receipt(
-                    source_signature=sig,
-                    solana_mint=str(config.SWAP_PAIR.solana.mint),
-                    solana_vault=str(config.SWAP_PAIR.solana.vault_account),
-                    nexus_token=str(config.SWAP_PAIR.nexus.register_address),
-                    nexus_account=nexus_destination,
-                    output_txid=txid_text,
-                    output_contract_id=exact_contracts[0].contract_id,
-                    output_units=nexus_out_base,
-                    reference=reference,
-                )
-                receipt_asset_name = swap_receipts.receipt_name(sig)
+                receipt_payload = swap_receipts.build_receipt(**frozen_receipt_evidence)
             except ValueError as exc:
-                _log("nexus_receipt_evidence_held", level=logging.WARNING, sig=sig,
-                     txid=txid, reason=str(exc))
-                continue
+                # Payout settlement does not wait for optional publication, but the
+                # enabled obligation and exact evidence must survive this failure.
+                receipt_evidence = frozen_receipt_evidence
+                receipt_error = f"{type(exc).__name__}: {structured_logging.redact(str(exc))}"
+                _log("nexus_receipt_publication_manual_review", level=logging.WARNING, sig=sig,
+                     txid=txid, reason="invalid_receipt_evidence", error=receipt_error)
 
         finalized = state_db.finalize_confirmed_solana_payout(
             sig=sig,
@@ -1039,8 +1039,9 @@ def check_unconfirmed_debits(min_confirmations: int, timeout: int) -> int:
             output_contract_id=exact_contracts[0].contract_id,
             fee_solana_units=fee_solana_units,
             receipt_payload=receipt_payload,
-            expected_owner=expected_owner,
             receipt_name=receipt_asset_name,
+            receipt_evidence=receipt_evidence,
+            receipt_error=receipt_error,
             nexus_decimals=config.USDD_DECIMALS,
         )
         if not finalized:
@@ -1894,7 +1895,7 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         "min_to_solana": format_nexus_units(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }
     if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
-        rec["receipt_schema"] = "nexus-swap-receipt-v1"
+        rec["receipt_schema"] = receipt_contract.SCHEMA
     return rec
 
 

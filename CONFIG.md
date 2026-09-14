@@ -107,7 +107,7 @@ All decimal settings below are whole-token values. They are converted to integer
 | `DUST_CREDIT_NEXUS_TOKEN` | derived | Nexus input token | Default is max(one Nexus base unit, one tenth of the Nexus-scale Solana-output flat fee). Credits below it are ignored; credits below the minimum but at/above dust are durably booked as fees. |
 | `MAX_SWAP_USDC` | `0` | Solana token | Literal legacy-named active key; `0` disables outside production. Oversized Solana deposits follow the Solana refund path. |
 | `MAX_SWAP_USDD` | `0` | Nexus token | Literal legacy-named active key; `0` disables outside production. Oversized Nexus credits are held for operator disposition, not automatically refunded. |
-| `DAILY_PAYOUT_CAP_USDC` | `0` | Solana token | Legacy-named rolling 24-hour check in `send_solana_token()` (refund/quarantine paths). **The main Nexus→Solana payout helper bypasses this check.** `0` disables outside production; a positive production value does not close the bypass. |
+| `DAILY_PAYOUT_CAP_USDC` | `0` | Solana token | Legacy-named rolling 24-hour cap. Every automated Solana payout reserves the exact durable obligation before RPC; pending, submitted and unknown outcomes consume capacity until authoritative settlement/disposition. `0` disables the cap outside production. |
 
 There are currently no generic environment aliases for the three cap keys; preserve their literal spelling until code adds and validates a migration path.
 
@@ -128,6 +128,38 @@ There are currently no generic environment aliases for the three cap keys; prese
 | `NEXUS_RPC_HOST` | `http://127.0.0.1:8399` | Parsed compatibility setting; current main transport is selected by `NEXUS_API_URL` or `NEXUS_CLI_PATH`. |
 
 The operator-intent CLI in [`nexus_transfer_operator.py`](nexus_transfer_operator.py) is separate from the service loop. Automatic Nexus refund/quarantine debits remain disabled. A timeout, nonzero result or unparseable execution response is outcome-unknown and must not be blindly retried.
+
+## Optional Nexus payout receipts
+
+| Key | Default | Notes |
+|---|---:|---|
+| `NEXUS_SWAP_RECEIPTS_ENABLED` | `false` | Strict boolean. When enabled, exact confirmed Solana→Nexus payout evidence atomically creates an immutable public `nexus-swap-receipt-v1` obligation. Provider-owner lookup occurs later; unavailable ownership leaves an `awaiting_owner` outbox row. |
+| `NEXUS_SWAP_RECEIPT_TIMEOUT_SEC` | `20` | Positive integer timeout used by each receipt create/readback Nexus call and by the loop watchdog. It is not an NXS-spend cap. |
+| `NEXUS_SWAP_RECEIPT_EXPECTED_COST_NXS_UNITS` | `0` | Exact raw NXS base units reserved before one named-asset create. It must bound all expected creation/name costs; it is not scaled by `NEXUS_TOKEN_DECIMALS`. |
+| `NEXUS_SWAP_RECEIPT_BUDGET_NXS_UNITS` | `0` | Exact raw NXS base-unit lifetime allowance. Receipt creation requires this and the expected cost to be positive. An ambiguous create reservation remains charged. |
+
+Keep receipt publication disabled for production until the receipt-specific gates in
+[the 2026-09-08 review](docs/DEVELOPMENT_REVIEW_2026-09-08.md) pass. Creating a named Nexus
+asset costs NXS. The local append-only receipt ledger reserves an operator-configured maximum
+cost before a create, retains that reservation across timeout/crash/unknown outcomes, and records
+parseable create transaction/address identity. It cannot establish the target node's actual fee
+or create semantics, so production admission still rejects an explicit
+`NEXUS_SWAP_RECEIPTS_ENABLED=true` rather than relying only on the default-false setting. The
+create/query/readback contract has local mocked coverage but has not been exercised against the
+target Nexus build.
+
+`receipt_schema` is an immutable optional field in the v1 provider record. Because a Nexus
+`format=basic` asset cannot add fields, enabling receipts does not add this advertisement to an
+existing registration. Receipt-enabled startup requires a readable record with exactly
+`receipt_schema=nexus-swap-receipt-v1`, a non-empty on-chain owner, and immutable pair/custody
+fields matching the current configuration. Create and verify a new receipt-capable registration as
+part of a reviewed migration; do not assume the runtime heartbeat update changes the fixed field set.
+
+Payout finalization does not read the provider record. Canonical receipt evidence is retained in
+`swap_receipts` as `awaiting_owner`, atomically with payout completion. Publication validates the
+receipt-capable registration and freezes its owner before entering `pending`; a bound owner cannot
+be replaced. A later mismatch or outage holds publication without reopening the payout. This repairs
+the transient-owner-outage gap; target-node receipt acceptance remains outstanding.
 
 ## Polling, timeouts and state
 
@@ -154,7 +186,31 @@ The operator-intent CLI in [`nexus_transfer_operator.py`](nexus_transfer_operato
 | `STATE_DB_PATH` | `swap_service.db` | Authoritative SQLite database; read directly by `src/state_db.py`. |
 | `FEES_STATE_FILE` | `fees_state.json` | Legacy JSON fee accumulator. SQLite fee entries are authoritative on drift. |
 
-`HELIUS_RPC_URL` and `HELIUS_API_KEY` are read directly by `src/solana_client.py`. Full URL wins; otherwise the key is used to construct the Helius endpoint. If neither is set, core RPC is used. `POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES` and `FEE_EVENTS_FILE` appear as Python `getattr()` compatibility hooks but are not loaded from environment by `src/config.py`; documenting them as `.env` options would be incorrect.
+### Trusted Helius history and network selection
+
+The live deposit scanner selects, in order:
+
+1. Explicit `HELIUS_RPC_URL`.
+2. A Helius-owned `SOLANA_RPC_URL`.
+3. `HELIUS_API_KEY`, constructing the current mainnet/devnet Helius endpoint for the identified network.
+4. Core RPC when Helius is not configured.
+
+`SOLANA_RPC_URL` remains required for standard RPC operations and recovery. Use the same Helius URL
+there for the simplest deployment. A separate Helius URL cannot contradict a recognized core network.
+`SOLANA_NETWORK` optionally binds custom/proxied endpoints to `mainnet` or `devnet`; official Helius
+and Solana hostnames must agree with that setting. API-key shorthand with an unidentified network
+fails closed instead of guessing mainnet. RPC credentials are never part of public provider records.
+
+Helius history uses full parsed transactions and a fixed bounded query. Each page's deposits, holds
+and continuation commit together. A saved provider cursor must resume under its original query;
+no automatic cross-provider fallback may reinterpret it. An old core cursor without identity fields
+is discarded only when its conservative lower checkpoint is unchanged, then history is re-enumerated.
+Durable holds pin the public recovery checkpoint and remain liabilities until resolved.
+
+`POLL_HELIUS_LIMIT`, `NEXUS_MAX_PAGES` and `FEE_EVENTS_FILE` remain Python `getattr()` compatibility
+hooks, not environment options loaded by `src/config.py`. The live default page size is 200;
+Helius full-history pages support at most 1,000 entries. Finality status requests are split into
+batches of at most 256 signatures.
 
 ### Solana finality
 
@@ -194,7 +250,7 @@ An unavailable, malformed, incomplete or discrepant balance reconciliation latch
 
 ## Production admission
 
-`SWAP_PRODUCTION_MODE` defaults to `false`. It is the only boolean parsed strictly: accepted values are `1/true/yes/on` and `0/false/no/off`, case-insensitively with surrounding whitespace ignored. Any other present value raises.
+`SWAP_PRODUCTION_MODE` defaults to `false`. It and `NEXUS_SWAP_RECEIPTS_ENABLED` are parsed strictly: accepted values are `1/true/yes/on` and `0/false/no/off`, case-insensitively with surrounding whitespace ignored. Any other present value raises. Receipt publication is development/test-only: production admission rejects an explicit receipt enablement until its independent NXS-spend controls and registration migration exist.
 
 When true, startup refuses before polling unless all of these are present:
 
@@ -204,9 +260,12 @@ When true, startup refuses before polling unless all of these are present:
 - `SOLANA_QUARANTINE_ACCOUNT`;
 - `NEXUS_QUARANTINE_ACCOUNT`;
 - `NEXUS_TOKEN_REGISTER_ADDRESS`;
+- explicit Solana/Nexus mint/register, custody-account and decimal settings (canonical or accepted legacy spelling);
+- explicit `FEE_FLAT_TO_NEXUS`, `FEE_FLAT_TO_SOLANA`, `FEE_REFUND_SOLANA`, `FEE_NEXUS_DISPOSITION` and `FEE_BPS` terms (canonical or accepted legacy spelling; explicit `0` is valid);
 - either `ALERT_WEBHOOK_URL` or `ALERT_COMMAND`;
 - valid `NEXUS_API_URL`, plus `NEXUS_API_USER` and `NEXUS_API_PASSWORD`;
 - `NEXUS_SESSION` when `NEXUS_MULTIUSER=true`.
+- `NEXUS_SWAP_RECEIPTS_ENABLED=false`.
 
 This validates configuration presence, not endpoint reachability or alert delivery. Live operation remains gated on the target-node and both-chain acceptance work tracked in [docs/EVALUATION.md](docs/EVALUATION.md).
 

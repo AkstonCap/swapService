@@ -114,6 +114,10 @@ def validate_production_controls() -> bool:
     # so production cannot safely run without it.
     if not str(getattr(config, "NEXUS_TOKEN_REGISTER_ADDRESS", "") or "").strip():
         missing.append("NEXUS_TOKEN_REGISTER_ADDRESS")
+    # Development can retain defaults while compatibility migrations proceed. Production
+    # must make its exact token precision and every fee term an operator decision; a
+    # default copied from the historical pair could otherwise misprice a new deployment.
+    missing.extend(config.production_pair_configuration_errors())
     # The CLI accepts PIN/session only as argv parameters. Production must use the
     # equivalent HTTPS POST transport, which keeps these spending credentials out of
     # process listings while preserving Nexus' Basic API authentication boundary.
@@ -125,6 +129,15 @@ def validate_production_controls() -> bool:
     if (getattr(config, "NEXUS_MULTIUSER", False)
             and not str(getattr(config, "NEXUS_SESSION", "") or "").strip()):
         missing.append("NEXUS_SESSION (required when NEXUS_MULTIUSER=true)")
+    # A named Nexus receipt asset consumes operator NXS.  Receipt publication has a
+    # durable no-blind-recreate boundary and a local NXS budget ledger, but the
+    # registration migration and target-node fee/create semantics required for live
+    # authorisation remain unproven. Reject an explicit opt-in rather than relying on
+    # its default-false value as a production safeguard.
+    if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
+        missing.append(
+            "NEXUS_SWAP_RECEIPTS_ENABLED (receipt NXS-spend controls are not production-ready)"
+        )
 
     if not missing:
         return True
@@ -302,6 +315,21 @@ def run():
             error=rec.get("error") if isinstance(rec, dict) else "invalid recovery result",
         )
         return False
+
+    # Receipts are a separately durable NXS-spending extension. Their provider record
+    # must have been created with the immutable receipt schema and must name this exact
+    # pair/custody contract before the enabled service can admit work. This read follows
+    # complete recovery so a receipt-only check cannot precede the custody recovery gate.
+    if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
+        from . import swap_receipts
+        owner, receipt_message = swap_receipts.receipt_provider_registration()
+        if not owner:
+            alerts.critical(
+                "receipt_provider_registration_invalid",
+                "receipt publication is enabled but its provider registration is not admissible",
+                reason=receipt_message,
+            )
+            return False
 
     print("\n")
     print("🌐 Starting bidirectional swap service")
@@ -512,7 +540,7 @@ def run():
                                 vault_usdc_units=vault_solana,
                                 circulating_usdd_units=circ_nexus,
                                 paused=bool(should_pause),
-                                payouts_24h_units=state_db.payouts_since(86400),
+                                payouts_24h_units=state_db.payout_budget_used(86400),
                                 fees_usdc_units=f_solana,
                                 fees_usdd_units=f_nexus,
                                 # state_db deliberately does not import config, so it cannot
@@ -568,8 +596,9 @@ def run():
                 break
             _run_with_watchdog(lambda: process_unprocessed_txids(paused=bool(should_pause)), "nexus_process", NEXUS_PROCESS_BUDGET)
 
-            # Receipt creation is a separately durable, non-money side effect. It is
-            # disabled by default and never feeds payout retry/refund decisions.
+            # Receipt creation is a separately durable NXS-spending side effect. It
+            # never feeds payout retry/refund decisions. Production admission rejects
+            # it pending target-node and receipt-registration acceptance.
             if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):
                 from . import swap_receipts
                 _run_with_watchdog(

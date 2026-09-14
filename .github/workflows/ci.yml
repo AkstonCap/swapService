@@ -48,5 +48,17 @@ jobs:
       - name: Run complete test suite
         run: python -m pytest -q
 
+      - name: Verify SDK and configuration test isolation
+        run: |
+          python -m pytest -q tests/test_recovery_safety.py
+          python -m pytest -q \
+            tests/test_recovery_safety.py \
+            tests/test_solana_sdk_boundary.py
+          python -m pytest -q \
+            tests/test_swap_receipts.py \
+            tests/test_payout_review_regressions.py \
+            tests/test_nexus_fee_lifecycle.py \
+            tests/test_solana_sdk_boundary.py
+
       - name: Check whitespace errors
         run: git diff --check HEAD~1 HEAD

@@ -103,6 +103,35 @@ EXPECTED_SCHEMA = {
                                "amount_usdd_units", "reference", "status", "remote_txid", "contract_id",
                                "created_timestamp", "last_attempt_timestamp", "resolved_timestamp"],
     "payouts": ["id", "kind", "amount_usdc_units", "reference", "timestamp"],
+    # E-015 additive payout-cap journal. It never renames or rewrites an existing
+    # payout row; its append-only events retain capacity across unknown outcomes.
+    "solana_payout_budget_events": ["id", "obligation_id", "kind", "event",
+                                    "amount_usdc_units", "signature", "evidence", "timestamp"],
+    # The finalized-history cursor is an additive, durable availability journal. Its
+    # events prove page-before-cursor ordering; it does not rewrite financial rows.
+    "solana_deposit_scan_cursor": ["vault_account", "mint", "lower_timestamp", "before_signature",
+                                    "upper_timestamp", "started_timestamp", "network", "commitment",
+                                    "query_identity", "previous_timestamp"],
+    "solana_deposit_scan_events": ["id", "vault_account", "mint", "lower_timestamp",
+                                    "upper_timestamp", "request_before_signature", "next_before_signature",
+                                    "signature_count", "admitted_count", "event", "timestamp"],
+    # Trusted Helius uses a provider-native token bound to one immutable bounded query.
+    # Seen-signature evidence and durable holds are additive safety journals; no frozen
+    # lifecycle row or key is renamed.
+    "helius_deposit_scan_cursor": ["vault_account", "network", "mint", "commitment",
+                                     "lower_timestamp", "upper_timestamp", "pagination_token",
+                                     "previous_timestamp", "query_identity", "started_timestamp"],
+    "helius_deposit_scan_events": ["id", "query_identity", "network", "vault_account",
+                                     "mint", "commitment", "lower_timestamp", "upper_timestamp",
+                                     "request_pagination_token", "next_pagination_token",
+                                     "signature_count", "admitted_count", "held_count", "event",
+                                     "timestamp"],
+    "solana_deposit_scan_seen": ["query_identity", "signature", "block_timestamp"],
+    "solana_deposit_holds": ["signature", "block_timestamp", "memo", "from_address",
+                              "amount_units", "reason", "evidence_json", "provider",
+                              "query_identity", "first_seen_timestamp", "updated_timestamp",
+                              "network", "vault_account", "mint", "observed_commitment",
+                              "finality_required", "replay_attempts", "last_replay_timestamp"],
     # These append-only fields are intentionally introduced by the E-004 durable
     # reconciliation migration. Existing rows retain their original columns and are
     # treated as incomplete evidence until a separately verified backfill exists.
@@ -112,17 +141,27 @@ EXPECTED_SCHEMA = {
     "processed_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "amount_usdd_units", "from_address", "to_address",
                         "owner", "sig", "status", "payout_solana_units", "payout_fee_nexus_units",
                         "payout_receival_account"],
-    "quarantined_sigs": ["sig", "timestamp", "from_address", "amount_usdc_units", "memo",
-                         "quarantine_sig", "quarantined_units", "status"],
+    # E-015 settlement-proof fields freeze the actual token-account recipient and
+    # versioned output memo before RPC; old rows retain NULL and remain manual holds.
+    "quarantined_sigs": ["sig", "timestamp", "from_address", "destination_address",
+                         "amount_usdc_units", "memo", "payout_memo", "quarantine_sig",
+                         "quarantined_units", "status"],
     "quarantined_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
                           "owner", "sig", "status"],
-    "refunded_sigs": ["sig", "timestamp", "from_address", "amount_usdc_units", "memo",
-                      "refund_sig", "refunded_units", "status"],
+    "refunded_sigs": ["sig", "timestamp", "from_address", "destination_address",
+                      "amount_usdc_units", "memo", "payout_memo", "refund_sig",
+                      "refunded_units", "status"],
     "refunded_txids": ["txid", "contract_id", "timestamp", "amount_usdd", "from_address", "to_address",
                        "owner_from_address", "confirmations_credit", "status", "sig"],
     # Additive durable publication journal. It never authorizes or retries a payout.
     "swap_receipts": ["source_signature", "receipt_name", "expected_owner", "payload_json",
-                      "status", "asset_address", "created_timestamp", "updated_timestamp"],
+                      "status", "asset_address", "manual_review_error",
+                      "created_timestamp", "updated_timestamp"],
+    # E-016 additive receipt NXS-spend journal. Unknown create outcomes retain their
+    # reservation, so a restart cannot regain budget by treating timeout as failure.
+    "receipt_nxs_budget_events": ["id", "source_signature", "receipt_name", "event",
+                                  "expected_cost_nxs_units", "create_txid", "asset_address",
+                                  "timestamp"],
     "reservations": ["kind", "key", "timestamp"],
     "unprocessed_sigs": ["sig", "timestamp", "memo", "from_address", "amount_usdc_units",
                          "amount_usdd_units", "status", "txid", "reference"],
@@ -133,7 +172,7 @@ EXPECTED_SCHEMA = {
     "waterline_proposals": ["chain", "proposed_timestamp"],
 }
 
-print("\n[1] State database schema is unchanged")
+print("\n[1] State database schema matches frozen names and approved additive journals")
 conn = sqlite3.connect(DB)
 actual = {}
 for (t,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
@@ -179,6 +218,7 @@ from src import swap_nexus  # noqa: E402
 EXPECTED_STATUSES = {
     "NEXUS_STATUS_PENDING": "pending_receival",
     "NEXUS_STATUS_READY": "ready for processing",
+    "NEXUS_STATUS_PAYOUT_CAP_HOLD": "payout cap held",
     "NEXUS_STATUS_SENDING": "sending",
     "NEXUS_STATUS_AWAITING": "sig created, awaiting confirmations",
     "NEXUS_STATUS_REFUNDED": "refunded",

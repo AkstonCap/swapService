@@ -72,8 +72,41 @@ def _compat_env(canonical: str, legacy: str, *, default: str = "") -> str:
         )
     return canonical_value or legacy_value or default
 
+
+def production_pair_configuration_errors(environ=None) -> list[str]:
+    """Return pair terms that production must state instead of inheriting defaults.
+
+    The canonical/legacy compatibility pairs remain valid during migration, but live
+    custody must name both identities, precisions and every fee component explicitly.
+    """
+    environ = os.environ if environ is None else environ
+    required = (
+        ("SOLANA_TOKEN_MINT", "USDC_MINT"),
+        ("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT"),
+        ("SOLANA_TOKEN_DECIMALS", "USDC_DECIMALS"),
+        ("NEXUS_TOKEN_REGISTER_ADDRESS",),
+        ("NEXUS_TREASURY_ACCOUNT", "NEXUS_USDD_TREASURY_ACCOUNT"),
+        ("NEXUS_TOKEN_DECIMALS", "USDD_DECIMALS"),
+        ("FEE_FLAT_TO_NEXUS", "FLAT_FEE_USDD"),
+        ("FEE_FLAT_TO_SOLANA", "FLAT_FEE_USDC"),
+        ("FEE_REFUND_SOLANA", "FLAT_FEE_USDD"),
+        ("FEE_NEXUS_DISPOSITION", "NEXUS_CONGESTION_FEE_USDD"),
+        ("FEE_BPS", "DYNAMIC_FEE_BPS"),
+    )
+    missing = []
+    for spellings in required:
+        if not any(str(environ.get(name, "") or "").strip() for name in spellings):
+            missing.append(" (or ".join(spellings) + ")")
+    return missing
+
+
 # Solana
 RPC_URL = os.getenv("SOLANA_RPC_URL")
+# Optional explicit network binding for proxied/custom RPC URLs. Official Helius
+# hostnames are inferred when unset; an in-flight durable query is bound to this value.
+SOLANA_NETWORK = os.getenv("SOLANA_NETWORK", "").strip().lower()
+if SOLANA_NETWORK and SOLANA_NETWORK not in {"mainnet", "devnet"}:
+    raise ValueError("SOLANA_NETWORK must be mainnet or devnet")
 VAULT_KEYPAIR_PATH = os.getenv("VAULT_KEYPAIR")
 _vault_acct = _compat_env("SOLANA_VAULT_ACCOUNT", "VAULT_USDC_ACCOUNT")
 _sol_mint = _compat_env("SOLANA_TOKEN_MINT", "USDC_MINT")
@@ -434,6 +467,26 @@ NEXUS_SWAP_RECEIPTS_ENABLED = parse_strict_boolean(
 )
 NEXUS_SWAP_RECEIPT_TIMEOUT_SEC = _positive_int_env(
     "NEXUS_SWAP_RECEIPT_TIMEOUT_SEC", "20"
+)
+
+
+def _nonnegative_base_units_env(name: str, default: str = "0") -> int:
+    """Read a raw base-unit allowance without decimal rounding or float coercion."""
+    raw = os.getenv(name, default).strip()
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError(f"{name} must be a non-negative base-unit integer")
+    return int(raw)
+
+
+# NXS is distinct from the bridged Nexus token, so these are deliberately raw NXS base
+# units rather than values scaled by NEXUS_TOKEN_DECIMALS. Receipt creation refuses to
+# run when either is zero; production remains separately disabled pending target-node
+# create/query acceptance and provider-record migration.
+NEXUS_SWAP_RECEIPT_EXPECTED_COST_NXS_UNITS = _nonnegative_base_units_env(
+    "NEXUS_SWAP_RECEIPT_EXPECTED_COST_NXS_UNITS"
+)
+NEXUS_SWAP_RECEIPT_BUDGET_NXS_UNITS = _nonnegative_base_units_env(
+    "NEXUS_SWAP_RECEIPT_BUDGET_NXS_UNITS"
 )
 
 # --- Exposure caps (defence in depth against a bug or a compromised key) ---

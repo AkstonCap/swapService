@@ -95,11 +95,14 @@ derivation, and transfer instructions. Do not advertise or configure a Token-202
 - `MAX_SWAP_USDC` / `MAX_SWAP_USDD` are legacy-named current settings that cap the configured
   Solana/Nexus inputs. On the Nexus side, "refund" means an operator hold until a separately
   authorized durable disposition; it is not an automatic treasury debit.
-- **Known cap bypass:** `DAILY_PAYOUT_CAP_USDC` is checked inside `send_solana_token()` for
-  refund/quarantine sends. The main Nexus→Solana payout uses
-  `send_solana_token_to_account_with_sig()`, which does not perform this check. A positive cap
-  required by production configuration is therefore **not an enforced service-wide ceiling**.
-  This remains a code repair and acceptance-test requirement, not a documentation fix.
+- **Rolling payout-cap protocol:** `DAILY_PAYOUT_CAP_USDC` is enforced through an append-only
+  SQLite obligation ledger for every automated Solana payout, refund and quarantine movement.
+  Capacity is reserved with the exact source before RPC, retained across submitted/unknown states,
+  and settled only from the exact confirmed signature. Local code therefore refuses a cap breach
+  without sending; a primary Nexus credit is marked `payout cap held`, emits the rate-limited
+  `solana_payout_cap_held` critical alert, and is visible in the dashboard/API until the same durable
+  claim path can reserve capacity. Target-chain timeout, crash/restart and finality acceptance remain
+  required.
 - Even a correctly centralized service cap cannot stop an attacker who has stolen the signer
   key and submits transactions outside the service.
 - Deposits are ingested at `finalized` by default; a reorged `confirmed` deposit could otherwise

@@ -8,6 +8,7 @@ _LOG = structured_logging.get_logger("swapService.nexus")
 # Allowed lifecycle comments for unprocessed txids
 NEXUS_STATUS_PENDING = "pending_receival"
 NEXUS_STATUS_READY = "ready for processing"
+NEXUS_STATUS_PAYOUT_CAP_HOLD = "payout cap held"
 NEXUS_STATUS_SENDING = "sending"
 NEXUS_STATUS_AWAITING = "sig created, awaiting confirmations"
 NEXUS_STATUS_REFUNDED = "refunded"  # (processed file)
@@ -21,6 +22,7 @@ NEXUS_STATUS_COLLECTING_REFUND = "collecting refund"
 _NEXUS_ALLOWED_STATUSES = {
     NEXUS_STATUS_PENDING,
     NEXUS_STATUS_READY,
+    NEXUS_STATUS_PAYOUT_CAP_HOLD,
     NEXUS_STATUS_SENDING,
     NEXUS_STATUS_AWAITING,
     NEXUS_STATUS_REFUNDED,
@@ -279,8 +281,9 @@ def process_unprocessed_txids(paused: bool = False):
                     _log("NEXUS_PROCESS_BUDGET_EXCEEDED", stage="solana_sending")
                     break
                     
-                # Skip if not ready for sending
-                if r.get("comment") != NEXUS_STATUS_READY:
+                # A cap-held credit is retryable only through the same durable claim path.
+                # It stays visible to operators while it waits for rolling capacity.
+                if r.get("comment") not in {NEXUS_STATUS_READY, NEXUS_STATUS_PAYOUT_CAP_HOLD}:
                     continue
                 
                 txid = r.get("txid")
@@ -350,13 +353,38 @@ def process_unprocessed_txids(paused: bool = False):
                         net_solana_units, round_up=False
                     ),
                 )
+                payout_cap_units = int(
+                    getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0
+                )
                 if not state_db.prepare_nexus_payout(
                     txid=txid, contract_id=contract_id, receival_account=recv_account,
                     amount_usdd_units=amount_nexus_units,
                     payout_solana_units=net_solana_units,
                     payout_fee_nexus_units=total_fee_nexus_units,
+                    payout_cap_solana_units=payout_cap_units,
+                    payout_cap_hold_status=NEXUS_STATUS_PAYOUT_CAP_HOLD,
+                    payout_cap_hold_reason="rolling Solana payout cap exhausted",
                 ):
-                    continue  # Another worker already claimed this exact source credit.
+                    current = next(
+                        (row for row in state_db.get_unprocessed_txids_as_dicts()
+                         if row.get("txid") == txid and _row_contract_id(row) == contract_id),
+                        None,
+                    )
+                    if current and current.get("comment") == NEXUS_STATUS_PAYOUT_CAP_HOLD:
+                        alerts.critical(
+                            "solana_payout_cap_held",
+                            "Solana rolling payout cap exhausted; payout held until capacity is available",
+                            txid=txid,
+                            contract_id=contract_id,
+                            payout_units=net_solana_units,
+                            cap_units=payout_cap_units,
+                        )
+                        _log("NEXUS_PAYOUT_CAP_HELD", txid=txid, contract_id=contract_id,
+                             payout_units=net_solana_units, cap_units=payout_cap_units)
+                    else:
+                        _log("NEXUS_PAYOUT_BUDGET_OR_CLAIM_REFUSED", txid=txid,
+                             contract_id=contract_id)
+                    continue
                 state_db.record_attempt(send_key)
                 
                 try:
@@ -366,6 +394,16 @@ def process_unprocessed_txids(paused: bool = False):
                     ok, sig = solana_client.send_solana_token_to_account_with_sig(recv_account, net_solana_units, memo)
                     
                     if ok and sig:
+                        # The durable reservation was written before RPC.  If this append
+                        # fails after an accepted send, leave the source in ``sending`` and
+                        # retain the reservation: recovery must prove the memo/evidence
+                        # before it can settle, and must never submit again.
+                        if not state_db.record_solana_payout_submission(
+                            f"nexus:{txid}:{contract_id}", sig
+                        ):
+                            _log("NEXUS_PAYOUT_SUBMISSION_LEDGER_HOLD", txid=txid,
+                                 contract_id=contract_id, sig=sig)
+                            continue
                         # Submission is not settlement. Terms were persisted before RPC;
                         # book the fee atomically with confirmed terminal source state.
                         state_db.update_unprocessed_txid(txid=txid, contract_id=contract_id, status=NEXUS_STATUS_AWAITING, sig=sig)
