@@ -172,10 +172,24 @@ held rows than the worker limit, preserved capacity evidence, and atomic rollbac
 hold write. Positive controls retain the original frozen policy through terms drift and admit genuinely
 new post-startup sources. Existing online-backup/DB+WAL capacity-intent tests remain applicable.
 
+**Implemented maintenance containment — invalid retained ready-row policy:** startup now validates
+every retained ready row's frozen policy with the strict policy parser and exact source comparison.
+Partial fields, malformed evidence, mismatched source/decision, and an internally valid nonpayable
+decision on a ready row become the same non-sendable historical-authorization hold. No current
+configuration repairs the stored evidence. The boundary and all status changes commit atomically;
+raw evidence, principal, reservations, submission metadata and capacity evidence remain untouched.
+These holds are visible in the existing dashboard issue queue and cannot monopolize the ready-worker
+limit. Valid matching payable policy continues under its original terms after configuration drift.
+
+Collected regressions in `tests/test_retained_source_recovery.py` cover partial fields, corrupt JSON,
+all frozen source fields, decision/output conflicts and nonpayable-ready state, repeated startup and
+both replay providers, zero transport/fees for affected sources, full liability, capacity/reservation
+preservation, failed-write rollback and younger valid work behind more held rows than the worker limit.
+
 This remains **narrow R-1 containment**, not closure. A crash after source admission but before the
 first policy freeze now conservatively requires an audited resolution that does not yet exist.
-Partially present/malformed policy fields, pre-fix rows already classified under replacement terms,
-other lifecycle components and Nexus-side recovery still require the broader admission protocol.
+Pre-fix rows already classified under replacement terms, apparently valid policy alongside missing
+lifecycle components, non-ready rows and Nexus-side recovery still require the broader admission protocol.
 Do not clear or manually retry these holds; production remains blocked.
 
 **Exit:** bind admission to a complete restore/deployment identity, or retain each affected rediscovered

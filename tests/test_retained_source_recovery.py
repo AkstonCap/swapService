@@ -1,4 +1,5 @@
 """A retained source alone cannot authorize a new policy after restart."""
+import json
 import sqlite3
 from unittest.mock import Mock
 
@@ -50,14 +51,95 @@ def test_startup_holds_retained_ready_source_without_policy(recovery_env, monkey
         state_db.init_db()
 
 
+@pytest.mark.parametrize("damage", [
+    "missing_decision", "missing_evidence", "malformed_json", "empty_evidence",
+    "signature", "timestamp", "memo", "from_address", "input_units",
+    "decision_conflict", "output_units", "nonpayable_ready",
+])
+def test_startup_holds_invalid_retained_policy_without_rewriting_evidence(
+    recovery_env, monkeypatch, damage,
+):
+    path, *_ = recovery_env
+    _configure_workers(monkeypatch, maximum=2000, flat=10)
+    send, debit = Mock(), Mock()
+    monkeypatch.setattr(solana_client, "send_solana_token_to_account_with_sig", send)
+    monkeypatch.setattr(nexus_client, "debit_nexus_token_with_txid", debit)
+    deposit = ("damaged-policy", 10, "nexus:recipient", "sender", 1100)
+    state_db.add_unprocessed_sig(*deposit, "ready for processing", None)
+    evidence = solana_deposit_policy.freeze_evidence(
+        signature=deposit[0], timestamp=deposit[1], memo=deposit[2],
+        from_address=deposit[3], input_units=deposit[4],
+        decision=solana_deposit_policy.classify(
+            1100, solana_deposit_policy.terms_from_config(config)),
+    )
+    decision = solana_deposit_policy.PAYABLE
+    if damage == "missing_decision":
+        decision = None
+    elif damage == "missing_evidence":
+        evidence = None
+    elif damage == "malformed_json":
+        evidence = "{"
+    elif damage == "empty_evidence":
+        evidence = ""
+    elif damage == "decision_conflict":
+        decision = solana_deposit_policy.REFUND_OVERSIZED
+    else:
+        parsed = json.loads(evidence)
+        if damage == "nonpayable_ready":
+            # Internally valid evidence, but this decision cannot authorize a ready row.
+            parsed["terms"]["minimum_input_units"] = 2000
+            parsed["decision"] = decision = solana_deposit_policy.HOLD_BELOW_MINIMUM
+        elif damage in {"timestamp", "input_units", "output_units"}:
+            parsed[damage] += 1
+            if damage == "input_units":
+                parsed["output_units"] += 1  # Valid math, wrong source principal.
+        else:
+            parsed[damage] = "different-source"
+        evidence = json.dumps(parsed)
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("UPDATE unprocessed_sigs SET policy_decision = ?, policy_evidence = ?",
+                     (decision, evidence))
+        before = dict(conn.execute("SELECT * FROM unprocessed_sigs").fetchone())
+    _configure_workers(monkeypatch, maximum=3000, flat=100)
+
+    for _ in range(2):
+        assert startup_recovery.perform_startup_recovery()["recovery_complete"] is True
+        assert state_db.get_unprocessed_sig_status(deposit[0]) == (
+            state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING
+        )
+        solana_client.process_unprocessed_solana_deposits(limit=1)
+        solana_client.process_solana_deposits_refunding(limit=1)
+        solana_client.process_solana_deposits_quarantine(limit=1)
+        send.assert_not_called()
+        debit.assert_not_called()
+        assert state_db.get_unresolved_solana_liability_units() == 1100
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            assert dict(conn.execute("SELECT * FROM unprocessed_sigs").fetchone()) == {
+                **before, "status": state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING,
+            }
+            for table in ("fee_entries", "reservations", "solana_payout_budget_events",
+                          "processed_sigs", "refunded_sigs", "quarantined_sigs"):
+                assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        issue = next(row for row in dashboard.api_issues()["issues"] if row["id"] == deposit[0])
+        assert issue["status"] == state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING
+        assert "do not" in issue["operator_action"]
+        assert commit_page("core", [deposit]) == 0
+        assert commit_page("helius", [deposit]) == 0
+        state_db.init_db()
+
+
+@pytest.mark.parametrize("evidence", [None, "{"])
 @pytest.mark.parametrize("existing_boundary", [None, 100])
-def test_failed_hold_update_rolls_back_boundary_and_refuses_scans(recovery_env, existing_boundary):
+def test_failed_hold_update_rolls_back_boundary_and_refuses_scans(recovery_env, existing_boundary, evidence):
     path, scan, nexus_scan, reference = recovery_env
     if existing_boundary is not None:
         state_db.record_solana_recovery_boundary(existing_boundary)
     state_db.add_unprocessed_sig("source-only", 110, "memo", "sender", 1100,
                                  "ready for processing", None)
     with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE unprocessed_sigs SET policy_evidence = ?", (evidence,))
         conn.execute("""CREATE TRIGGER reject_source_hold BEFORE UPDATE ON unprocessed_sigs
             BEGIN SELECT RAISE(ABORT, 'injected persistence failure'); END""")
     result = startup_recovery.perform_startup_recovery()
@@ -74,7 +156,8 @@ def test_failed_hold_update_rolls_back_boundary_and_refuses_scans(recovery_env, 
         )
 
 
-def test_all_source_only_rows_are_held_without_starving_frozen_or_live_work(recovery_env, monkeypatch):
+@pytest.mark.parametrize("evidence", [None, "{"])
+def test_all_source_only_rows_are_held_without_starving_frozen_or_live_work(recovery_env, monkeypatch, evidence):
     path, *_ = recovery_env
     _configure_workers(monkeypatch, maximum=2000, flat=10)
     monkeypatch.setattr(startup_recovery.time, "time", lambda: 1000)
@@ -84,6 +167,8 @@ def test_all_source_only_rows_are_held_without_starving_frozen_or_live_work(reco
     for index in range(5):
         state_db.add_unprocessed_sig(f"source-{index}", 10 + index, "nexus:recipient",
                                      "sender", 1100, "ready for processing", None)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE unprocessed_sigs SET policy_evidence = ?", (evidence,))
     state_db.add_unprocessed_sig("frozen", 110, "nexus:recipient", "sender", 1100,
                                  "ready for processing", None)
     evidence = solana_deposit_policy.freeze_evidence(
@@ -112,7 +197,8 @@ def test_all_source_only_rows_are_held_without_starving_frozen_or_live_work(reco
     assert state_db.get_unresolved_solana_liability_units() == 7700
 
 
-def test_recovery_hold_preserves_capacity_evidence_without_advertising_retry(recovery_env, monkeypatch):
+@pytest.mark.parametrize("evidence", [None, "{"])
+def test_recovery_hold_preserves_capacity_evidence_without_advertising_retry(recovery_env, monkeypatch, evidence):
     path, *_ = recovery_env
     _configure_workers(monkeypatch)
     send = Mock()
@@ -126,7 +212,8 @@ def test_recovery_hold_preserves_capacity_evidence_without_advertising_retry(rec
         capacity_before = conn.execute("SELECT * FROM solana_payout_capacity_holds").fetchall()
         # Partial restore: stale source component alongside retained frozen capacity.
         conn.execute("UPDATE unprocessed_sigs SET status = 'ready for processing', "
-                     "policy_decision = NULL, policy_evidence = NULL WHERE sig = 'partial'")
+                     "policy_decision = NULL, policy_evidence = ? WHERE sig = 'partial'",
+                     (evidence,))
     assert startup_recovery.perform_startup_recovery()["recovery_complete"] is True
     issue = next(row for row in dashboard.api_issues()["issues"] if row["id"] == "partial")
     assert issue["status"] == state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING
@@ -142,14 +229,16 @@ def test_recovery_hold_preserves_capacity_evidence_without_advertising_retry(rec
         assert conn.execute("SELECT * FROM solana_payout_capacity_holds").fetchall() == capacity_before
 
 
-def test_source_hold_changes_only_status_and_retains_existing_reservation(recovery_env):
+@pytest.mark.parametrize("evidence", [None, "{"])
+def test_source_hold_changes_only_status_and_retains_existing_reservation(recovery_env, evidence):
     path, *_ = recovery_env
     state_db.add_unprocessed_sig("interrupted", 110, "nexus:recipient", "sender", 1100,
                                  "ready for processing", "retained-remote-id")
     assert state_db.reserve_action(state_db.DEBIT_RESERVATION_KIND, "interrupted")
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        conn.execute("UPDATE unprocessed_sigs SET reference = 99, amount_usdd_units = 1090")
+        conn.execute("UPDATE unprocessed_sigs SET reference = 99, amount_usdd_units = 1090, "
+                     "policy_evidence = ?", (evidence,))
         before = dict(conn.execute("SELECT * FROM unprocessed_sigs").fetchone())
         reservations = [tuple(row) for row in conn.execute("SELECT * FROM reservations")]
     assert startup_recovery.perform_startup_recovery()["recovery_complete"] is True

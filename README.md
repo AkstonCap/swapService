@@ -143,8 +143,9 @@ dashboard issues list. This includes inputs received while offline; chain redisc
 release them. Startup also holds retained `ready for processing` source rows when both frozen-policy
 fields are absent, without changing their principal or other evidence. This includes pre-fix replay
 rows and deposits interrupted before their first policy freeze; timestamps alone cannot exempt them.
-Existing frozen-policy and non-ready lifecycle/finality rows keep their behavior. This containment
-is not a complete-restore certificate: other partial/stale restores, already-reclassified pre-fix rows and
+Ready rows with partial, malformed, source-conflicting or nonpayable frozen policy are also held;
+raw evidence is preserved. Valid matching payable policies and non-ready lifecycle/finality rows keep
+their behavior. This is not a complete-restore certificate: other partial/stale restores, pre-fix rows and
 source-specific audited resolution remain unresolved. An empty dashboard is not proof of zero
 liabilities. See the containment scope in [EVALUATION.md](docs/EVALUATION.md).
 

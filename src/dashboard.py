@@ -62,7 +62,7 @@ TXID_ISSUE_STATUSES = (
 )
 SIG_OPERATOR_ACTIONS = {
     "historical_solana_authorization_missing": (
-        "retain full principal; historical policy is missing; do not retry or send manually"
+        "retain full principal; historical policy is missing or invalid; do not retry or send manually"
     ),
     "policy held, non-sendable": (
         "retain the full principal; review policy evidence before manual disposition"

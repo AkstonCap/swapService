@@ -699,7 +699,7 @@ def perform_startup_recovery() -> dict:
 
     # A nonempty restore can still have lost an unsent authorization. Before any
     # reconstruction, fence off unseen pre-startup inputs and retained ready
-    # source-only rows with no frozen policy. This is not a coherent-restore proof.
+    # rows without valid matching policy. This is not a coherent-restore proof.
     try:
         state_db.record_solana_recovery_boundary(max(int(time.time()), solana_waterline))
     except Exception:

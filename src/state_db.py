@@ -1807,9 +1807,12 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
 
     This is containment, not proof of a coherent restore or chain clock identity.
     Neither initialization nor a backward local clock may reduce a retained boundary.
-    In the same transaction, hold retained ready rows with no frozen policy. This
-    includes unfinished first admission: restart cannot distinguish it from loss.
+    In the same transaction, hold retained ready rows without a valid, matching
+    payable policy. This includes unfinished first admission: restart cannot
+    distinguish it from loss. Never repair retained evidence from current terms.
     """
+    from . import solana_deposit_policy
+
     if type(cutoff_timestamp) is not int or cutoff_timestamp <= 0:
         raise ValueError("Solana recovery boundary requires a positive exact timestamp")
     conn = sqlite3.connect(DB_PATH)
@@ -1822,16 +1825,32 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
                    MAX(cutoff_timestamp, excluded.cutoff_timestamp)""",
             (cutoff_timestamp,),
         )
-        # A retained source-only row (including one produced by pre-fix replay)
-        # cannot prove that its original policy survived. Classify all such ready
-        # rows before recovery/polling, independent of timestamps or worker limits.
-        # Keep principal, source fields and any submission evidence untouched.
-        conn.execute(
-            """UPDATE unprocessed_sigs SET status = ?
-                 WHERE status = 'ready for processing'
-                   AND policy_decision IS NULL AND policy_evidence IS NULL""",
-            (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
-        )
+        # Audit all retained ready rows, independent of scan ranges/worker limits.
+        # The policy parser validates frozen math without consulting current terms.
+        rows = conn.execute(
+            """SELECT sig, timestamp, COALESCE(memo, ''), from_address,
+                      amount_usdc_units, policy_decision, policy_evidence
+                 FROM unprocessed_sigs WHERE status = 'ready for processing'"""
+        ).fetchall()
+        for sig, timestamp, memo, sender, principal, decision, evidence in rows:
+            try:
+                frozen = solana_deposit_policy.parse_frozen_evidence(evidence)
+            except ValueError:
+                valid = False
+            else:
+                valid = (
+                    decision == frozen["decision"] == solana_deposit_policy.PAYABLE
+                    and (sig, timestamp, memo, sender, principal) == (
+                        frozen["signature"], frozen["timestamp"], frozen["memo"],
+                        frozen["from_address"], frozen["input_units"],
+                    )
+                )
+            if not valid:
+                # Keep raw policy, principal and any submission/cap evidence intact.
+                conn.execute(
+                    "UPDATE unprocessed_sigs SET status = ? WHERE sig = ?",
+                    (HISTORICAL_SOLANA_AUTHORIZATION_MISSING, sig),
+                )
         conn.commit()
     except Exception:
         conn.rollback()
