@@ -1808,8 +1808,9 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
     This is containment, not proof of a coherent restore or chain clock identity.
     Neither initialization nor a backward local clock may reduce a retained boundary.
     In the same transaction, hold retained ready rows without a valid, matching
-    payable policy. This includes unfinished first admission: restart cannot
-    distinguish it from loss. Never repair retained evidence from current terms.
+    payable policy and ordinary disposition rows that would create a first intent.
+    This includes unfinished first admission: restart cannot distinguish it from
+    loss. Never repair retained evidence from current terms.
     """
     from . import solana_deposit_policy
 
@@ -1824,6 +1825,18 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
                ON CONFLICT(id) DO UPDATE SET cutoff_timestamp =
                    MAX(cutoff_timestamp, excluded.cutoff_timestamp)""",
             (cutoff_timestamp,),
+        )
+        # Ordinary disposition states do not replay a frozen intent: their workers
+        # derive output/fee/destination from current terms, even if policy survives.
+        # Hold all retained rows in these states, including legacy failed retries.
+        # A capacity/terminal sibling cannot exempt an inconsistent source status.
+        # Leave frozen-capacity and in-flight states to their existing protocols;
+        # this is not a complete nonterminal lifecycle audit.
+        conn.execute(
+            """UPDATE unprocessed_sigs SET status = ?
+                 WHERE status IN ('to be refunded', 'to be quarantined',
+                                  'quarantine failed')""",
+            (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
         )
         # Audit all retained ready rows, independent of scan ranges/worker limits.
         # The policy parser validates frozen math without consulting current terms.

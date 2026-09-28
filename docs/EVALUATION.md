@@ -16,9 +16,9 @@ holds retained ready rows without frozen policy, and `6769f7a` extends that audi
 partial, malformed, source-conflicting and nonpayable ready-row policy. All three controls
 passed real-worker offline regressions and should be kept.
 
-They do **not** establish coherent restore admission. A retained non-ready refund or
-quarantine row with no frozen policy remains outside the startup audit; fresh actual-worker
-probes reached the mocked Solana transport under current fee and destination terms. General
+They do **not** establish coherent restore admission. At the reviewed source, retained ordinary
+refund/quarantine rows remained outside the startup audit; actual-worker probes reached mocked
+Solana transport under current terms. The maintenance containment below now holds those rows. General
 startup refusal can still look healthy on the dashboard, malformed capacity evidence can
 still starve valid work, and dashboard summary can create a missing database. See the
 [September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md) and the
@@ -134,7 +134,7 @@ protocol. Table non-emptiness still permits startup without proving that policy,
 terminal evidence belong to one complete generation. The previous source-only-ready replay to a current-
 term Nexus debit is now blocked by `record_solana_recovery_boundary()` and the page-commit boundary.
 
-The current residual path is a retained **non-ready** source. Startup audits only
+The reviewed residual path was a retained **non-ready** source. That startup audited only
 `status = 'ready for processing'`. A partial restore can retain `to be refunded` or
 `to be quarantined` while losing both policy fields and any frozen capacity intent. Fresh offline probes
 at the reviewed source made recovery report complete and then exercised each real disposition worker.
@@ -143,7 +143,7 @@ Each called the mocked Solana send boundary for 1,090 units from a 1,100-unit so
 confirmation, so this proves replacement of historical authorization and one externally attempted send,
 not realized loss or duplicate settlement.
 
-Relevant current code is `state_db.py:1805-1853`, which audits only ready rows, and
+Relevant code at the reviewed source was `state_db.py:1805-1853`, auditing only ready rows, and
 `solana_client.py:1267-1602`, where new non-capacity disposition work derives fee and destination from
 current configuration when no frozen capacity intent exists.
 
@@ -208,8 +208,29 @@ preservation, failed-write rollback and younger valid work behind more held rows
 This remains **narrow R-1 containment**, not closure. A crash after source admission but before the
 first policy freeze now conservatively requires an audited resolution that does not yet exist.
 Pre-fix rows already classified under replacement terms, apparently valid policy alongside missing
-lifecycle components, non-ready rows and Nexus-side recovery still require the broader admission protocol.
+lifecycle components, remaining non-ready states and Nexus-side recovery still require the broader admission protocol.
 Do not clear or manually retry these holds; production remains blocked.
+
+**Implemented maintenance containment — retained ordinary dispositions:** the same startup transaction
+now moves every retained `to be refunded`, `to be quarantined` and `quarantine failed` source to
+`historical_solana_authorization_missing`, independent of timestamp, worker limit or policy validity.
+Those worker paths create a first disposition using current fee/destination terms; even a valid input
+policy does not authorize that replacement. A retained capacity/terminal sibling cannot exempt an
+inconsistent ordinary source status. No policy, principal, reservation, submission metadata or capacity
+evidence is overwritten. Existing dashboard warnings, liability accounting and checkpoint pinning apply.
+
+Collected real-startup/worker regressions in `tests/test_retained_source_recovery.py` first reproduced
+the unauthorized mocked sends. They cover all three ordinary states, missing/partial/corrupt/conflicting
+and valid input policies, terms drift (including a fee consuming all principal), restart, both replay
+providers, rollback/refusal on persistence failure, retained reservations/capacity evidence, and more
+held rows than the worker limit ahead of a younger valid original-term capacity retry. Existing online-
+backup and DB+WAL restore tests still verify exact frozen capacity-intent sends.
+
+This is deliberately conservative: legitimate work interrupted before disposition freeze is also held,
+with no manual bypass or audited release command. Frozen-capacity and in-flight/finality protocols are
+unchanged, not newly certified. Valid ready policies can still coexist with missing lifecycle components;
+all-status restore identity/completeness, Nexus-side recovery and operator resolution remain open.
+**R-1 and production release remain blocked.**
 
 **Exit:** bind admission to a complete restore/deployment identity, or audit every retained and
 rediscovered nonterminal lifecycle state before any worker can select it. A row without exact historical

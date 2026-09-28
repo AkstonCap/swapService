@@ -144,10 +144,12 @@ release them. Startup also holds retained `ready for processing` source rows whe
 fields are absent, without changing their principal or other evidence. This includes pre-fix replay
 rows and deposits interrupted before their first policy freeze; timestamps alone cannot exempt them.
 Ready rows with partial, malformed, source-conflicting or nonpayable frozen policy are also held;
-raw evidence is preserved. Valid matching payable policies and non-ready lifecycle/finality rows keep
-their behavior. **Non-ready rows are not yet covered by that startup audit**: a retained refund or
-quarantine row without frozen authorization can still reach its worker under current terms, so a partial
-restore remains unsafe. This is not a complete-restore certificate: other partial/stale restores, pre-fix
+raw evidence is preserved. Startup also holds every retained `to be refunded`, `to be quarantined`
+and `quarantine failed` row: those worker paths would create a new disposition from current terms,
+even when input policy survives. Interrupted legitimate work in those states is conservatively held too.
+Valid ready-row payable policies, frozen-capacity retries and in-flight/finality states keep their
+existing behavior; they are not a complete lifecycle audit. Partial/stale restores remain unsafe. This
+is not a complete-restore certificate: missing lifecycle components, pre-fix
 rows and source-specific audited resolution remain unresolved. An empty dashboard is not proof of zero
 liabilities. See the containment scope in [EVALUATION.md](docs/EVALUATION.md).
 

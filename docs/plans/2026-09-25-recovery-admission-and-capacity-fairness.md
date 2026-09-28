@@ -1,7 +1,8 @@
 # Recovery admission and capacity-fairness repair plan — 2026-09-25
 
 **Current assessment: 2026-09-28.** This maintained plan is updated in place rather than
-duplicated under a new date. Batch 1 has three accepted containment increments but remains open;
+duplicated under a new date. Batch 1 has three reviewed increments plus ordinary-disposition maintenance
+containment, but remains open;
 Batches 2–5 remain open.
 
 ## Decision and scope
@@ -25,7 +26,7 @@ or publication authorization.
 
 | Batch | Status at reviewed source | Evidence and remaining exit |
 |---|---|---|
-| 1 — restore admission | **Partial** | Unseen pre-boundary Solana sources plus missing/invalid-policy ready rows are now held. Non-ready refund/quarantine rows without frozen authorization still reach actual workers under current terms. |
+| 1 — restore admission | **Partial** | Unseen pre-boundary sources, missing/invalid-policy ready rows and retained ordinary refund/quarantine states are held. Complete all-status lifecycle/restore admission remains open. |
 | 2 — durable startup outcome | **Open** | Heartbeat failure still leaves dashboard `not_held` with retained healthy metrics. |
 | 3 — eligible capacity FIFO | **Open** | Malformed oldest evidence still blocks a younger fitting hold. |
 | 4 — read-only dashboard | **Open** | Summary still creates a missing SQLite database and mixes snapshots. |
@@ -48,8 +49,12 @@ At source `6769f7a`, preserve these verified controls:
 4. retain only exact, matching, payable frozen policy as worker-eligible; and
 5. preserve raw evidence, principal, reservations and capacity rows when holding invalid policy.
 
-These controls close the previously reproduced source-only-ready path. They do not audit
-`to be refunded`, `to be quarantined`, in-flight, unknown-submission or other non-ready states.
+These reviewed controls close the source-only-ready path. Subsequent maintenance containment also
+holds every retained `to be refunded`, `to be quarantined` and `quarantine failed` row, even with valid
+input policy: those paths would otherwise create a first disposition from current fee/destination terms.
+It preserves all raw evidence and liabilities. Frozen-capacity and in-flight/unknown-submission protocols
+remain unchanged, not certified by this slice. Legitimate interrupted ordinary work is held too; do not
+clear its status or send manually. See the [current evaluation](../EVALUATION.md).
 
 #### Next Batch 1 implementation slice
 
