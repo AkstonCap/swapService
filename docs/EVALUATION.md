@@ -1,21 +1,27 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-## Current verdict — 2026-09-25
+## Current verdict — 2026-09-28
 
 **Release blocked.** Reviewed range:
 
 ```text
-base:        184f5d6a45ecd8f53ae37cfdd09e4b63092d1842
-source:      17f65a3e3b45281162c1604cd0a695a36dc55991
-source tree: 6e39b479f2e9379b57554568b237a59cbe175a42
+base:        9f12211811331bae741702757e9d8259a16d55ff
+source:      6769f7a1bb68dd2a975f4b39aa910f2405d38d42
+source tree: 54f06ad253326f21673d5ca0536921bc323e04b6
 ```
 
-`809d45c` adds a durable empty-custody startup latch; `17f65a3` exposes that latch and
-unreadable latch evidence on the dashboard. Both are verified containment and should be kept.
-They close the exact empty-DB startup path, but do not prove partial/stale restores complete,
-represent every startup failure on the dashboard, or repair malformed-oldest capacity FIFO.
-See the [September 25 review](DEVELOPMENT_REVIEW_2026-09-25.md), the
-[complete findings artifact](review_evidence/2026-09-25/findings.md), and the
+The three reviewed commits add conservative Solana-side maintenance containment:
+`c3d36c9` holds unseen inputs at or before a monotonic startup boundary, `70c572d`
+holds retained ready rows without frozen policy, and `6769f7a` extends that audit to
+partial, malformed, source-conflicting and nonpayable ready-row policy. All three controls
+passed real-worker offline regressions and should be kept.
+
+They do **not** establish coherent restore admission. A retained non-ready refund or
+quarantine row with no frozen policy remains outside the startup audit; fresh actual-worker
+probes reached the mocked Solana transport under current fee and destination terms. General
+startup refusal can still look healthy on the dashboard, malformed capacity evidence can
+still starve valid work, and dashboard summary can create a missing database. See the
+[September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md) and the
 [current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
 
 ## Implemented containment — empty-database startup visibility
@@ -69,23 +75,32 @@ original disposition terms with exactly one mocked submission. Existing scanner 
 source history to exercise reconstruction past this new admission gate. All chain boundaries
 are offline; this is not live-chain acceptance or independent release approval.
 
-## Independent re-evaluation — 2026-09-25
+## Independent re-evaluation — 2026-09-28
 
-The empty-DB latch now prevents the previously reproduced total DB/WAL-loss startup path from
-reaching reconstruction or pollers. The dashboard truthfully exposes that one latch. Fresh broader
-probes still found three open boundaries:
+The three newer repairs close the exact source-admission paths they claim:
 
-1. one unrelated surviving source row bypasses the latch, after which replay can authorize a lost
-   obligation under current terms;
-2. heartbeat failure can make startup refuse while the dashboard reports `not_held`, a healthy retained
-   ratio and zero recovery issues; and
-3. an oldest malformed capacity hold still starves younger valid work while retaining all liability.
+1. unseen Solana inputs at or before the startup boundary become quantified historical-authorization
+   holds through both core and Helius page committers;
+2. retained ready rows with no policy become non-sendable before reconstruction; and
+3. retained ready rows with partial, malformed, source-conflicting or nonpayable policy receive the same
+   hold without rewriting their raw evidence, principal, reservations or capacity evidence.
 
-A separate probe found that `api_summary()` creates a SQLite file when the configured database path is
-missing, because it mixes `_ro_conn()` with state helpers that use ordinary writable connections.
-No live chain or production credential was used. The [September 25 review](DEVELOPMENT_REVIEW_2026-09-25.md)
-contains exact commands/results; [September 23](DEVELOPMENT_REVIEW_2026-09-23.md) remains the historical
-pre-containment assessment.
+The focused two-module shard returned **49 passed**. The three direct actual-worker families returned
+**23 passed** across both providers, four lost-policy dispositions, three timestamp classes and twelve
+invalid-policy forms. They exercised the real startup, deposit, refund and quarantine workers with only
+external transport and provider boundaries replaced.
+
+Fresh residual probes found that a retained row already labelled `to be refunded` or
+`to be quarantined`, with both policy fields absent, is not audited because startup selects only
+`ready for processing`. Recovery returned complete and each real disposition worker made one mocked
+1,090-unit send from 1,100 units using the current 10-unit refund fee and current destination. This is
+the same missing historical-authorization class in a different lifecycle state, not a failure of the
+three narrower accepted controls.
+
+The previously reported malformed-oldest capacity starvation, stale healthy dashboard after heartbeat
+failure, and database creation by a missing-path summary read also reproduced unchanged. No live chain,
+production credential or real send was used. See the [September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md);
+[September 25](DEVELOPMENT_REVIEW_2026-09-25.md) remains the pre-repair baseline.
 
 ## Architecture and verified progress
 
@@ -112,26 +127,30 @@ the original tested scope; the total-loss and scheduler qualifications in this e
 
 ## Remaining findings, in repair order
 
-### R-1 — High: partial/stale restore can still lose and reinterpret unsent authorization
+### R-1 — High: partial/stale restore admission remains lifecycle-incomplete
 
-The new latch closes the exact **empty** database path: with positive waterlines and no retained source
-history it persists refusal before reconstruction. Its exemption is only `any()` row across the source
-lifecycle/deposit-hold tables. One unrelated retained row therefore lets startup proceed without proving
-that every other policy decision, capacity hold, fee, cap event and terminal row came from one coherent
-restore. Databases populated by the older unsafe replay also avoid the empty-state check.
+The empty-database latch and three new Solana controls are useful containment, not a coherent-restore
+protocol. Table non-emptiness still permits startup without proving that policy, capacity, fee, cap and
+terminal evidence belong to one complete generation. The previous source-only-ready replay to a current-
+term Nexus debit is now blocked by `record_solana_recovery_boundary()` and the page-commit boundary.
 
-A fresh real-caller probe started with a 1,100-unit source frozen as a 1,090-unit oversized refund under a
-50-unit cap. It then modeled a partial restore that retained one unrelated processed source but lost that
-obligation and its frozen evidence. Startup returned complete, wrote no admission latch, replay admitted
-the lost source after the maximum changed, and the real deposit worker invoked the mocked Nexus debit
-boundary for 1,100 units. This proves an offline authorization-contract mutation, not live loss.
+The current residual path is a retained **non-ready** source. Startup audits only
+`status = 'ready for processing'`. A partial restore can retain `to be refunded` or
+`to be quarantined` while losing both policy fields and any frozen capacity intent. Fresh offline probes
+at the reviewed source made recovery report complete and then exercised each real disposition worker.
+Each called the mocked Solana send boundary for 1,090 units from a 1,100-unit source using the current
+10-unit fee and current resolved destination. The full principal remained a local liability pending
+confirmation, so this proves replacement of historical authorization and one externally attempted send,
+not realized loss or duplicate settlement.
 
-Relevant code is `state_db.py:1739-1771`: table non-emptiness suppresses the latch. The subsequent replay
-and worker paths remain `state_db.py:1793-1915` and `solana_client.py:1007-1169` at the reviewed source.
+Relevant current code is `state_db.py:1805-1853`, which audits only ready rows, and
+`solana_client.py:1267-1602`, where new non-capacity disposition work derives fee and destination from
+current configuration when no frozen capacity intent exists.
 
-**Containment:** keep the empty-DB latch. Do not treat any nonempty/partial database as verified; resume an
-existing deployment only from independently validated coherent DB+WAL/online-backup evidence, otherwise
-remain paused.
+**Containment:** keep the empty-DB latch and all three new holds. Do not treat any nonempty/partial database
+as verified; resume an existing deployment only from independently validated coherent DB+WAL/online-
+backup evidence, otherwise remain paused. Do not manually run refund or quarantine workers over restored
+rows whose frozen policy/capacity intent is absent or inconsistent.
 
 **Implemented maintenance containment — unseen pre-startup Solana inputs:** startup now persists
 an additive, monotonic `solana_recovery_boundary` before chain reconstruction. Both deposit page
@@ -192,10 +211,13 @@ Pre-fix rows already classified under replacement terms, apparently valid policy
 lifecycle components, non-ready rows and Nexus-side recovery still require the broader admission protocol.
 Do not clear or manually retry these holds; production remains blocked.
 
-**Exit:** bind admission to a complete restore/deployment identity, or retain each affected rediscovered
-source as a quantified, visible, non-sendable recovery hold. Test stale/partial/pre-fix restores containing
-only one lifecycle component, every policy/disposition kind, terms drift, multi-page replay and worker
-limits. Require zero transport, full liability and no inferred fee absent exact historical authorization.
+**Exit:** bind admission to a complete restore/deployment identity, or audit every retained and
+rediscovered nonterminal lifecycle state before any worker can select it. A row without exact historical
+policy, disposition and submission evidence must become a quantified, visible, non-sendable recovery
+hold; current configuration cannot fill missing fields. Test stale/partial/pre-fix restores containing only
+one lifecycle component, every ready/refund/quarantine/in-flight/capacity status, both disposition workers,
+terms drift, multi-page replay and worker limits. Require zero transport, full liability and no inferred fee
+absent exact historical authorization.
 
 ### R-1b — High operability: malformed oldest capacity evidence blocks later valid retries
 
@@ -274,21 +296,18 @@ as policy. Require actor/rationale, competing-state checks, authoritative exact 
 capacity accounting, atomic terminalization, replay/crash tests and no blind retries. If two-person
 approval is required, enforce distinct identities rather than merely recording labels.
 
-### R-4 — Publication gate: verify the new exact head independently of source-SHA history
+### R-4 — Publication gate: verify the documentation candidate and published SHA
 
-[CI run 35755684698](https://github.com/distordialabs-brutus/swapService/actions/runs/35755684698)
-for source SHA `85030c890fa6f3bb7db97e068e5cf80827d21b28` passed dependency, compile, Markdown,
-full-suite and isolation steps, then
-failed `git diff --check HEAD~1 HEAD`. Local reproduction reports 194 whitespace findings in
-`docs/review_evidence/2026-09-15/committed-since-sept12.diff` and 2 in `dirty-config.diff`.
-This is a historical result for that source SHA and a committed-artifact failure, not a failed
-runtime test. It does not predict the result for a later documentation commit whose `HEAD~1..HEAD`
-delta does not rewrite those raw forensic `.diff` bytes.
+[CI run 36316328344](https://github.com/distordialabs-brutus/swapService/actions/runs/36316328344)
+completed successfully for exact source SHA `6769f7a1bb68dd2a975f4b39aa910f2405d38d42`.
+Local exact-source dependency, compile, Markdown, inventory, full-suite, isolation and whitespace gates
+also pass. This establishes the source baseline only; the documentation changes described here were not
+part of that run.
 
-**Exit:** after the five review documents are staged, run the index-aware inventory and candidate
-whitespace/link gates, then verify CI for the resulting exact publication SHA. Do not rewrite raw
-forensic `.diff` bytes merely to repair the earlier source-SHA run; any future archival normalization
-must be separately scoped and preserve provenance. The artifacts were not rewritten here.
+**Exit:** stage only the explicitly reviewed documentation paths, run the index-aware inventory and
+candidate whitespace/link/full-suite gates against that exact index, commit, push, read back the remote
+branch SHA, and verify CI for that SHA. Preserve the unrelated dirty/untracked September 22 files and
+untracked vision context; do not publish them implicitly.
 
 ### R-5 — Provider-v2 cutover remains a separate, blocked migration
 
@@ -307,35 +326,35 @@ multiple assets, name/address disagreement, readback delay, oversize rejection a
 the intended Nexus build. Provider-v2 is not a prerequisite to repairing R-1 in the existing
 single-pair bridge; committing the library does not make it integrated.
 
-## Fresh verification at the reviewed runtime — 2026-09-25
+## Fresh verification at the reviewed runtime — 2026-09-28
 
 The exact tracked source ran in a detached disposable Git worktree, excluding every pre-existing dirty or
-untracked documentation path. The source/tree/index identities are recorded above and in the findings
-artifact.
+untracked documentation path. External boundaries were mocked or blocked; no real transaction was made.
 
-| Executed offline gate | Result |
+| Executed gate | Result |
 |---|---|
-| Exact-source complete suite | **592 passed, 77 subtests passed in 74.88s** |
-| New latch/dashboard/capacity modules | **58 passed in 7.62s** |
-| Recovery/policy/cap/latch/dashboard focused set | **191 passed, 52 subtests passed in 17.95s** |
-| Recovery standalone | **35 passed, 52 subtests passed** |
-| Recovery plus installed SDK | **36 passed, 52 subtests passed** |
-| Receipt/payout/Nexus-fee/SDK shard | **85 passed** |
-| Dependency consistency, compilation, exact-source Markdown links | Passed |
+| Exact-source complete suite | **641 passed, 77 subtests passed in 81.69s** |
+| New partial/retained-source modules | **49 passed in 6.47s** |
+| Three direct actual-worker regression families | **23 passed in 3.68s** |
+| Recovery standalone | **35 passed, 52 subtests passed in 2.59s** |
+| Recovery plus installed SDK | **36 passed, 52 subtests passed in 2.97s** |
+| Receipt/payout/Nexus-fee/SDK shard | **85 passed in 6.23s** |
+| Dependency consistency, exact compilation and Markdown links | Passed |
 | Token-literal inventory | Passed; **274 active lines** |
-| Source commit and working documentation whitespace | Passed |
-| Four offline review probes | Reproduced R-1, R-1b, R-1c and R-1d; network/send boundaries blocked |
+| Range and last-source-commit whitespace | Passed |
+| Residual actual-worker probe | Refund and quarantine each reached one mocked 1,090-unit send without frozen policy |
+| Three unchanged-risk probes | Reproduced capacity starvation, stale dashboard readiness and missing-path DB creation |
 
-The shared dirty-tree full suite reported **591 passed, 77 subtests passed, 1 failed** because pre-existing
-untracked `vision.md` links to strategy files outside the repository and the link checker rejects paths that
-escape the repository. That file was read as user context and left unchanged. The exact tracked-source gate
-is green; neither scope is live-chain acceptance. Commands, raw results, source hashes and dirty-scope
-separation are in the [September 25 findings](review_evidence/2026-09-25/findings.md).
+Remote `main` resolved to the reviewed source, and exact-source CI run 36316328344 is green. That CI does
+not cover the documentation candidate. The untracked vision was read as context and not linked as a
+published source; all pre-existing dirty/untracked paths retained their original hashes. Exact commands,
+outputs and source hashes are retained in the complete local findings artifact for this review.
 
 ## Development and release sequence
 
-1. **Close R-1 first** with collected stale/partial/pre-fix restore tests. Keep the empty-DB latch and
-   retained A/B/C controls; do not replace them with table non-emptiness or current-term replay.
+1. **Close R-1 first** across every retained nonterminal state, beginning with real refund and quarantine
+   workers over rows whose policy/capacity evidence is missing, malformed or inconsistent. Keep all three
+   new holds, the empty-DB latch and retained A/B/C controls; do not replace them with current-term replay.
 2. Close R-1c so every startup refusal is durable and healthy dashboard values require a complete
    admission record from the same snapshot.
 3. Repair R-1b without releasing malformed/conflicting evidence to transport: separate operator-action

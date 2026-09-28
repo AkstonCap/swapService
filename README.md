@@ -4,7 +4,7 @@ A custodial, bidirectional bridge for **one operator-configured Solana SPL token
 
 The bridge uses a **1:1 whole-token backing/conversion model before fees and conservative decimal rounding**. It is not a market-price exchange, a multi-pair router, or a general cross-chain adapter. The current Solana transfer implementation uses the classic SPL Token program; configurable mint selection does not imply native-SOL or Token-2022 support.
 
-> **Release safety:** local engineering checks do not establish production readiness. Target-chain, custody, migration and crash/recovery acceptance remain required before real funds are admitted. See the [current evaluation](docs/EVALUATION.md), [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md), and [2026-09-07 safety repair evidence](docs/POST_CHANGE_REVIEW_2026-09-07.md).
+> **Release safety:** local engineering checks do not establish production readiness. Target-chain, custody, migration and crash/recovery acceptance remain required before real funds are admitted. See the [current evaluation](docs/EVALUATION.md), [2026-09-28 development review](docs/DEVELOPMENT_REVIEW_2026-09-28.md), and [2026-09-25 review](docs/DEVELOPMENT_REVIEW_2026-09-25.md).
 
 ## Documentation
 
@@ -15,7 +15,7 @@ The bridge uses a **1:1 whole-token backing/conversion model before fees and con
 | Asset/client integrations | [ASSET_STANDARD.md](ASSET_STANDARD.md) |
 | Developers | [runtime state machines](docs/STATE_MACHINES.md), [engineering guidance](.github/copilot-instructions.md) |
 | Security and release decisions | [SECURITY.md](docs/SECURITY.md), [EVALUATION.md](docs/EVALUATION.md) |
-| Current and previous verification | [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md), [2026-09-07 repair report](docs/POST_CHANGE_REVIEW_2026-09-07.md), [baseline review](docs/DEVELOPMENT_REVIEW_2026-09-07.md) |
+| Current and previous verification | [2026-09-28 development review](docs/DEVELOPMENT_REVIEW_2026-09-28.md), [2026-09-25 review](docs/DEVELOPMENT_REVIEW_2026-09-25.md), [2026-09-07 baseline](docs/DEVELOPMENT_REVIEW_2026-09-07.md) |
 
 Dated review/audit reports retain their original snapshots, token examples and test counts. They are historical evidence, not a substitute for checking the current code and deployment.
 
@@ -145,8 +145,10 @@ fields are absent, without changing their principal or other evidence. This incl
 rows and deposits interrupted before their first policy freeze; timestamps alone cannot exempt them.
 Ready rows with partial, malformed, source-conflicting or nonpayable frozen policy are also held;
 raw evidence is preserved. Valid matching payable policies and non-ready lifecycle/finality rows keep
-their behavior. This is not a complete-restore certificate: other partial/stale restores, pre-fix rows and
-source-specific audited resolution remain unresolved. An empty dashboard is not proof of zero
+their behavior. **Non-ready rows are not yet covered by that startup audit**: a retained refund or
+quarantine row without frozen authorization can still reach its worker under current terms, so a partial
+restore remains unsafe. This is not a complete-restore certificate: other partial/stale restores, pre-fix
+rows and source-specific audited resolution remain unresolved. An empty dashboard is not proof of zero
 liabilities. See the containment scope in [EVALUATION.md](docs/EVALUATION.md).
 
 Mutable multi-page Nexus offset scans cannot authorize checkpoint advancement. Previously discovered positive credits can be retained while coverage remains incomplete. Refer to [STATE_MACHINES.md](docs/STATE_MACHINES.md) for live processing and recovery invariants.

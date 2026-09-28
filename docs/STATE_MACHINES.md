@@ -1,15 +1,16 @@
 # Swap Service State Machines
 
-**Current candidate scope (2026-09-25):** one configured classic SPL token ↔ Nexus token pair.
-Reviewed source `17f65a3e3b45281162c1604cd0a695a36dc55991` passes the exact-source offline
-suite (592 tests + 77 subtests). That does not establish live or release acceptance.
+**Current candidate scope (2026-09-28):** one configured classic SPL token ↔ Nexus token pair.
+Reviewed source `6769f7a1bb68dd2a975f4b39aa910f2405d38d42` passes the exact-source offline
+suite (641 tests + 77 subtests). That does not establish live or release acceptance.
 
-The empty-custody latch now blocks total DB/WAL loss before reconstruction, and its held/unknown
-state is visible on the dashboard. **Release remains blocked:** one unrelated retained source row
-can exempt a partial/stale restore and allow a different current-term decision; startup failures
-other than this latch are not durable dashboard admission; and an oldest malformed capacity hold
-can still starve younger valid work. See [EVALUATION.md](EVALUATION.md), the
-[September 25 review](DEVELOPMENT_REVIEW_2026-09-25.md), the
+Startup now retains unseen pre-boundary Solana inputs and invalid/missing-policy ready rows as
+quantified, non-sendable historical-authorization holds. **Release remains blocked:** the audit does
+not cover every non-ready lifecycle state, so a retained refund/quarantine row without frozen policy
+can still use current terms; startup failures other than the empty-database latch are not durable
+dashboard admission; and an oldest malformed capacity hold can still starve younger valid work.
+See [EVALUATION.md](EVALUATION.md), the
+[September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md), the
 [current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md), and the
 [historical A/B/C acceptance report](RECOVERY_INPUT_CAP_ACCEPTANCE.md).
 
@@ -43,10 +44,13 @@ flowchart TD
     Helius --> Validate[Validate full page and ordering]
     Core --> Validate
     Validate -->|incomplete or malformed enumeration| Stop[Hold cursor and public waterline]
-    Validate -->|exact positive deposit| Queue[Persist ready source]
+    Validate -->|exact positive deposit| RecoveryBoundary{Retained lifecycle or<br/>strictly after startup boundary?}
     Validate -->|unsupported shape or finality pending| Hold[Durable per-signature evidence hold]
+    RecoveryBoundary -->|previously unseen at/before boundary| Historical[historical authorization missing<br/>quantified, non-sendable]
+    RecoveryBoundary -->|retained exact lifecycle or after boundary| Queue[Persist ready source]
     Queue --> Commit[Atomic source + page evidence + continuation]
     Hold --> Commit
+    Historical --> Commit
     Commit -->|continuation remains| Query
     Commit -->|range complete| Checkpoint[Evaluate conservative public waterline]
     Hold --> Replay[Fair bounded replay using frozen provenance]
@@ -77,6 +81,15 @@ unsupported oldest window.
 Ordinary classic SPL `transfer` and `transferChecked` share exact vault-balance validation. An outer
 ATA creation and its matching inner initialization form one logical creation. Every positive deposit
 enters durable liability state before economic admission; processing minimums never filter history.
+Before recovery scans, startup atomically advances a monotonic boundary and audits every retained
+`ready for processing` row. A ready row is allowed to remain selectable only when strict frozen policy
+parses, matches the exact source and says `payable`; all other ready rows become
+`historical_solana_authorization_missing` without rewriting evidence or releasing reservations. Both
+page committers route a previously unseen source at or before the boundary to a quantified deposit hold,
+and automatic hold replay excludes that reason. This boundary is deliberately conservative: offline or
+clock-ambiguous deposits may require permanent review, and it is not proof that a partial database is
+coherent.
+
 The worker freezes one pure strict-integer policy before destination validation. Classification order
 is below minimum, above maximum, non-positive output, then payable. Exact minimum/maximum pass
 the size checks, but payout still requires positive output after conversion and fees;
@@ -101,21 +114,30 @@ equivalent to restart; see the limitation below.
 | Empty live Nexus enumeration | Hold as unproven absence |
 
 A durable **local** hold can disappear with the database. Keeping the public checkpoint behind it
-proves source rediscovery only, not reconstruction of frozen authorization. Current empty-custody
-containment checks positive heartbeat waterlines before reconstruction and persists
+proves source rediscovery only, not reconstruction of frozen authorization. Empty-custody containment
+checks positive heartbeat waterlines before reconstruction and persists
 `empty_custody_database_recovery_held` when all recognized source lifecycle/deposit-hold tables are empty.
 `main.run()` then starts no poller or worker, and initialization/replay cannot clear the latch.
 
-That check is necessary but not sufficient. It treats one surviving row in any recognized table as enough
-to avoid the latch; it does not prove every other lifecycle, policy, capacity, fee and cap record is part of
-one coherent restore. A review probe retained one unrelated processed source, lost a frozen oversized
-refund, passed startup, replayed the lost source after terms changed and reached the mocked Nexus debit
-boundary under the changed decision.
+For a nonempty database, startup persists `solana_recovery_boundary = max(retained boundary,
+startup wall clock, Solana waterline)` before either chain rebuild. Both Solana page committers hold an
+unseen source whose chain timestamp is at or before that boundary. In the same transaction, every
+retained ready row without exact matching payable policy becomes a non-sendable historical-authorization
+row. This closes the previously reproduced path where an unrelated surviving source let old replay create
+one source-only ready row and the deposit worker froze replacement current terms.
 
-**Required, not yet implemented:** verify a complete restore/deployment identity or retain each
-rediscovered source without exact historical authorization as a quantified, visible, non-sendable recovery
-hold. Do not move checkpoints, seed rows or accept table non-emptiness as history proof. An audited new
-bootstrap remains separate from existing-deployment restore.
+The protocol remains incomplete. Table non-emptiness is not restore proof, the boundary is not an
+authoritative chain-clock certificate, and startup does not audit non-ready rows. A retained
+`to be refunded` or `to be quarantined` row with missing policy can currently reach the actual worker,
+which derives its fee and destination from current configuration before freezing a new disposition intent.
+Nexus-side partial reconstruction and pre-fix apparently complete but inconsistent lifecycles also remain
+outside this Solana containment.
+
+**Required, not yet implemented:** verify a complete restore/deployment identity or transactionally audit
+every retained and rediscovered nonterminal lifecycle before any worker selection. Missing or conflicting
+historical policy, disposition or submission evidence becomes a quantified, visible, non-sendable recovery
+hold. Do not move checkpoints, seed rows or accept table non-emptiness/current terms as history proof. An
+audited new bootstrap remains separate from existing-deployment restore.
 
 Nexus startup currently accepts an empty first bounded page while rejecting a later mutable-offset
 page. The stricter live-poller rule differs; target-node completeness semantics remain an acceptance
@@ -151,11 +173,16 @@ flowchart LR
 
 Unknown Nexus mint outcomes cannot become Solana refunds merely because a bounded lookup is empty.
 Capacity-held retries parse and reuse the original destination, output, memo, source, fee and service
-terms while coherent database evidence survives. An empty database with positive waterlines is now latched
-before replay, but a partial/stale database with any unrelated recognized source can still bypass that
-containment and lose this protection (R-1 above). With retained valid evidence, mutable configuration or
-address resolution cannot replace those terms. Admission applies current rolling capacity in global
-eligible-hold order; individually impossible holds retain full principal without blocking fitting work.
+terms while coherent database evidence survives. Empty-database loss refuses startup. For a nonempty
+database, unseen pre-boundary inputs and retained invalid/missing-policy ready rows become historical-
+authorization holds. With retained valid evidence, mutable configuration or address resolution cannot
+replace those terms.
+
+This protection does not yet cover every non-ready source. A restored ordinary `to be refunded` or
+`to be quarantined` row without a capacity hold can still derive a new output and destination from current
+configuration; startup must audit or hold that row before either disposition worker is selectable.
+Admission applies current rolling capacity in global eligible-hold order; individually impossible holds
+retain full principal without blocking fitting work.
 Lifecycle conflict, malformed evidence, database failure, pre-RPC durable intent and unknown/submitted
 outcomes stay distinct and non-sendable. **Current scheduler qualification:** the global oldest-hold query
 still includes a malformed oldest row, so it can keep a later valid fitting hold in `capacity held` forever.
@@ -258,6 +285,7 @@ records cannot gain a receipt schema through a heartbeat update.
 | `solana_payout_budget_events` | Per-obligation reserved/submitted/confirmed/released cap accounting |
 | `solana_disposition_provenance_migrations` | Idempotent conservative migration and reversed-fee audit |
 | `recovery_admission_holds` | Narrow durable empty-custody startup latch; absence is not general recovery completion or restore proof |
+| `solana_recovery_boundary` | Monotonic timestamp containment for unseen Solana sources; not a restore manifest or authoritative chain-clock certificate |
 | `nexus_transfer_intents` / audit events | Immutable operator disposition and attribution |
 | `swap_receipts` / `receipt_nxs_budget_events` | Publication obligation and NXS reservation |
 | `fee_entries` | Authoritative integer fee journal |
@@ -290,13 +318,15 @@ For settings/timeouts see [CONFIG.md](../CONFIG.md); for operator procedures see
 
 ## Startup identity and admission limitations
 
-Incomplete recovery blocks `main.run()` before pollers. The new empty-custody latch is persisted before
-chain reconstruction and its held/unreadable state suppresses apparently healthy dashboard totals. It is
-not a general admission record: heartbeat/provenance/scan/reference failures can leave the table empty, so
-the dashboard currently renders `not_held` and may expose retained healthy metrics while startup has
-refused. Dashboard summary also mixes read-only queries with writable state helpers and can create a
-missing SQLite file. Persist every startup outcome and read admission/metrics/counts through one read-only
-snapshot before describing the operator view as authoritative.
+Incomplete recovery blocks `main.run()` before pollers. The empty-custody latch is persisted before
+chain reconstruction and its held/unreadable state suppresses apparently healthy dashboard totals.
+The newer Solana boundary and ready-row policy audit run before reconstruction, but they do not convert
+this latch into a general admission record or audit every non-ready lifecycle. Heartbeat/provenance/scan/
+reference failures can leave the latch table empty, so the dashboard currently renders `not_held` and may
+expose retained healthy metrics while startup has refused. Dashboard summary also mixes read-only queries
+with writable state helpers and can create a missing SQLite file. Persist every startup outcome and read
+admission/metrics/counts through one read-only snapshot before describing the operator view as
+authoritative.
 
 Failed heartbeat validation after recovery currently only alerts and can reach pollers. Known Solana
 hostname/label checks do not prove the authoritative network and freshness of a custom endpoint; Nexus

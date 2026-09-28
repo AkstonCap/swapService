@@ -1,24 +1,65 @@
 # Recovery admission and capacity-fairness repair plan — 2026-09-25
 
+**Current assessment: 2026-09-28.** This maintained plan is updated in place rather than
+duplicated under a new date. Batch 1 has three accepted containment increments but remains open;
+Batches 2–5 remain open.
+
 ## Decision and scope
 
-Reviewed source: `17f65a3e3b45281162c1604cd0a695a36dc55991`, compared with
-`184f5d6a45ecd8f53ae37cfdd09e4b63092d1842`.
+Reviewed source: `6769f7a1bb68dd2a975f4b39aa910f2405d38d42`, compared with
+`9f12211811331bae741702757e9d8259a16d55ff`.
 
-Keep the two new controls:
+Keep the accepted containment controls:
 
-- the durable empty-custody startup latch; and
-- dashboard suppression of apparently healthy backing/fee/cap values while that latch is held or unreadable.
+- the durable empty-custody startup latch;
+- dashboard suppression of apparently healthy backing/fee/cap values while that latch is held or unreadable;
+- the monotonic Solana recovery boundary and source-specific historical holds;
+- the startup audit of retained ready rows without policy; and
+- strict validation/holding of invalid retained ready-row policy.
 
 They are narrow containment, not complete recovery admission. Production and real funds remain blocked.
 This plan makes no dependency upgrade, provider-v2 cutover, receipt enablement, live transaction, commit,
 or publication authorization.
 
+## Current batch status
+
+| Batch | Status at reviewed source | Evidence and remaining exit |
+|---|---|---|
+| 1 — restore admission | **Partial** | Unseen pre-boundary Solana sources plus missing/invalid-policy ready rows are now held. Non-ready refund/quarantine rows without frozen authorization still reach actual workers under current terms. |
+| 2 — durable startup outcome | **Open** | Heartbeat failure still leaves dashboard `not_held` with retained healthy metrics. |
+| 3 — eligible capacity FIFO | **Open** | Malformed oldest evidence still blocks a younger fitting hold. |
+| 4 — read-only dashboard | **Open** | Summary still creates a missing SQLite database and mixes snapshots. |
+| 5 — separate release gates | **Open** | Registration/network admission, hold resolution and live target acceptance remain unproved. |
+
 ## Repair order
 
 ### Batch 1 — prove a complete or conservatively held restore
 
-**Priority: P0 financial authorization.**
+**Priority: P0 financial authorization. Status: partial, not accepted as complete.**
+
+#### Accepted Batch 1 containment increments
+
+At source `6769f7a`, preserve these verified controls:
+
+1. before chain rebuilding, atomically persist a monotonic Solana boundary;
+2. route previously unseen sources at/before it through both page committers into quantified,
+   non-promotable historical-authorization holds;
+3. audit every retained `ready for processing` row independently of timestamp and worker limit;
+4. retain only exact, matching, payable frozen policy as worker-eligible; and
+5. preserve raw evidence, principal, reservations and capacity rows when holding invalid policy.
+
+These controls close the previously reproduced source-only-ready path. They do not audit
+`to be refunded`, `to be quarantined`, in-flight, unknown-submission or other non-ready states.
+
+#### Next Batch 1 implementation slice
+
+Create one startup-owned transactional audit over **every nonterminal Solana source status** before any
+worker can be selected. Define the required evidence tuple per status: source identity/principal, frozen
+policy, disposition kind/destination/output/fee/memo, reservation/submission identity and capacity event.
+A missing, malformed or contradictory tuple moves the source to a distinct quantified non-sendable
+recovery status without deleting any evidence. Ordinary refund/quarantine workers must reject rows whose
+startup audit is absent or non-complete; they must never manufacture first-time frozen intent from current
+configuration after restart.
 
 A database with one surviving source row is not proof that every other obligation and frozen decision
 survived. Replace the current `any(source row)` exemption with an admission protocol that can distinguish:
@@ -43,6 +84,8 @@ chain/address/send boundaries replaced. Cover:
   is absent;
 - partial restores retaining only source rows, only capacity evidence, only terminal rows, or only cap
   events;
+- retained rows in every nonterminal status, especially ordinary refund/quarantine rows with no capacity
+  hold, partial policy, a mismatched reservation, or missing submission identity;
 - a database populated by the old unsafe replay before upgrade;
 - below-minimum and nonpositive policy decisions plus refund and quarantine capacity holds;
 - fee, minimum, maximum, destination, quarantine-account and cap drift;
@@ -51,9 +94,9 @@ chain/address/send boundaries replaced. Cover:
 - positive online-backup and copied DB+WAL restores.
 
 For every incomplete case require startup refusal or explicit source-specific recovery holds, zero Nexus
-and Solana transport, full integer liability, no inferred fee/reservation/terminal row, and no current-term
-replacement authorization. For a verified restore require the original decision, destination, amount,
-memo, fee and terms evidence exactly once.
+and Solana transport through the actual deposit/refund/quarantine workers, full integer liability, no
+inferred fee/reservation/terminal row, and no current-term replacement authorization. For a verified
+restore require the original decision, destination, amount, memo, fee and terms evidence exactly once.
 
 #### Implementation constraints
 
