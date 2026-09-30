@@ -1807,8 +1807,8 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
 
     This is containment, not proof of a coherent restore or chain clock identity.
     Neither initialization nor a backward local clock may reduce a retained boundary.
-    In the same transaction, hold retained ready rows with debit submission fields
-    or without a valid, matching payable policy, and ordinary disposition rows that
+    In the same transaction, hold retained ready rows with debit submission fields,
+    competing capacity intent or no valid matching payable policy, and ordinary rows that
     would create a first intent.
     This includes unfinished first admission: restart cannot distinguish it from
     loss. Never repair retained evidence from current terms.
@@ -1848,6 +1848,19 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
                  WHERE status = 'ready for processing'
                    AND (txid IS NOT NULL OR reference IS NOT NULL
                         OR amount_usdd_units IS NOT NULL)""",
+            (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
+        )
+        # A retained disposition-capacity row belongs to a different lifecycle.
+        # Even matching payable input policy cannot authorize a new Nexus debit
+        # alongside it. Existence is enough: malformed/conflicting capacity data
+        # cannot prove that its intent is absent. Preserve the raw sibling evidence.
+        conn.execute(
+            """UPDATE unprocessed_sigs SET status = ?
+                 WHERE status = 'ready for processing'
+                   AND EXISTS (
+                       SELECT 1 FROM solana_payout_capacity_holds AS h
+                        WHERE h.source_signature = unprocessed_sigs.sig
+                   )""",
             (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
         )
         # Audit all retained ready rows, independent of scan ranges/worker limits.
