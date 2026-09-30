@@ -56,6 +56,12 @@ It preserves all raw evidence and liabilities. Frozen-capacity and in-flight/unk
 remain unchanged, not certified by this slice. Legitimate interrupted ordinary work is held too; do not
 clear its status or send manually. See the [current evaluation](../EVALUATION.md).
 
+Additional maintenance containment holds ready rows with any retained debit transaction ID,
+reference or frozen debit amount, even with valid payable policy. Missing/expired reservations
+cannot prove non-submission; raw evidence and principal are preserved. Collected real-worker
+regressions reproduce the prior duplicate-debit attempt and cover rollback, repeated startup,
+worker limits and unchanged valid/in-flight work. This is not a complete lifecycle audit.
+
 #### Next Batch 1 implementation slice
 
 Create one startup-owned transactional audit over **every nonterminal Solana source status** before any

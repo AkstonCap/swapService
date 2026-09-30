@@ -232,6 +232,23 @@ unchanged, not newly certified. Valid ready policies can still coexist with miss
 all-status restore identity/completeness, Nexus-side recovery and operator resolution remain open.
 **R-1 and production release remain blocked.**
 
+**Implemented maintenance containment — ready rows with retained debit metadata (2026-09-30):**
+startup now also holds every retained ready row with a non-NULL `txid`, `reference` or
+`amount_usdd_units`, including blank, zero and malformed values. Valid payable input policy is not
+proof that an earlier debit was never submitted. A partial restore retaining only a prior transaction
+ID alongside a ready status previously reached a second mocked Nexus debit and overwrote that ID.
+The new status-only update commits atomically with the replay boundary and existing startup audits;
+raw policy/submission evidence, full principal and active/expired reservations remain unchanged.
+No current terms repair the row and no manual retry or hold-clear command is introduced.
+
+`tests/test_retained_ready_submission_recovery.py` covers isolated/combined metadata, absent/expired/
+active reservations, both replay providers, repeated startup, dashboard visibility, rollback/refusal,
+source timestamps outside scan ranges and beyond the local clock, and more held rows than the worker
+limit ahead of one valid original-term debit. Existing in-flight states are explicitly unchanged.
+This closes only an inconsistent-ready-state path: valid ready rows with other missing/conflicting
+lifecycle components, capacity/finality states, Nexus-side restore admission and coherent-restore
+identity remain unaudited by this slice. **R-1 and production release remain blocked.**
+
 **Exit:** bind admission to a complete restore/deployment identity, or audit every retained and
 rediscovered nonterminal lifecycle state before any worker can select it. A row without exact historical
 policy, disposition and submission evidence must become a quantified, visible, non-sendable recovery

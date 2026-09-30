@@ -1807,8 +1807,9 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
 
     This is containment, not proof of a coherent restore or chain clock identity.
     Neither initialization nor a backward local clock may reduce a retained boundary.
-    In the same transaction, hold retained ready rows without a valid, matching
-    payable policy and ordinary disposition rows that would create a first intent.
+    In the same transaction, hold retained ready rows with debit submission fields
+    or without a valid, matching payable policy, and ordinary disposition rows that
+    would create a first intent.
     This includes unfinished first admission: restart cannot distinguish it from
     loss. Never repair retained evidence from current terms.
     """
@@ -1836,6 +1837,17 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
             """UPDATE unprocessed_sigs SET status = ?
                  WHERE status IN ('to be refunded', 'to be quarantined',
                                   'quarantine failed')""",
+            (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
+        )
+        # A ready status is incompatible with any retained debit submission field.
+        # Even valid input policy cannot authorize overwriting an earlier debit;
+        # missing/expired reservations do not prove that no remote call occurred.
+        # Use NULL checks: blank/zero/malformed values are conflicting evidence too.
+        conn.execute(
+            """UPDATE unprocessed_sigs SET status = ?
+                 WHERE status = 'ready for processing'
+                   AND (txid IS NOT NULL OR reference IS NOT NULL
+                        OR amount_usdd_units IS NOT NULL)""",
             (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
         )
         # Audit all retained ready rows, independent of scan ranges/worker limits.

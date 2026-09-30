@@ -147,9 +147,11 @@ Ready rows with partial, malformed, source-conflicting or nonpayable frozen poli
 raw evidence is preserved. Startup also holds every retained `to be refunded`, `to be quarantined`
 and `quarantine failed` row: those worker paths would create a new disposition from current terms,
 even when input policy survives. Interrupted legitimate work in those states is conservatively held too.
-Valid ready-row payable policies, frozen-capacity retries and in-flight/finality states keep their
-existing behavior; they are not a complete lifecycle audit. Partial/stale restores remain unsafe. This
-is not a complete-restore certificate: missing lifecycle components, pre-fix
+Startup also holds retained ready rows with any non-NULL debit transaction ID, reference or frozen
+debit amount, even with valid payable policy: stale ready status cannot authorize another submission.
+Raw evidence and reservations survive. Ready-row payable policies without those fields, frozen-capacity
+retries and in-flight/finality states keep their existing behavior; they are not a complete lifecycle audit.
+Partial/stale restores remain unsafe. This is not a complete-restore certificate: missing lifecycle components, pre-fix
 rows and source-specific audited resolution remain unresolved. An empty dashboard is not proof of zero
 liabilities. See the containment scope in [EVALUATION.md](docs/EVALUATION.md).
 
