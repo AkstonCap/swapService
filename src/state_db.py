@@ -1808,8 +1808,8 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
     This is containment, not proof of a coherent restore or chain clock identity.
     Neither initialization nor a backward local clock may reduce a retained boundary.
     In the same transaction, hold retained ready rows with debit submission fields,
-    competing capacity intent or no valid matching payable policy, and ordinary rows that
-    would create a first intent.
+    competing capacity/terminal evidence or no valid matching payable policy, and
+    ordinary rows that would create a first intent.
     This includes unfinished first admission: restart cannot distinguish it from
     loss. Never repair retained evidence from current terms.
     """
@@ -1861,6 +1861,21 @@ def record_solana_recovery_boundary(cutoff_timestamp: int) -> None:
                        SELECT 1 FROM solana_payout_capacity_holds AS h
                         WHERE h.source_signature = unprocessed_sigs.sig
                    )""",
+            (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
+        )
+        # Terminal-table presence alone is not exact settlement proof. A stale
+        # ready source alongside any such sibling is a lifecycle conflict, not
+        # permission for the deposit worker's idempotency cleanup to drop principal.
+        # Preserve both components, including incomplete/malformed legacy markers.
+        conn.execute(
+            """UPDATE unprocessed_sigs SET status = ?
+                 WHERE status = 'ready for processing'
+                   AND (EXISTS (SELECT 1 FROM processed_sigs AS p
+                                 WHERE p.sig = unprocessed_sigs.sig)
+                        OR EXISTS (SELECT 1 FROM refunded_sigs AS r
+                                    WHERE r.sig = unprocessed_sigs.sig)
+                        OR EXISTS (SELECT 1 FROM quarantined_sigs AS q
+                                    WHERE q.sig = unprocessed_sigs.sig))""",
             (HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
         )
         # Audit all retained ready rows, independent of scan ranges/worker limits.
