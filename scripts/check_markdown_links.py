@@ -41,7 +41,9 @@ def broken_links() -> list[str]:
     """Return all Markdown links whose local target is absent from the checkout."""
     failures: list[str] = []
     for markdown_file in sorted(ROOT.rglob("*.md")):
-        if ".git" in markdown_file.parts:
+        # Root strategy context may reference private documents outside this checkout.
+        # It is informative, not a functional repository documentation contract.
+        if ".git" in markdown_file.parts or markdown_file == ROOT / "vision.md":
             continue
         for line_number, target in local_targets(markdown_file):
             candidate = (markdown_file.parent / target).resolve()
