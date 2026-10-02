@@ -1,27 +1,84 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-## Current verdict — 2026-09-28
+## Current verdict — 2026-10-02
+
+**Release blocked.** Committed-runtime and separately reviewed candidate identity:
+
+```text
+review base:                       ed73c513ee22f9626502273aa0d8e42a4c238b7a
+committed runtime / publication base: 7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc
+reviewed local documentation HEAD:    ee10b6e20dfe85f15347386adecb9dc99db55bb5
+unpublished runtime index tree:       a73785b8653e3ad03c9216072b7366999ba1e854
+```
+
+Four published startup containments now hold retained ordinary dispositions, ready rows with prior debit
+metadata, ready rows with capacity siblings, and ready rows with terminal siblings. They preserve full
+principal and conflicting evidence rather than deriving current terms, repeating a Nexus debit or deleting
+a disputed source. The focused changed-area gate passed 324 tests; keep all four controls.
+
+The unpublished, locally staged sealed-custody implementation candidate adds an independent one-use witness, exact whole-SQLite-image and
+schema admission, configuration/source fingerprints, pinned chain genesis checks, recovery-before-running,
+per-cycle lease verification, quiescent sealing and a read-only snapshot dashboard. The complete offline
+suite for that unpublished runtime candidate passed 947 tests plus 77 subtests; those are not the committed
+runtime's test counts. This materially closes the previous missing-database dashboard and
+non-durable-startup-truth gaps **only for an exact independently approved image**.
+
+A separate documentation-only publication candidate based on committed runtime `7b2d1c4` and containing
+none of the staged sealed-custody runtime passed **848 tests plus 77 subtests**. That publication gate
+verifies the committed runtime together with these candidate documents; it does not verify the unpublished
+sealed-custody implementation.
+
+It is not release-acceptable yet:
+
+1. `build_fingerprint()` omits the executed root `swapService.py`; a scratch mutation that performed a
+   pre-admission side effect retained the approved fingerprint. Installed interpreter/package artifacts are
+   also not attested by hashing `requirements.txt`.
+2. Genesis equality is not node health/sync/freshness. Heartbeat validation accepts a name-resolved object
+   with a different address, owner, provider, pair and vault when the three required fields parse.
+3. Required witness/genesis configuration and audited initial/restore certificate generation are not
+   integrated into the normal setup/configuration path.
+4. Malformed capacity evidence can still starve later eligible frozen work; non-capacity Solana holds still
+   lack audited resolution; target-chain acceptance remains absent.
+
+See the [October 2 review](DEVELOPMENT_REVIEW_2026-10-02.md),
+[sealed-custody architecture note](maintenance/sealed-custody-admission.md), and the
+[current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
+
+### Current acceptance register
+
+| Area | Status | Next executable exit |
+|---|---|---|
+| Four retained-source conflict containments | **Accepted narrowly offline** | Preserve in every later batch; zero transport/full liability regressions remain collected |
+| Sealed image/witness continuity | **Unpublished implementation candidate; partial** | Externally attest every executed byte and dependency artifact; rehearse independent deployment and restore |
+| Dashboard startup truth/read-only snapshot | **Accepted only for unpublished offline candidate scope** | Keep missing-path/no-write and witness-transition tests; target deployment still required |
+| Heartbeat/service and chain admission | **Blocked** | Exact owner/address/schema/pair/terms plus Solana health/root freshness and Nexus sync/tip freshness before mutation |
+| Capacity eligible progress | **Blocked** | Move malformed/conflicting rows outside automatic FIFO without authorizing them |
+| Hold resolution/live acceptance | **Blocked** | Evidence-bound operator workflow and explicit devnet/testnet matrix |
+
+The sections below retain prior implementation detail and dated evidence. Their September 30 status labels
+are historical where they conflict with this register; they do not supersede the October 2 verdict.
+
+## Previous verdict — 2026-09-30
 
 **Release blocked.** Reviewed range:
 
 ```text
-base:        9f12211811331bae741702757e9d8259a16d55ff
-source:      6769f7a1bb68dd2a975f4b39aa910f2405d38d42
-source tree: 54f06ad253326f21673d5ca0536921bc323e04b6
+base:        ed73c513ee22f9626502273aa0d8e42a4c238b7a
+source:      1b267f2b708e484ec27ce53d0c85db4592d148c2
+source tree: 7eaad283abb2255b312f6e6c1dabbc9582056d03
 ```
 
-The three reviewed commits add conservative Solana-side maintenance containment:
-`c3d36c9` holds unseen inputs at or before a monotonic startup boundary, `70c572d`
-holds retained ready rows without frozen policy, and `6769f7a` extends that audit to
-partial, malformed, source-conflicting and nonpayable ready-row policy. All three controls
-passed real-worker offline regressions and should be kept.
+Two commits since the review base add conservative startup containment. `17a9f17` holds every retained
+ordinary refund/quarantine state before its worker can derive a first disposition from current terms.
+`1b267f2` holds a ready row when any debit transaction ID, reference or frozen output remains, even if
+its input policy is valid. The first reproduced current-term Solana sends; the second reproduced a second
+mocked Nexus debit that overwrote retained debit identity. Real startup and actual-worker regressions now
+require zero transport, full liability and preserved evidence for both classes. Keep both controls.
 
-They do **not** establish coherent restore admission. At the reviewed source, retained ordinary
-refund/quarantine rows remained outside the startup audit; actual-worker probes reached mocked
-Solana transport under current terms. The maintenance containment below now holds those rows. General
-startup refusal can still look healthy on the dashboard, malformed capacity evidence can
-still starve valid work, and dashboard summary can create a missing database. See the
-[September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md) and the
+They do **not** establish coherent restore admission. Status-specific containment is not a complete
+deployment/restore identity or all-status evidence audit. General startup refusal can still look healthy
+on the dashboard, malformed capacity evidence can still starve valid work, and dashboard summary can
+create a missing database. See the September 30 local review evidence summarized here and the
 [current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
 
 ## Implemented containment — empty-database startup visibility
@@ -102,6 +159,37 @@ failure, and database creation by a missing-path summary read also reproduced un
 production credential or real send was used. See the [September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md);
 [September 25](DEVELOPMENT_REVIEW_2026-09-25.md) remains the pre-repair baseline.
 
+## Independent re-evaluation — 2026-09-30
+
+The published `17a9f17` ordinary-disposition fix closes the September 28 mocked-send reproductions:
+startup changes retained ordinary refund, quarantine and legacy failed-quarantine rows to the existing
+historical-authorization hold before either disposition worker can select them. Policy validity,
+timestamp, worker limit and retained capacity/terminal siblings do not exempt an inconsistent source
+status. Raw evidence, reservations and full principal remain unchanged.
+
+Review then found a sibling lifecycle conflict at `17a9f17`: a retained ready row with valid payable
+policy plus any previous debit-submission field remained selectable. In an isolated copy of that exact
+source, the new regression module returned **41 failures**; the transaction-ID-only case called the mocked
+Nexus debit a second time for 1,090 units and replaced its prior identity. `1b267f2` adds one atomic SQL
+containment before policy validation: any non-NULL debit transaction ID, reference or frozen output holds
+the row. Blank, zero, negative and malformed values also hold because none proves non-submission.
+
+The two real-worker modules now return **159 passed**. They cover ordinary dispositions, valid/invalid
+policy, every debit field alone and combined, absent/expired/active reservations, repeated startup, both
+page committers, rollback, timestamps outside scan ranges, worker-limit progress and unchanged in-flight
+states. This accepts both commits only as narrow containment. Coherent restore identity, complete per-state
+evidence schemas, Nexus-side recovery and audited hold resolution remain open.
+
+An isolated candidate containing the maintained architecture, plan and review update returned
+**775 passed, 77 subtests passed**. Dependency consistency, byte compilation, local Markdown links,
+the index-aware token-pair inventory (274 active lines), candidate/range whitespace and all three CI
+isolation shards passed. Local execution does not establish target-chain semantics or release approval.
+
+Fresh offline probes also reproduced malformed-oldest capacity starvation, stale healthy dashboard data
+after heartbeat-missing startup refusal, and creation of a missing SQLite file by a dashboard summary read.
+The current heartbeat validator still alerts and continues rather than forming a fail-closed chain/provider
+identity gate. No live chain, production credential or real send was used.
+
 ## Architecture and verified progress
 
 One process bridges one configured classic SPL token ↔ Nexus token pair. `config.SWAP_PAIR`
@@ -125,9 +213,14 @@ See [state machines](STATE_MACHINES.md) and the published
 [historical A/B/C acceptance record](RECOVERY_INPUT_CAP_ACCEPTANCE.md). That tracked record documents
 the original tested scope; the total-loss and scheduler qualifications in this evaluation are newer.
 
-## Remaining findings, in repair order
+## September 30 findings retained for traceability
 
-### R-1 — High: partial/stale restore admission remains lifecycle-incomplete
+The October 2 acceptance register supersedes statuses in this section. R-1c and R-1d are implemented in
+the staged offline witness/dashboard candidate but remain integration-gated by artifact and witness
+operations. R-2 is no longer alert-and-continue, yet exact heartbeat identity and node freshness remain
+blocked. R-1b, R-3 and live/provider gates remain open.
+
+### R-1 — Historical partial/stale restore analysis
 
 The empty-database latch and three new Solana controls are useful containment, not a coherent-restore
 protocol. Table non-emptiness still permits startup without proving that policy, capacity, fee, cap and
@@ -280,42 +373,33 @@ worker tests with a malformed/conflicting oldest row, more rows than the worker 
 deduplication and later reviewed resolution. Require the younger valid original intent to submit
 exactly once without deleting or reducing the blocked row's liability.
 
-### R-1c — High operability: general startup refusal is not durable dashboard admission
+### R-1c — Unpublished candidate only: staged witness makes startup refusal externally durable
 
-The dashboard reads only `recovery_admission_holds`. An empty table becomes `not_held`, although startup
-can fail before the latch (for example heartbeat missing/malformed) or during later reconstruction. A fresh
-probe retained a healthy metrics snapshot, made heartbeat lookup return missing and observed startup
-`recovery_complete=False`; the dashboard still returned ratio `20000`, `not_held` and zero issues.
-`main.run()` remains fail-closed, so this is operator misinformation rather than a transport bypass.
+The unpublished staged candidate replaces absence-of-latch readiness with external `ready/claimed/running/held`
+evidence plus a local live-process receipt. Recovery, session and heartbeat failures occur before
+`running`; failed/ambiguous claimed generations remain non-running or permanently held. The dashboard
+suppresses retained healthy values unless the same exact running lease brackets its snapshot. Focused
+runtime/dashboard tests cover failure boundaries and witness changes. Keep this integration-gated until
+artifact identity and independent witness deployment are accepted.
 
-**Exit:** persist one startup-owned `pending`/`held`/`complete` state with sanitized reason/timestamps.
-Only a valid durable `complete` result may expose healthy metrics, and admission plus metrics/counts must be
-read from one SQLite snapshot. Cover every startup failure and crash boundary, not only empty custody.
+### R-1d — Unpublished candidate only: staged dashboard is read-only and snapshot-consistent
 
-### R-1d — Medium hardening: the dashboard can create a missing database
+The unpublished staged dashboard uses one `mode=ro` SQLite transaction for summary counts, metrics and payout exposure,
+then rechecks the witness lease. Missing-path tests prove no DB creation; concurrent-write tests prove one
+snapshot. Preserve these tests against the final artifact and deployment.
 
-`_recovery_admission_status()` uses `mode=ro`, but `api_summary()` then calls state helpers whose ordinary
-`sqlite3.connect(DB_PATH)` creates the file when it is absent. The review reproduced this against a
-temporary missing path. This does not clear a hold or authorize startup, but violates the read-only
-boundary and can mutate filesystem state before service initialization.
+### R-2 — Partially superseded: fatal validation remains identity/freshness-incomplete
 
-**Exit:** use one read-only connection/transaction or dedicated read-only state API for each dashboard
-response. Assert no DB/WAL/SHM creation or byte change for all endpoints and snapshot-consistent behavior
-when admission changes concurrently.
+Heartbeat false/exception now returns before lease completion and workers, and both chain genesis values
+are pinned before database migration. However the heartbeat validator still accepts an object with a
+mismatched address, owner, provider, pair and vault when its name resolves and three fields parse.
+Genesis-only checks do not require Solana health/root freshness or Nexus sync/mode/network/tip freshness.
+Session/heartbeat validation also follows database migration and recovery scans.
 
-### R-2 — High deployment-safety gap: invalid registration is alert-only
-
-`src/main.py:370-379` reports failed heartbeat validation or an exception but does not return;
-execution can continue to pollers. The independent reviewer exercised that path offline. The
-current validator checks readability/fields/parseable waterlines, not complete owner/address/
-pair/terms identity. Authoritative network and freshness admission is also missing: known Solana
-hostname/label checks exist, but custom endpoints are not checked against genesis/health/root
-freshness, and Nexus network/sync/tip freshness is not an enforced startup gate.
-
-**Exit:** add explicit fail-closed registration and authoritative chain-identity/freshness admission
-before mutable startup/polling. Test mismatch, unavailable evidence, stale/unsynced nodes and
-validator exceptions with zero poller/chain-write calls; validate semantics on intended nodes.
-Do not equate a configured network label or a successful recovery mock with this gate.
+**Exit:** bind exact service-record address, owner, schema, pair/custody identity and terms, and require
+authoritative chain health/sync/freshness before mutable startup. Test mismatch, unavailable evidence,
+stale/unsynced nodes, wrong types and validator exceptions with zero database/scanner/poller/chain-write
+calls; validate semantics on intended nodes.
 
 ### R-3 — High operability gate: non-capacity Solana holds lack audited resolution
 
@@ -390,25 +474,25 @@ outputs and source hashes are retained in the complete local findings artifact f
 
 ## Development and release sequence
 
-1. **Close R-1 first** across every retained nonterminal state, beginning with real refund and quarantine
-   workers over rows whose policy/capacity evidence is missing, malformed or inconsistent. Keep all three
-   new holds, the empty-DB latch and retained A/B/C controls; do not replace them with current-term replay.
-2. Close R-1c so every startup refusal is durable and healthy dashboard values require a complete
-   admission record from the same snapshot.
-3. Repair R-1b without releasing malformed/conflicting evidence to transport: separate operator-action
-   rows from validated eligible FIFO and prove later valid work progresses with liability conserved.
-4. Close R-1d with genuinely read-only snapshot-consistent dashboard APIs, then close R-2 and R-3 through
-   independent caller-level review.
+1. **Close artifact identity first:** externally bind `swapService.py`, every runtime module, interpreter
+   and installed dependency artifact before any repository code can execute or claim a witness permit.
+2. Preserve all four published restored-source containments and the unpublished staged exact-image/witness state
+   machine; independently approve image financial coherence rather than equating a matching hash with it.
+3. Bind the exact heartbeat owner/address/schema/pair/custody/terms and require Solana health/root freshness
+   plus Nexus sync/mode/network/tip freshness before mutable startup.
+4. Operationalize independently administered witness bootstrap/restore, then move invalid capacity evidence
+   outside eligible FIFO without making it sendable and add evidence-bound Solana hold resolution.
 5. Keep provider-v2 and receipts disabled/unclaimed as runtime capabilities until their separate
    migration/cost gates pass. Preserve compatibility; no dependency upgrade is part of this review.
 6. On explicitly approved Solana devnet/Nexus test infrastructure, run both directions, mixed decimals,
    provider pagination/concurrent arrivals, finality, exact readback, Nexus references,
    accepted-but-unparsed/timeout outcomes, durable-boundary crashes, backup/WAL and total-loss recovery.
-   Rehearse alerts, holds, incident response, key rotation and TLS/session controls.
-7. Re-review the final runtime identity, run the complete configured gate, then make a separate release
-   decision. Production and real funds remain blocked; no live acceptance was performed.
+   Rehearse witness loss/ambiguity, alerts, holds, incident response, key rotation and TLS/session controls.
+7. Re-review the final immutable artifact, run the complete configured gate, verify exact-head CI, then make
+   a separate release decision. Production and real funds remain blocked; no live acceptance was performed.
 
 The executable current plan is the
 [September 25 recovery admission and capacity-fairness plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
-The [September 23 follow-up](plans/2026-09-23-financial-recovery-follow-up.md) and original
+The [October 2 review](DEVELOPMENT_REVIEW_2026-10-02.md) is the current dated evidence. The
+[September 23 follow-up](plans/2026-09-23-financial-recovery-follow-up.md) and original
 [A/B/C implementation plan](plans/recovery-input-cap-repairs.md) remain historical implementation records.

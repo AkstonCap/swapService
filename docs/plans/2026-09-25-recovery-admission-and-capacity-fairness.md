@@ -1,38 +1,72 @@
 # Recovery admission and capacity-fairness repair plan — 2026-09-25
 
-**Current assessment: 2026-09-28.** This maintained plan is updated in place rather than
-duplicated under a new date. Batch 1 has three reviewed increments plus ordinary-disposition maintenance
-containment, but remains open;
-Batches 2–5 remain open.
+**Current assessment: 2026-10-02.** This maintained plan is updated in place rather than
+duplicated under a new date. Published Batch 1 containment now includes retained ordinary dispositions,
+debit-submission metadata, capacity siblings and terminal siblings. The unpublished, locally staged sealed-custody implementation candidate
+implements an exact-image continuity gate plus durable dashboard authorization, but introduces a P0
+artifact-attestation exit and does not close service identity, node freshness, witness operations,
+capacity fairness or live acceptance.
+
+The reported 947-test gate belongs only to that unpublished runtime candidate. The separate
+documentation-only publication candidate contains committed runtime `7b2d1c4` and passed 848 tests plus
+77 subtests; it does not publish or verify the sealed-custody implementation.
 
 ## Decision and scope
 
-Reviewed source: `6769f7a1bb68dd2a975f4b39aa910f2405d38d42`, compared with
-`9f12211811331bae741702757e9d8259a16d55ff`.
+Committed runtime / documentation-publication base:
+`7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc`; separately reviewed local documentation `HEAD`:
+`ee10b6e20dfe85f15347386adecb9dc99db55bb5`; unpublished runtime index tree:
+`a73785b8653e3ad03c9216072b7366999ba1e854`; compared with review base
+`ed73c513ee22f9626502273aa0d8e42a4c238b7a`.
 
-Keep the accepted containment controls:
+Keep all accepted containment controls:
 
 - the durable empty-custody startup latch;
-- dashboard suppression of apparently healthy backing/fee/cap values while that latch is held or unreadable;
 - the monotonic Solana recovery boundary and source-specific historical holds;
-- the startup audit of retained ready rows without policy; and
-- strict validation/holding of invalid retained ready-row policy.
+- strict holding of missing/invalid retained ready-row policy;
+- unconditional holding of retained ordinary refund/quarantine states;
+- holding of ready rows with any retained debit-submission field;
+- holding of ready rows with any disposition-capacity sibling; and
+- holding of ready rows with any processed/refunded/quarantined sibling.
 
-They are narrow containment, not complete recovery admission. Production and real funds remain blocked.
-This plan makes no dependency upgrade, provider-v2 cutover, receipt enablement, live transaction, commit,
-or publication authorization.
+Also preserve the unpublished candidate's fail-closed witness state machine, claim-before-init ordering,
+whole-file/schema verification, recovery-before-running, per-cycle lease check, worker drain, quiescent
+seal and read-only snapshot dashboard while repairing the exits below.
+
+Production and real funds remain blocked. This plan makes no dependency upgrade, provider-v2 cutover,
+receipt enablement, live transaction, commit, or publication authorization.
 
 ## Current batch status
 
-| Batch | Status at reviewed source | Evidence and remaining exit |
+| Batch | Status at reviewed candidate | Evidence and remaining exit |
 |---|---|---|
-| 1 — restore admission | **Partial** | Unseen pre-boundary sources, missing/invalid-policy ready rows and retained ordinary refund/quarantine states are held. Complete all-status lifecycle/restore admission remains open. |
-| 2 — durable startup outcome | **Open** | Heartbeat failure still leaves dashboard `not_held` with retained healthy metrics. |
+| 0 — executable artifact identity | **Blocked / P0** | `src/*.py` + `requirements.txt` fingerprint omits executed `swapService.py`, interpreter and installed artifacts; pre-admission mutation probe remains hash-equal. |
+| 1 — restore/image admission | **Partial / unpublished candidate** | Four published row containments plus an unpublished staged exact-image witness are green offline. External approval must establish financial coherence; exact bytes alone cannot discover an incomplete/pre-fix approved image. |
+| 2 — durable startup outcome | **Implemented offline in unpublished candidate** | Claimed/running/held witness plus local receipt suppress stale healthy dashboard values. Requires artifact and independent deployment acceptance. |
 | 3 — eligible capacity FIFO | **Open** | Malformed oldest evidence still blocks a younger fitting hold. |
-| 4 — read-only dashboard | **Open** | Summary still creates a missing SQLite database and mixes snapshots. |
-| 5 — separate release gates | **Open** | Registration/network admission, hold resolution and live target acceptance remain unproved. |
+| 4 — read-only dashboard | **Implemented offline in unpublished candidate** | One read-only snapshot and missing-path no-create tests pass; retain witness-before/after consistency and target deployment acceptance. |
+| 5 — service/chain admission | **Blocked** | Heartbeat owner/address/pair is unbound; genesis-only checks omit Solana health/root and Nexus sync/tip freshness. |
+| 6 — witness operations and hold resolution | **Open** | Required settings/bootstrap certificate ceremony are not integrated; non-capacity Solana holds lack audited disposition. |
+| 7 — target acceptance/release | **Open** | No live node, crash/restore or operator rehearsal evidence. |
 
 ## Repair order
+
+### Batch 0 — bind the artifact before repository code executes
+
+**Priority: P0 executable integrity.**
+
+An in-process fingerprint cannot prove the approved executable when the root entrypoint that invokes the
+checker is outside its manifest. Define an external trusted launcher or immutable deployment image whose
+digest covers `swapService.py`, every imported runtime module, dependency artifact and interpreter. The
+witness certificate must bind that identity; a changed wrapper cannot run code before refusal.
+
+Acceptance:
+
+- mutate each executable/imported source file and each installed dependency artifact in isolation;
+- inject a pre-import side effect into `swapService.py` and require that it never executes;
+- change interpreter/image identity and require refusal before witness claim, database open or chain I/O;
+- boot an exact approved artifact, then complete, run and seal one generation; and
+- prove the artifact verifier/launcher is outside the mutable artifact it attests.
 
 ### Batch 1 — prove a complete or conservatively held restore
 
@@ -40,14 +74,18 @@ or publication authorization.
 
 #### Accepted Batch 1 containment increments
 
-At source `6769f7a`, preserve these verified controls:
+At the reviewed candidate, preserve these verified controls:
 
 1. before chain rebuilding, atomically persist a monotonic Solana boundary;
 2. route previously unseen sources at/before it through both page committers into quantified,
    non-promotable historical-authorization holds;
 3. audit every retained `ready for processing` row independently of timestamp and worker limit;
-4. retain only exact, matching, payable frozen policy as worker-eligible; and
-5. preserve raw evidence, principal, reservations and capacity rows when holding invalid policy.
+4. retain only exact, matching, payable frozen policy as worker-eligible;
+5. preserve raw evidence, principal, reservations and capacity rows when holding invalid policy;
+6. hold every retained ordinary refund/quarantine state before it can derive current disposition terms;
+7. hold a ready row when any debit transaction ID, reference or frozen debit output is non-NULL;
+8. hold a ready row when any disposition-capacity sibling remains; and
+9. hold a ready row when any processed/refunded/quarantined terminal sibling remains.
 
 These reviewed controls close the source-only-ready path. Subsequent maintenance containment also
 holds every retained `to be refunded`, `to be quarantined` and `quarantine failed` row, even with valid
@@ -61,6 +99,26 @@ reference or frozen debit amount, even with valid payable policy. Missing/expire
 cannot prove non-submission; raw evidence and principal are preserved. Collected real-worker
 regressions reproduce the prior duplicate-debit attempt and cover rollback, repeated startup,
 worker limits and unchanged valid/in-flight work. This is not a complete lifecycle audit.
+
+#### Required per-state evidence contract
+
+Implement the next slice as a closed table, not another isolated status exception:
+
+| State family | Required evidence before automatic selection | Failure disposition |
+|---|---|---|
+| Ready/new debit | Exact payable policy matching source identity and principal; no retained debit-submission field | Quantified historical-authorization hold; preserve every field and reservation |
+| Ordinary refund/quarantine | Proven same-run admission transition, or a separately frozen full disposition intent | Startup hold; never reconstruct fee, output or destination from current configuration |
+| Capacity-held refund/quarantine | Exact source/kind/destination/output/fee/memo plus valid budget event and no lifecycle conflict | Durable non-sendable operator-action state outside automatic eligible FIFO |
+| Debit/disposition in flight or outcome unknown | Durable immutable intent and remote identity/reference sufficient for authoritative resolution | Resolution-only hold; never return to new-work selection or release capacity from bounded absence |
+| Awaiting confirmation | Exact submitted identity and complete expected transfer/debit evidence | Confirm only from exact successful finality evidence; otherwise retain liability |
+| Terminal/competing lifecycle | Exact source-scoped terminal proof, fee and cap effects with no sibling conflict | Preserve both sides and refuse startup/selection pending audited resolution |
+
+The audit must run in the same startup transaction as the recovery boundary, before scanners or workers.
+Any invalid type—including blank identifiers, zero/negative numbers where positive values are required,
+booleans or malformed legacy storage—fails closed. A failed hold write rolls back the boundary and every
+status change. Held rows cannot consume worker limits, while coherent positive controls must submit the
+original frozen intent exactly once. Add a schema-driven parameterized test so every selectable status and
+every persisted evidence column appears in at least one positive and one negative case.
 
 #### Next Batch 1 implementation slice
 
@@ -120,32 +178,32 @@ restore require the original decision, destination, amount, memo, fee and terms 
 
 ### Batch 2 — make all startup admission outcomes durable and truthful
 
-**Priority: P1 operator safety.**
+**Priority: P1 operator safety. Status: implemented offline in the staged witness candidate.**
 
-The current dashboard sees only the empty-database latch. Other startup failures can leave
-`recovery_admission.status=not_held`, show a retained healthy ratio and report zero recovery issues even
-though `main.run()` refused service. Replace absence-of-latch semantics with one durable admission state
-owned by startup, for example `pending`, `held` and `complete`.
+The external witness now owns `ready`, `claimed`, `running` and permanent `held` states. A local receipt
+binds the matching lease to the live process/file identity. Recovery, session and heartbeat checks must
+finish before `running`; every runtime failure after claim attempts a permanent hold. The dashboard
+requires exact external running evidence plus the local live receipt and otherwise suppresses healthy
+metrics as unknown/held. This supersedes absence-of-local-latch readiness.
 
-Persist a sanitized reason, attempt/start/update/completion timestamps, validated waterlines and the
-admission/restore identity needed for audit. Set `pending` before external recovery reads, set `held` on
-every failure that can be written safely, and set `complete` only after all recovery phases succeed.
-Initialization and dashboard reads must never clear or advance it. If the state cannot be read, the
-dashboard remains `unknown`.
+Keep this batch open for integration acceptance until Batch 0 artifact identity and Batch 6 witness
+deployment are accepted. A witness state is only as authoritative as its independent anti-rollback host,
+credential separation and exact artifact/image approval.
 
-#### Collected RED acceptance
+#### Retained acceptance matrix
 
 - heartbeat missing/malformed/exception and zero checkpoint;
 - terminal-provenance audit failure;
 - Solana and Nexus incomplete/malformed scans, cap-window failure and reference-seed failure;
 - empty, partial and verified restored databases;
-- crash after `pending`, after each chain rebuild and immediately before/after `complete`;
+- crash after claim, after each chain rebuild and immediately before/after completion;
 - repeated startup, concurrent dashboard reads and database read/write failures; and
 - retained healthy metrics from an earlier run.
 
-For every non-complete state require the banner and `/api/issues` entry, unknown backing/open-obligation/
+For every non-running state require the banner and `/api/issues` entry, unknown backing/open-obligation/
 fee/cap totals, no “refunds continue” claim and zero poller starts. A dashboard result may call admission
-complete only when the same read snapshot contains a valid durable `complete` record.
+healthy only when the same response is bracketed by one exact stable external running lease and a matching
+live-process receipt.
 
 ### Batch 3 — move invalid capacity rows outside automatic eligible FIFO
 
@@ -175,12 +233,11 @@ reservation, delete a source, invent a fee or authorize transport.
 
 ### Batch 4 — make the dashboard actually read-only and snapshot-consistent
 
-**Priority: P2 hardening.**
+**Priority: P2 hardening. Status: implemented offline in the unpublished staged candidate.**
 
-`dashboard._ro_conn()` is read-only, but `api_summary()` calls state helpers that open ordinary writable
-SQLite connections. Against a missing path, a summary read creates a database file. Route every dashboard
-query through one read-only connection/transaction or dedicated read-only state API. Do not mix an
-admission read from one snapshot with metrics and counts from later connections.
+`api_summary()` now uses one `mode=ro` connection and transaction for metrics, counts and payout exposure,
+then rechecks the exact witness lease. A missing path returns unknown without creating DB/WAL/SHM. Keep
+the acceptance below collected and repeat it against the final externally attested artifact.
 
 Acceptance:
 
@@ -190,11 +247,25 @@ Acceptance:
   retained metrics; and
 - repeated summary/issues/transaction reads leave a complete database dump byte-for-byte unchanged.
 
-### Batch 5 — retain the existing separate release gates
+### Batch 5 — bind service identity and node readiness
 
-After Batches 1–4, close the already documented fail-open heartbeat/chain identity gate and provide an
-audited Solana hold-resolution protocol. Keep provider-v2 and optional receipts disabled until their own
-wire-size, owner/schema, cost, create/readback and migration acceptance succeeds.
+The unpublished staged candidate makes heartbeat validation fatal and pins both genesis identities, but that is only
+partial. Before database mutation, require exact heartbeat address, owner, schema, pair/custody identity
+and terms. Require Solana health/root freshness and Nexus `synchronized=true`, `syncing=false`, expected
+mode/network and fresh tip from the exact configured endpoints. Wrong-typed/missing/stale evidence starts
+no recovery scan or worker and cannot be repaired from a configured label.
+
+### Batch 6 — operationalize the witness and hold resolution
+
+Add a read-only evidence-export tool, reviewed initial/bootstrap and restore ceremonies, complete
+configuration templates, independent TLS witness deployment and crash-held/manual recovery runbook. The
+runtime token must never issue an initial deployment. Provide an evidence-bound Solana hold-resolution
+protocol or explicitly approve permanent retention; no direct-send/manual-SQL bypass.
+
+Keep provider-v2 and optional receipts disabled until their own wire-size, owner/schema, cost,
+create/readback and migration acceptance succeeds.
+
+### Batch 7 — live acceptance and release
 
 Only then run explicitly authorized target-infrastructure acceptance for provider pagination, authoritative
 network/finality, Nexus completeness/reference/TLS, both bridge directions, accepted-but-unparsed outcomes,
