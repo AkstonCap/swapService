@@ -105,26 +105,36 @@ def _ro_conn() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
 
 
-def _rows(sql: str, params=()) -> list[dict]:
-    conn = _ro_conn()
+def _rows(sql: str, params=(), *, connection=None) -> list[dict]:
+    conn = connection
     try:
+        if conn is None:
+            conn = _ro_conn()
         conn.row_factory = sqlite3.Row
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
     except sqlite3.Error:
+        if connection is not None:
+            raise
         return []
     finally:
-        conn.close()
+        if conn is not None and connection is None:
+            conn.close()
 
 
-def _scalar(sql: str, params=(), default=0):
-    conn = _ro_conn()
+def _scalar(sql: str, params=(), default=0, *, connection=None):
+    conn = connection
     try:
+        if conn is None:
+            conn = _ro_conn()
         row = conn.execute(sql, params).fetchone()
         return row[0] if row and row[0] is not None else default
     except sqlite3.Error:
+        if connection is not None:
+            raise
         return default
     finally:
-        conn.close()
+        if conn is not None and connection is None:
+            conn.close()
 
 
 def _units(v, decimals: int) -> float | None:
@@ -139,7 +149,7 @@ def _units(v, decimals: int) -> float | None:
 # --------------------------------------------------------------------------- API
 
 
-def _recovery_admission_status() -> dict:
+def _recovery_admission_status(*, connection=None) -> dict:
     """Read the startup latch without treating a failed lookup as an empty table.
 
     Absence of this narrow total-loss latch is NOT proof of complete recovery.
@@ -154,9 +164,10 @@ def _recovery_admission_status() -> dict:
             "do not seed rows, clear holds or send funds manually"
         ),
     }
-    conn = None
+    conn = connection
     try:
-        conn = _ro_conn()
+        if conn is None:
+            conn = _ro_conn()
         rows = conn.execute(
             "SELECT id, reason, nexus_waterline, solana_waterline "
             "FROM recovery_admission_holds LIMIT 2"
@@ -164,10 +175,14 @@ def _recovery_admission_status() -> dict:
     except sqlite3.Error:
         return unavailable
     finally:
-        if conn is not None:
+        if conn is not None and connection is None:
             conn.close()
     if not rows:
-        return {"status": "not_held", "liabilities_complete": None}
+        try:
+            from . import custody_admission
+            return custody_admission.dashboard_status()
+        except Exception:
+            return unavailable
     row = rows[0]
     if (len(rows) != 1 or row[0] != 1
             or row[1] != "empty_custody_database_recovery_held"
@@ -188,25 +203,55 @@ def _recovery_admission_status() -> dict:
 
 
 def api_summary() -> dict:
-    recovery = _recovery_admission_status()
+    conn = None
+    try:
+        conn = _ro_conn()
+        conn.execute("BEGIN")
+    except sqlite3.Error:
+        if conn is not None:
+            conn.close()
+        conn = None
+    try:
+        return _summary_in_snapshot(conn)
+    except sqlite3.Error:
+        return _summary_in_snapshot(None)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _summary_in_snapshot(conn) -> dict:
+    # All custody reads use one read-only SQLite snapshot. The witness is rechecked
+    # after collection so an intervening seal/hold cannot reuse an obsolete green.
+    def rows(sql, params=()):
+        return _rows(sql, params, connection=conn) if conn is not None else []
+    def scalar(sql, params=(), default=0):
+        return _scalar(sql, params, default, connection=conn) if conn is not None else default
+    recovery = (_recovery_admission_status(connection=conn) if conn is not None else {
+        "status": "unknown", "liabilities_complete": False,
+        "reason": "custody_snapshot_unavailable",
+        "detail": "custody database read snapshot is unavailable",
+        "operator_action": "keep service stopped and restore independently verified evidence",
+    })
     recovery_unresolved = recovery["status"] != "not_held"
-    snap = state_db.get_metrics_snapshot() or {}
+    snapshots = rows("SELECT * FROM metrics_snapshot WHERE id = 1")
+    snap = snapshots[0] if snapshots else {}
     now = int(time.time())
     ratio_bps = None if recovery_unresolved else snap.get("ratio_bps")
 
-    hb = _rows("SELECT name, last_beat, wline_sol, wline_nxs FROM heartbeat LIMIT 1")
+    hb = rows("SELECT name, last_beat, wline_sol, wline_nxs FROM heartbeat LIMIT 1")
     hb = hb[0] if hb else {}
 
     counts = {
-        "unprocessed_sigs": _scalar("SELECT COUNT(*) FROM unprocessed_sigs"),
-        "unprocessed_txids": _scalar("SELECT COUNT(*) FROM unprocessed_txids"),
-        "processed_sigs": _scalar("SELECT COUNT(*) FROM processed_sigs"),
-        "processed_txids": _scalar("SELECT COUNT(*) FROM processed_txids"),
-        "refunded_sigs": _scalar("SELECT COUNT(*) FROM refunded_sigs"),
-        "refunded_txids": _scalar("SELECT COUNT(*) FROM refunded_txids"),
-        "quarantined_sigs": _scalar("SELECT COUNT(*) FROM quarantined_sigs"),
-        "quarantined_txids": _scalar("SELECT COUNT(*) FROM quarantined_txids"),
-        "solana_payout_capacity_holds": _scalar(
+        "unprocessed_sigs": scalar("SELECT COUNT(*) FROM unprocessed_sigs"),
+        "unprocessed_txids": scalar("SELECT COUNT(*) FROM unprocessed_txids"),
+        "processed_sigs": scalar("SELECT COUNT(*) FROM processed_sigs"),
+        "processed_txids": scalar("SELECT COUNT(*) FROM processed_txids"),
+        "refunded_sigs": scalar("SELECT COUNT(*) FROM refunded_sigs"),
+        "refunded_txids": scalar("SELECT COUNT(*) FROM refunded_txids"),
+        "quarantined_sigs": scalar("SELECT COUNT(*) FROM quarantined_sigs"),
+        "quarantined_txids": scalar("SELECT COUNT(*) FROM quarantined_txids"),
+        "solana_payout_capacity_holds": scalar(
             "SELECT COUNT(*) FROM solana_payout_capacity_holds"
         ),
     }
@@ -220,25 +265,39 @@ def api_summary() -> dict:
     # The durable ledger includes held/reserved exposure and reconstructed payouts;
     # the legacy payouts table alone can understate the rolling cap after a crash.
     try:
-        spent = state_db.payout_budget_used(86400)
+        if conn is None:
+            raise sqlite3.OperationalError("custody snapshot unavailable")
+        spent = state_db._payout_budget_usage_in_transaction(conn, now - 86400)
     except Exception:
         # Preserve read-only dashboard availability if an old/corrupt database cannot
         # yet expose the durable ledger; never let a UI query affect money-path state.
         spent = snap.get("payouts_24h_units")
         if spent is None:
-            spent = _scalar(
+            spent = scalar(
                 "SELECT COALESCE(SUM(amount_usdc_units),0) FROM payouts WHERE timestamp >= ?",
                 (now - 86400,),
             )
 
     snap_age = (now - int(snap["timestamp"])) if snap.get("timestamp") else None
 
+    if not recovery_unresolved:
+        final_admission = _recovery_admission_status(connection=conn)
+        if final_admission != recovery:
+            recovery = final_admission
+            if final_admission['status'] == 'not_held':
+                recovery = {"status": "unknown", "liabilities_complete": False,
+                            "reason": "custody_admission_changed",
+                            "detail": "custody lease changed during dashboard snapshot",
+                            "operator_action": "keep service stopped until custody admission is stable"}
+            recovery_unresolved = True
+            ratio_bps = None
+
     return {
         "now": now,
         "recovery_admission": recovery,
         "snapshot_age_sec": snap_age,
         "snapshot_stale": snap_age is None or snap_age > 300,
-        "paused": bool(snap.get("paused")),
+        "paused": recovery_unresolved or bool(snap.get("paused")),
         "vault_solana": _units(snap.get("vault_usdc_units"), SOL_DECIMALS),
         "circulating_nexus": _units(snap.get("circulating_usdd_units"), NXS_DECIMALS),
         "ratio": (ratio_bps / 10000.0) if ratio_bps is not None else None,

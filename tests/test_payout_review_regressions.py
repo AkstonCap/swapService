@@ -238,11 +238,12 @@ def test_primary_cap_refusal_creates_operator_visible_held_credit(tmp_path):
         assert issue["operator_action"] == "wait for cap capacity; do not retry manually"
 
 
-def test_dashboard_summary_uses_durable_cap_exposure_for_a_held_payout(tmp_path):
+def test_dashboard_summary_uses_durable_cap_exposure_for_a_held_payout(tmp_path, running_custody):
     """The cap bar must include held reservations, not only legacy completed-payout rows."""
     with isolated_state(tmp_path), patch.object(
         config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1_000, create=True
     ):
+        running_custody()
         assert state_db.reserve_solana_payout_budget(
             obligation_id="nexus:cap-held:7",
             kind="nexus_payout",

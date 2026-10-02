@@ -101,13 +101,14 @@ def test_no_latch_is_not_a_recovery_completeness_claim(custody_db):
         vault_usdc_units=200, circulating_usdd_units=100, paused=False,
     )
     summary = dashboard.api_summary()
-    assert summary["recovery_admission"] == {"status": "not_held", "liabilities_complete": None}
-    assert summary["ratio_bps"] == 20000
-    assert dashboard.api_issues()["issues"] == []
+    assert summary["recovery_admission"]["status"] == "unknown"
+    assert summary["recovery_admission"]["liabilities_complete"] is False
+    assert summary["ratio_bps"] is None
+    assert dashboard.api_issues()["issues"][0]["id"] == "custody-recovery-admission"
 
 
 @pytest.mark.parametrize("admission", ["held", "unknown", "not_held"])
-def test_rendered_summary_does_not_present_missing_history_as_zero(custody_db, admission):
+def test_rendered_summary_does_not_present_missing_history_as_zero(custody_db, admission, running_custody):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js required to execute the dashboard renderer")
@@ -119,6 +120,8 @@ def test_rendered_summary_does_not_present_missing_history_as_zero(custody_db, a
     elif admission == "unknown":
         with sqlite3.connect(custody_db) as conn:
             conn.execute("DROP TABLE recovery_admission_holds")
+    else:
+        running_custody()
     payload = {"summary": dashboard.api_summary(), "issues": dashboard.api_issues(), "admission": admission,
                "script": dashboard._PAGE.split("<script>", 1)[1].split("</script>", 1)[0]}
     # Execute the actual shipped renderer against a minimal text-only DOM. No browser,

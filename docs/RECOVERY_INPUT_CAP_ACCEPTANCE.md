@@ -2,8 +2,24 @@
 
 - **Report date:** 2026-09-22
 - **Base HEAD:** `a1f19b109681da693331583e30fa192ccee17d2d`
-- **Candidate:** dirty, unstaged single-pair offline implementation
-- **Decision:** **OFFLINE ACCEPTANCE APPROVED — NOT RELEASE APPROVAL**
+- **Original acceptance candidate:** dirty single-pair implementation on the base above.
+- **Publication verified on re-evaluation:** `85030c890fa6f3bb7db97e068e5cf80827d21b28` on local and origin `main`; all 21 reviewed runtime/test hashes match.
+- **Current decision:** **RELEASE BLOCKED — unsent B/C authorization is not recovered after total DB/WAL loss.**
+- **Historical decision:** the original bounded offline A/B/C review approved its tested scope; see the qualification below.
+
+## Re-evaluation qualification
+
+The published A/B/C implementation still passes its existing tests, but the September 22 broader
+review reproduced an untested cross-boundary defect: a pinned public waterline preserves source
+discoverability, not frozen policy/cap-hold authorization after total database loss. Startup can
+return complete and subsequent replay can choose a new route or refund amount/destination under
+current configuration. **B/C restart acceptance is limited to surviving frozen database evidence.**
+Restore that evidence or retain a quantified non-sendable recovery hold; this latter fail-closed
+contract still requires implementation. See [current finding R-1](EVALUATION.md)
+and the [independent financial review](review_evidence/2026-09-22/reevaluation-financial.md).
+The original approval below is historical, not a fresh whole-system approval.
+
+## Original offline acceptance record
 
 Batches A, B and C are implemented and have green attributed offline evidence. Batch B received
 independent batch-scoped quality approval. Batch C's first independent spec review was blocked; both
@@ -68,7 +84,8 @@ decimals and fee arithmetic without floats. Decision precedence is:
 3. calculated output not positive → `hold_nonpositive_output`;
 4. otherwise → `payable`.
 
-Minimum and maximum equality are payable. Both hold decisions persist as `policy held, non-sendable`,
+Minimum and maximum equality pass their respective size checks; payout still requires positive
+output after conversion and fees. Both hold decisions persist as `policy held, non-sendable`,
 retain full principal, create no fee and return before account/memo validation or Nexus transport.
 Payable invalid destinations retain the established refund route. Live Helius and recovery/core
 admission converge on the same real worker gate. Frozen payable decisions survive restart/config drift,
@@ -154,7 +171,14 @@ candidate snapshot tested by that runner; it is not silently promoted to the par
   checks above. The working-tree suite includes preserved pre-existing provider-v2 files; it does
   not approve that proposal. The inventory was regenerated for this explicit working candidate,
   including its unchanged config; rerun it if publication excludes those inherited changes.
-- **Publication:** changes remain unstaged and uncommitted. No exact-commit CI is claimed.
+- **Publication (rechecked 2026-09-22):** the accepted runtime was committed in `85030c8`.
+  [Exact-head CI](https://github.com/distordialabs-brutus/swapService/actions/runs/35755684698)
+  passed the tests, SDK/configuration shards, compile, dependency and link steps, but **failed**
+  committed-range whitespace on historical diff artifacts (194 findings in
+  `committed-since-sept12.diff`, 2 in `dirty-config.diff`). Fresh local execution passed
+  565 tests + 77 subtests. Prior dirty-tree acceptance remains a historical record, not a
+  claim that publication CI is green. See [current evaluation](EVALUATION.md) for broader
+  re-evaluation findings and release gates.
 - **Tool limits:** no broad Ruff/mypy pass is claimed (not installed). One optional reviewer
   corruption probe was tool-denied before execution and was not rerouted; required collected
   acceptance tests and original fairness reproduction executed successfully.

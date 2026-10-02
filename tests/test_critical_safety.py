@@ -13,7 +13,7 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from typing import cast
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -2586,7 +2586,8 @@ class CriticalSafetyTests(unittest.TestCase):
             patch.object(main, "poll_solana_deposits") as poll_solana,
             patch.object(main.alerts, "critical"),
         ):
-            main.run()
+            # Exercise the reconciliation gate after independent image admission.
+            main._run_admitted(Mock(spec=['complete', 'assert_running', 'verify_image', 'check_file_identity']))
 
         poll_solana.assert_called_once_with(paused=True)
 

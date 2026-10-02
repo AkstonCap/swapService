@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("SOLANA_RPC_URL", "http://127.0.0.1:8899")
 os.environ.setdefault("VAULT_KEYPAIR", "/tmp/nonexistent-keypair.json")
@@ -1271,7 +1271,8 @@ class MainStartupRecoveryGateTests(unittest.TestCase):
             patch.object(main.alerts, "critical") as critical,
             patch.object(main.threading, "Event", return_value=_AlreadyStoppedEvent()),
         ):
-            result = main.run()
+            # Inner recovery gate; independent image admission is covered separately.
+            result = main._run_admitted(Mock(spec=['complete', 'assert_running', 'verify_image', 'check_file_identity']))
 
         self.assertFalse(result)
         session_check.assert_not_called()
@@ -1291,7 +1292,8 @@ class MainStartupRecoveryGateTests(unittest.TestCase):
             patch.object(main, "_run_with_watchdog") as poller,
             patch.object(main.alerts, "critical") as critical,
         ):
-            result = main.run()
+            # Inner recovery gate; independent image admission is covered separately.
+            result = main._run_admitted(Mock(spec=['complete', 'assert_running', 'verify_image', 'check_file_identity']))
 
         self.assertFalse(result)
         heartbeat_check.assert_not_called()
@@ -1322,11 +1324,13 @@ class MainStartupRecoveryGateTests(unittest.TestCase):
             patch.object(solana_client, "get_token_account_balance", return_value=10_000_000),
             patch.object(nexus_client, "get_circulating_nexus_supply", return_value=10),
             patch.object(balance_reconciler, "run_balance_reconciliation", return_value=healthy),
+            patch.object(main, "_safe_call", side_effect=lambda fn, *args, **kwargs: fn(*args)),
             patch.object(main.threading, "Event", return_value=_AlreadyStoppedEvent()),
             patch.object(main, "_run_with_watchdog") as poller,
             patch.object(nexus_client, "update_heartbeat_asset") as heartbeat_update,
         ):
-            result = main.run()
+            # Inner recovery gate; independent image admission is covered separately.
+            result = main._run_admitted(Mock(spec=['complete', 'assert_running', 'verify_image', 'check_file_identity']))
 
         self.assertTrue(result)
         recover.assert_called_once_with()
@@ -1350,7 +1354,8 @@ class MainStartupRecoveryGateTests(unittest.TestCase):
             patch.object(nexus_client, "validate_heartbeat_asset") as heartbeat_check,
             patch.object(main.alerts, "critical") as critical,
         ):
-            result = main.run()
+            # Inner recovery gate; independent image admission is covered separately.
+            result = main._run_admitted(Mock(spec=['complete', 'assert_running', 'verify_image', 'check_file_identity']))
 
         self.assertFalse(result)
         receipt_registration.assert_called_once_with()

@@ -1804,7 +1804,8 @@ def _rpc_call(method, *args, timeout: Optional[float] = None, **kwargs):
         except Exception as e:  # pragma: no cover
             q.put((False, e))
     th = threading.Thread(target=_runner, daemon=True)
-    th.start()
+    from . import custody_workers
+    custody_workers.start(th)
     try:
         ok, val = q.get(timeout=timeout)
     except Exception:  # timeout
