@@ -62,6 +62,41 @@ trusted launcher/immutable image, interpreter and installed-artifact attestation
 Batch 0 remain required. Previously approved build digests must not be reused or
 silently rewritten for the changed manifest.
 
+### Maintenance increment — running-interpreter fingerprint drift (2026-10-03)
+
+**Implemented in the local candidate; Batch 0 and publication remain blocked.** Local
+commit `ebedff796bd201d0c0b690074922cfde21a7a883` already contains the root-entrypoint
+repair above and the sealed-custody implementation. This increment addresses the next
+missing byte identity: `build_fingerprint()` now incorporates a domain-separated SHA-256
+of the running Linux interpreter obtained from `/proc/self/exe`, not `PATH`,
+`sys.executable`, a version label or an installed-package declaration. Missing, unreadable,
+empty, non-regular or changing executable evidence refuses fingerprint construction.
+Streaming reads compare descriptor/path identity, byte size and nanosecond modification
+and change times before and after hashing; candidate interpreter bytes are never executed.
+
+Collected coverage in `tests/test_custody_interpreter.py` first reproduced unchanged build
+identity after interpreter-byte drift. It now covers drift, invalid evidence, in-place
+mutation/replacement/truncation during hashing, sanitized read failure, real running-binary
+selection despite spoofed labels, unchanged custody bytes/no receipt/no permit consumption
+on rejection, and exact-build claim, completion and next-generation sealing.
+The focused five-module custody gate returned **67 passed**; the clean Python 3.12 complete
+suite returned **967 passed, 77 subtests passed**. All boundaries remain offline.
+
+`origin/main` is `dba5f358bbe82e09acfbcb3582ae1f8d5d2abeda`, based on `7b2d1c4`, and does
+not contain `src/custody_admission.py`. The local prerequisite commits `ee10b6e` and
+`ebedff7` are absent from that branch. Publishing this increment would therefore also
+publish the larger custody feature or require resolving divergent documentation; neither
+is authorized as this narrow maintenance issue. No force push or implicit feature
+publication is allowed by this increment.
+
+This is **in-process drift containment only**, not interpreter trust or pre-execution
+attestation. Shared libraries, standard library/bytecode, installed dependencies and the
+external trusted launcher/immutable image remain Batch 0 exits. Protected filesystem
+writing is still required; metadata checks are not an immutable-image guarantee. The
+new fingerprint intentionally invalidates prior approvals, including unchanged-interpreter
+approvals under the previous manifest. Do not silently rewrite or reuse certificates.
+Production and real funds remain blocked.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |

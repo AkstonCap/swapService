@@ -34,7 +34,7 @@ receipt enablement, live transaction, commit, or publication authorization.
 
 | Batch | Status at reviewed candidate | Evidence and remaining exit |
 |---|---|---|
-| 0 — executable artifact identity | **Blocked / P0** | `src/*.py` + `requirements.txt` fingerprint omits executed `swapService.py`, interpreter and installed artifacts; pre-admission mutation probe remains hash-equal. |
+| 0 — executable artifact identity | **Blocked / P0** | Local `ebedff7` binds root-entrypoint drift; the October 3 maintenance increment additionally binds running Linux interpreter bytes. These are in-process checks only: installed artifacts/shared libraries and independent pre-execution attestation remain open. The custody prerequisite is absent from `origin/main`, so this narrow increment cannot publish the larger feature implicitly. |
 | 1 — restore/image admission | **Partial** | Four published row containments plus staged exact-image witness are green offline. External approval must establish financial coherence; exact bytes alone cannot discover an incomplete/pre-fix approved image. |
 | 2 — durable startup outcome | **Implemented offline in staged candidate** | Claimed/running/held witness plus local receipt suppress stale healthy dashboard values. Requires artifact and independent deployment acceptance. |
 | 3 — eligible capacity FIFO | **Open** | Malformed oldest evidence still blocks a younger fitting hold. |

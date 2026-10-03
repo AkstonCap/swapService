@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sqlite3
+import stat
 import time
 from contextlib import closing
 from dataclasses import asdict, dataclass
@@ -20,6 +21,9 @@ class AdmissionError(Exception):
 
 
 _HEX = frozenset("0123456789abcdef")
+# Linux already supplies the live-process identity used by custody receipts. Unlike
+# sys.executable or PATH, this identifies the executable actually running the check.
+_INTERPRETER_PATH = Path("/proc/self/exe")
 _HEAD_FIELDS = frozenset({"status", "certificate", "claim_nonce", "event_hash", "hold_reason"})
 _RECEIPT_FIELDS = frozenset({
     "phase", "deployment_id", "generation", "permit_nonce", "claim_nonce",
@@ -136,12 +140,41 @@ def inspect_image(path: str | os.PathLike[str]) -> dict[str, Any]:
     }
 
 
+def _interpreter_fingerprint() -> str:
+    """Hash running Linux interpreter bytes without executing a candidate binary."""
+    digest = hashlib.sha256()
+    size = 0
+
+    def identity(evidence: os.stat_result) -> tuple[int, ...]:
+        return (evidence.st_dev, evidence.st_ino, evidence.st_size,
+                evidence.st_mtime_ns, evidence.st_ctime_ns)
+
+    try:
+        initial = _INTERPRETER_PATH.stat()
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size <= 0:
+            raise AdmissionError("runtime interpreter evidence is unavailable")
+        with _INTERPRETER_PATH.open("rb", buffering=0) as stream:
+            if identity(os.fstat(stream.fileno())) != identity(initial):
+                raise AdmissionError("runtime interpreter evidence is unavailable")
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+            if (size != initial.st_size
+                    or identity(os.fstat(stream.fileno())) != identity(initial)
+                    or identity(_INTERPRETER_PATH.stat()) != identity(initial)):
+                raise AdmissionError("runtime interpreter evidence is unavailable")
+    except OSError as exc:
+        raise AdmissionError("runtime interpreter evidence is unavailable") from exc
+    return digest.hexdigest()
+
+
 def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
-    """Bind service entrypoint, runtime source and declared dependencies.
+    """Bind service entrypoint, runtime source, requirements and interpreter bytes.
 
     This in-process digest is a drift check, not pre-execution attestation. An
     independently trusted launcher must still verify the interpreter, installed
-    artifacts and all executable bytes before any repository code executes.
+    artifacts (including shared libraries) and all executable bytes before any
+    repository code executes. The executable alone does not attest those artifacts.
     """
     repository = Path(root) if root is not None else Path(__file__).resolve().parents[1]
     files = sorted((repository / "src").glob("*.py")) + [
@@ -157,6 +190,10 @@ def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
         digest.update(relative)
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
+    # Domain separate interpreter evidence from the length-framed source manifest.
+    # A binary upgrade intentionally invalidates previously approved build digests.
+    digest.update(b"\x00swapservice-linux-interpreter-v1\x00")
+    digest.update(bytes.fromhex(_interpreter_fingerprint()))
     return digest.hexdigest()
 
 
