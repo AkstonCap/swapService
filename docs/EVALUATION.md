@@ -97,6 +97,47 @@ new fingerprint intentionally invalidates prior approvals, including unchanged-i
 approvals under the previous manifest. Do not silently rewrite or reuse certificates.
 Production and real funds remain blocked.
 
+### Maintenance increment — foundational native-runtime drift (2026-10-04)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains artifact identity. Root-entrypoint and interpreter-byte containments
+in local `ebedff7` and `89fddc7` are preserved, not reimplemented. This increment binds
+the on-disk files backing conventional executable `libpython`, C/math-library and
+Linux-loader mappings in `/proc/self/maps` into a domain-separated build digest.
+Paths are checked against the observed device/inode before streaming their bytes;
+descriptor/path size, mode and nanosecond timestamps are rechecked, as is the selected
+mapping set. Empty, missing, malformed, unreadable, deleted, anonymous or inconsistent
+native evidence refuses fingerprint construction with a sanitized error. Reads are
+bounded by the observed size; a raced-in FIFO cannot block the file open.
+
+The initial regression reproduced unchanged build identity after native-file drift.
+Race regressions then reproduced acceptance of in-place mutation, replacement,
+truncation and changed mappings; all now refuse. A fresh service/dashboard subprocess
+regression caught a separate-process identity mismatch when every native extension was
+included. The final manifest is deliberately limited to foundational runtime libraries:
+normal extension import differences, ASLR, mapping order and duplicate segments do not
+change it. Conventional glibc/musl and `ld`/`ld64` loader names are collected; unsupported
+names are not attested. Rejection preserves the original ready witness permit, custody
+bytes and receipt absence. Exact-build fixtures claim, complete, report healthy and seal
+a next generation. Independent review found no blocking defect in this narrow scope.
+
+The six-module focused gate returned **108 passed**, including **41 native-artifact
+cases**. The clean Python 3.12 complete suite returned **1008 passed, 77 subtests passed**
+in 85.40 seconds. Dependency consistency, compilation, local Markdown links, the
+intended index's token-literal inventory (**274 active lines**) and candidate whitespace
+passed. The three required CI-isolation shards returned **35 passed/52 subtests**,
+**36 passed/52 subtests** and **85 passed**. All chain boundaries remain offline;
+no live send, production credential or real-fund operation was used.
+
+This is **in-process on-disk drift containment**, not pre-execution or mapped-memory
+attestation. Other shared libraries/extensions, standard library/bytecode, installed
+packages, alternate filenames and the external trusted launcher/immutable image remain
+Batch 0 exits. The manifest change invalidates existing approvals; never silently rewrite
+certificates. `origin/main` remains `dba5f358bbe82e09acfbcb3582ae1f8d5d2abeda`, lacking the
+local custody prerequisite and diverging from local `main`. A passing narrow local commit
+cannot authorize publishing that larger feature or reconciling remote documentation.
+No push or remote CI claim is made. Production and real funds remain blocked.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |

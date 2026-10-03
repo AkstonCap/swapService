@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -24,6 +25,7 @@ _HEX = frozenset("0123456789abcdef")
 # Linux already supplies the live-process identity used by custody receipts. Unlike
 # sys.executable or PATH, this identifies the executable actually running the check.
 _INTERPRETER_PATH = Path("/proc/self/exe")
+_MAPS_PATH = Path("/proc/self/maps")
 _HEAD_FIELDS = frozenset({"status", "certificate", "claim_nonce", "event_hash", "hold_reason"})
 _RECEIPT_FIELDS = frozenset({
     "phase", "deployment_id", "generation", "permit_nonce", "claim_nonce",
@@ -168,13 +170,99 @@ def _interpreter_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def _native_fingerprint() -> str:
+    """Hash conventional Linux interpreter/loader/libc/libm mapped files.
+
+    Restrict this increment to foundational runtime libraries: service/dashboard
+    extension import sets normally differ. Other libraries, kernel-provided pages,
+    mapped-memory identity and not-yet-loaded code still require external attestation.
+    """
+    def mapped_paths() -> dict[Path, tuple[int, int, int]]:
+        paths: dict[Path, tuple[int, int, int]] = {}
+        for line in _MAPS_PATH.read_text(encoding="utf-8").splitlines():
+            fields = line.split(maxsplit=5)
+            if (len(fields) < 5
+                    or re.fullmatch(r"[0-9a-f]+-[0-9a-f]+", fields[0]) is None
+                    or re.fullmatch(r"[r-][w-][x-][ps]", fields[1]) is None
+                    or re.fullmatch(r"[0-9a-f]+", fields[2]) is None
+                    or re.fullmatch(r"[0-9a-f]+:[0-9a-f]+", fields[3]) is None
+                    or re.fullmatch(r"[0-9]+", fields[4]) is None):
+                raise ValueError
+            if "x" not in fields[1]:
+                continue
+            name = fields[5] if len(fields) == 6 else ""
+            inode = int(fields[4])
+            if name in {"[vdso]", "[vsyscall]"} and inode == 0:
+                continue
+            # Procfs escapes newline as \\012 ambiguously with literal backslashes;
+            # unusual filenames require a separately reviewed immutable deployment.
+            if (not name.startswith("/") or name.endswith(" (deleted)")
+                    or "\\" in name or inode <= 0):
+                raise ValueError
+            major, minor = (int(part, 16) for part in fields[3].split(":"))
+            path = Path(name)
+            if re.fullmatch(
+                r"(?:libpython[0-9]+\.[0-9]+[dt]?|lib[cm](?:-[0-9.]+)?|"
+                r"ld(?:64|-linux[-\w]*|-musl[-\w]*|-[0-9.]+)?)\.so(?:\.[0-9]+)*",
+                path.name,
+            ) is None:
+                continue
+            expected = (major, minor, inode)
+            if path in paths and paths[path] != expected:
+                raise ValueError
+            paths[path] = expected
+        if not paths:
+            raise ValueError
+        return paths
+
+    def identity(evidence: os.stat_result) -> tuple[int, ...]:
+        return (evidence.st_dev, evidence.st_ino, evidence.st_mode, evidence.st_size,
+                evidence.st_mtime_ns, evidence.st_ctime_ns)
+
+    try:
+        paths = mapped_paths()
+        artifacts = []
+        observed = {}
+        for path, expected in sorted(paths.items()):
+            initial = path.stat()
+            if (not stat.S_ISREG(initial.st_mode) or initial.st_size <= 0
+                    or (os.major(initial.st_dev), os.minor(initial.st_dev), initial.st_ino)
+                    != expected):
+                raise ValueError
+            # Nonblocking open also refuses a raced-in FIFO instead of hanging.
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb", buffering=0) as stream:
+                if identity(os.fstat(stream.fileno())) != identity(initial):
+                    raise ValueError
+                digest = hashlib.sha256()
+                size = 0
+                while chunk := stream.read(min(1024 * 1024, initial.st_size - size + 1)):
+                    size += len(chunk)
+                    if size > initial.st_size:
+                        raise ValueError
+                    digest.update(chunk)
+                if (size != initial.st_size
+                        or identity(os.fstat(stream.fileno())) != identity(initial)
+                        or identity(path.stat()) != identity(initial)):
+                    raise ValueError
+            observed[path] = identity(initial)
+            artifacts.append([str(path), digest.hexdigest()])
+        if (mapped_paths() != paths
+                or any(identity(path.stat()) != value for path, value in observed.items())):
+            raise ValueError
+        return hashlib.sha256(_canonical(artifacts)).hexdigest()
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise AdmissionError("runtime native artifact evidence is unavailable") from exc
+
+
 def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
-    """Bind service entrypoint, runtime source, requirements and interpreter bytes.
+    """Bind service sources, requirements, interpreter and foundational native files.
 
     This in-process digest is a drift check, not pre-execution attestation. An
-    independently trusted launcher must still verify the interpreter, installed
-    artifacts (including shared libraries) and all executable bytes before any
-    repository code executes. The executable alone does not attest those artifacts.
+    independently trusted launcher must still verify every installed artifact,
+    other shared library and executable byte before repository code executes.
+    Conventional libpython/libc/libm/loader file hashes do not attest mapped memory,
+    standard-library/bytecode, unrecognized library names or not-yet-loaded code.
     """
     repository = Path(root) if root is not None else Path(__file__).resolve().parents[1]
     files = sorted((repository / "src").glob("*.py")) + [
@@ -194,6 +282,8 @@ def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
     # A binary upgrade intentionally invalidates previously approved build digests.
     digest.update(b"\x00swapservice-linux-interpreter-v1\x00")
     digest.update(bytes.fromhex(_interpreter_fingerprint()))
+    digest.update(b"\x00swapservice-linux-native-mappings-v1\x00")
+    digest.update(bytes.fromhex(_native_fingerprint()))
     return digest.hexdigest()
 
 

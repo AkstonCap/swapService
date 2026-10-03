@@ -2,11 +2,13 @@
 
 ## Status and boundary
 
-**Local maintenance status (2026-10-03): green offline, but unpublished and not release accepted.**
-Local `ebedff7` includes the whole-image/witness protocol and root-entrypoint drift containment; the
-current maintenance increment additionally binds running Linux interpreter bytes. These in-process
-checks do not attest code before execution, standard library/bytecode, shared libraries or installed
-package artifacts. The custody implementation remains absent from `origin/main`; publishing it is a
+**Local maintenance status (2026-10-04): green offline, but unpublished and not release accepted.**
+Local `ebedff7` includes the whole-image/witness protocol and root-entrypoint drift containment;
+`89fddc7` binds running Linux interpreter bytes. The current narrow increment also binds on-disk
+conventional libpython, C/math and loader files identified through executable Linux mappings.
+These in-process checks do not attest code before execution, mapped-memory identity, standard
+library/bytecode, other shared libraries/extensions, alternate filenames or installed package artifacts.
+The custody implementation remains absent from `origin/main`; publishing it is a
 separate feature decision. Chain verification proves genesis only; heartbeat validation does not bind
 the configured owner/address/pair; and no complete supported bootstrap/restore certificate ceremony exists. See the
 [October 2 review](../DEVELOPMENT_REVIEW_2026-10-02.md) and
@@ -50,7 +52,7 @@ A certificate has exactly these fields and rejects booleans, coercions, unknown 
 }
 ```
 
-`config_sha256` binds all effective public uppercase configuration settings, including production mode, limits/caps, minimums/dust, finality, fees, heartbeat and service/query owners, retry budgets and timeouts, as well as the configured pair and independently pinned immutable chain identities. Credentials/transient session values are excluded explicitly; private locations are hashed, never published. Changing safety settings, endpoints, custody identities or the build requires separate approval, not reuse of an existing permit. The current local `build_sha256` implementation binds `src/*.py`, root `swapService.py`, `requirements.txt`, and a domain-separated SHA-256 of the running Linux executable's bytes read from `/proc/self/exe`. Missing/unreadable/non-regular/empty or changing interpreter evidence refuses admission before permit consumption. It does **not** bind standard library/bytecode, shared libraries or installed dependency artifacts, and is not pre-execution attestation. Batch 0 must externally enforce complete artifact identity. This manifest change invalidates prior build approvals; a binary upgrade requires independently reviewed new approval, never an automatic certificate rewrite.
+`config_sha256` binds all effective public uppercase configuration settings, including production mode, limits/caps, minimums/dust, finality, fees, heartbeat and service/query owners, retry budgets and timeouts, as well as the configured pair and independently pinned immutable chain identities. Credentials/transient session values are excluded explicitly; private locations are hashed, never published. Changing safety settings, endpoints, custody identities or the build requires separate approval, not reuse of an existing permit. The current local `build_sha256` implementation binds `src/*.py`, root `swapService.py`, `requirements.txt`, and domain-separated evidence for the running Linux executable's bytes (`/proc/self/exe`) plus the on-disk files backing conventional executable libpython/libc/libm/loader mappings (`/proc/self/maps`). The latter manifest excludes unrelated native extensions so normal service/dashboard import differences do not change identity. It recognizes conventional glibc/musl and `ld`/`ld64` names; it does not discover every native dependency or attest alternate filenames. Selected file bytes are streamed with device/inode, mode, size and timestamp continuity checks and a repeated selected-mapping snapshot. Missing/unreadable/non-regular/empty/changing or ambiguous evidence refuses admission before permit consumption. These file hashes do **not** bind mapped-memory contents, standard library/bytecode, other shared libraries/extensions or all installed dependency artifacts, and are not pre-execution attestation. Batch 0 must externally enforce complete artifact identity. This manifest change invalidates prior build approvals; a binary/library upgrade requires independently reviewed new approval, never an automatic certificate rewrite.
 
 `main.run()` verifies Solana `getGenesisHash` and Nexus `ledger/get/blockhash height=0` against independently approved pins before any database migration, scanner or recovery/reference lookup. This verifies the immutable chain identity reported by the approved trusted endpoints; it is not a cryptographic proof that an untrusted endpoint is honest and does not establish health, synchronization or tip/root freshness. Nexus session and heartbeat validation failures are fatal before lease completion, but the current heartbeat validator checks only name-resolution plus required fields—not exact address, owner, schema, pair, custody or terms. Complete service identity and node readiness remain release gates.
 
