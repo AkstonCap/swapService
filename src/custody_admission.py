@@ -11,7 +11,9 @@ import stat
 import time
 from contextlib import closing
 from dataclasses import asdict, dataclass
-from importlib.machinery import EXTENSION_SUFFIXES, ExtensionFileLoader, PathFinder
+from importlib.machinery import (
+    EXTENSION_SUFFIXES, ExtensionFileLoader, PathFinder, SourceFileLoader,
+)
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -311,8 +313,76 @@ def _solders_fingerprint() -> str:
         raise AdmissionError("runtime solders artifact evidence is unavailable") from exc
 
 
+# Explicit on-disk source manifest for the solders wrappers imported by src/*.py.
+# Other SDK modules, bytecode and pre-import execution remain externally gated.
+_SOLDERS_SOURCE_MODULES = (
+    "hash", "instruction", "keypair", "message", "pubkey", "signature", "transaction",
+)
+
+
+def _solders_sources_fingerprint() -> str:
+    """Hash selected installed Python sources without executing package discovery."""
+    def source_paths() -> dict[str, Path]:
+        package = PathFinder.find_spec("solders")
+        if (package is None or not isinstance(package.loader, SourceFileLoader)
+                or not isinstance(package.origin, str)
+                or package.origin != package.loader.path
+                or not package.submodule_search_locations):
+            raise ValueError
+        initializer = Path(package.origin)
+        if (not initializer.is_absolute() or initializer.name != "__init__.py"
+                or list(package.submodule_search_locations) != [str(initializer.parent)]):
+            raise ValueError
+        paths = {"__init__.py": initializer}
+        for name in _SOLDERS_SOURCE_MODULES:
+            module = PathFinder.find_spec("solders." + name, [str(initializer.parent)])
+            expected = initializer.parent / (name + ".py")
+            if (module is None or not isinstance(module.loader, SourceFileLoader)
+                    or module.origin != str(expected) or module.loader.path != str(expected)
+                    or module.submodule_search_locations is not None):
+                raise ValueError
+            paths[name + ".py"] = expected
+        return paths
+
+    def identity(evidence: os.stat_result) -> tuple[int, ...]:
+        return (evidence.st_dev, evidence.st_ino, evidence.st_mode, evidence.st_size,
+                evidence.st_mtime_ns, evidence.st_ctime_ns)
+
+    try:
+        paths = source_paths()
+        artifacts = []
+        observed = {}
+        for name, path in sorted(paths.items()):
+            initial = path.stat()
+            if not stat.S_ISREG(initial.st_mode) or initial.st_size <= 0:
+                raise ValueError
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb", buffering=0) as stream:
+                if identity(os.fstat(stream.fileno())) != identity(initial):
+                    raise ValueError
+                digest = hashlib.sha256()
+                size = 0
+                while chunk := stream.read(min(1024 * 1024, initial.st_size - size + 1)):
+                    size += len(chunk)
+                    if size > initial.st_size:
+                        raise ValueError
+                    digest.update(chunk)
+                if (size != initial.st_size
+                        or identity(os.fstat(stream.fileno())) != identity(initial)
+                        or identity(path.stat()) != identity(initial)):
+                    raise ValueError
+            observed[path] = identity(initial)
+            artifacts.append([name, digest.hexdigest()])
+        if (source_paths() != paths
+                or any(identity(path.stat()) != value for path, value in observed.items())):
+            raise ValueError
+        return hashlib.sha256(_canonical(artifacts)).hexdigest()
+    except (OSError, ValueError, ImportError) as exc:
+        raise AdmissionError("runtime solders source evidence is unavailable") from exc
+
+
 def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
-    """Bind sources, interpreter, foundational libraries and the solders extension.
+    """Bind sources, interpreter, foundational libraries and selected solders files.
 
     This in-process digest is a drift check, not pre-execution attestation. An
     independently trusted launcher must still verify every installed artifact,
@@ -342,6 +412,8 @@ def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
     digest.update(bytes.fromhex(_native_fingerprint()))
     digest.update(b"\x00swapservice-solders-extension-v1\x00")
     digest.update(bytes.fromhex(_solders_fingerprint()))
+    digest.update(b"\x00swapservice-solders-sources-v1\x00")
+    digest.update(bytes.fromhex(_solders_sources_fingerprint()))
     return digest.hexdigest()
 
 

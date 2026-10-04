@@ -28,7 +28,12 @@ def extension_fixture(tmp_path, monkeypatch):
     package.mkdir()
     extension = package / "solders.abi3.so"
     extension.write_bytes(b"approved transaction SDK fixture")
-    package_spec = ModuleSpec("solders", loader=None, is_package=True)
+    initializer = package / "__init__.py"
+    initializer.write_text("# offline SDK fixture\n")
+    for name in ("hash", "instruction", "keypair", "message", "pubkey", "signature", "transaction"):
+        package.joinpath(name + ".py").write_text("# offline SDK wrapper\n")
+    package_spec = ModuleSpec("solders", SourceFileLoader("solders", str(initializer)),
+                              origin=str(initializer), is_package=True)
     package_spec.submodule_search_locations = [str(package)]
     original_find = PathFinder.find_spec
 

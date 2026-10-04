@@ -175,6 +175,40 @@ prerequisite. Publishing this repair would also publish that larger feature and 
 remote-documentation reconciliation, outside this one-issue scope. No force push or
 remote CI claim is authorized. Production and real funds remain blocked.
 
+### Maintenance increment — installed solders Python-source drift (2026-10-05)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains complete executable-artifact identity. Existing root-entrypoint,
+interpreter, foundational-library and native solders-extension repairs are preserved.
+This increment binds the installed `solders/__init__.py` and the seven wrappers directly
+imported by the runtime: `hash.py`, `instruction.py`, `keypair.py`, `message.py`,
+`pubkey.py`, `signature.py` and `transaction.py`. A domain-separated source manifest uses
+`PathFinder` without executing inspected packages/modules, requires conventional absolute
+source paths and exact `SourceFileLoader`/origin agreement, streams bounded nonblocking
+reads, and rechecks descriptor/path metadata, the complete discovery result and earlier
+files before accepting the digest. Missing, empty, non-regular, unreadable, bytecode-only,
+conflicting or changing selected evidence refuses admission before permit consumption.
+
+All eight initial drift regressions reproduced unchanged build identity before the fix.
+The new module also covers discovery without execution, invalid files/loaders/paths,
+stat/open races, mutation/replacement/truncation/growth, changes to previously read files,
+and changed discovery. Offline witness fixtures preserve the ready permit, full custody
+image and receipt absence on rejection, then admit the exact approved build, complete a
+healthy lease and seal the next generation. Existing fresh service/dashboard subprocess
+identity coverage remains green. The focused eight-module custody suite returned
+**233 passed**. Independent review found no blocker in this narrow scope. Complete-suite
+and static/isolation gate results are recorded in the maintenance commit report.
+
+This is **in-process on-disk source drift containment**, not proof of executed bytecode,
+loaded modules, complete installed dependencies or trusted pre-execution admission.
+Other wrappers/SDK artifacts (including indirect solders imports), standard library,
+bytecode and the external trusted launcher/immutable image remain Batch 0 exits.
+The changed manifest invalidates prior approvals; never silently rewrite certificates.
+Fresh fetch still resolves `origin/main` to `a28c958`, lacking the custody prerequisite
+and diverging from local `main`. A narrow local commit cannot authorize publishing that
+larger feature or reconciling unrelated remote documentation. No push or remote CI claim
+is made. Production and real funds remain blocked; no live-chain operation was used.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |
