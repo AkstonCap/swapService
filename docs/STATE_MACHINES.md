@@ -1,5 +1,11 @@
 # Swap Service State Machines
 
+## Governing vision and portfolio traceability
+
+Read [the repository vision](../vision.md) and [Distordia alignment/dependency map](DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this architecture → tasks/code/tests/external evidence and human release.
+
+**Portfolio purpose:** O4 attributable settlement and bounded risk; O1 open evidence contracts. Reduce discretionary custody and make exact authorization, liabilities, recovery and finality independently inspectable. The current one-pair operator-custodial bridge is transitional, not non-custodial settlement or company underwriting. The alignment map supplies customer-evidence qualification, batch ownership, upstream prerequisites and human gates. Each material task must name those fields alongside its exact production paths and collected acceptance tests. This documentation alignment changes no runtime, test result or release status; dated evidence below remains evidence for its stated snapshot only.
+
 **Current scope (2026-10-02):** one configured classic SPL token ↔ Nexus token pair.
 The committed runtime and documentation-publication base is
 `7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc`. The separately reviewed local documentation `HEAD` was

@@ -1,5 +1,11 @@
 # Recovery admission and capacity-fairness repair plan — 2026-09-25
 
+## Governing vision and portfolio traceability
+
+Read [the repository vision](../../vision.md) and [Distordia alignment/dependency map](../DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this development plan → tasks/code/tests/external evidence and human release.
+
+**Portfolio purpose:** O4 attributable settlement and bounded risk; O1 open evidence contracts. Reduce discretionary custody and make exact authorization, liabilities, recovery and finality independently inspectable. The current one-pair operator-custodial bridge is transitional, not non-custodial settlement or company underwriting. The alignment map supplies customer-evidence qualification, batch ownership, upstream prerequisites and human gates. Each material task must name those fields alongside its exact production paths and collected acceptance tests. This documentation alignment changes no runtime, test result or release status; dated evidence below remains evidence for its stated snapshot only.
+
 **Current assessment: 2026-10-02.** This maintained plan is updated in place rather than
 duplicated under a new date. Published Batch 1 containment now includes retained ordinary dispositions,
 debit-submission metadata, capacity siblings and terminal siblings. The unpublished, locally staged sealed-custody implementation candidate
