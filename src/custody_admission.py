@@ -11,6 +11,7 @@ import stat
 import time
 from contextlib import closing
 from dataclasses import asdict, dataclass
+from importlib.machinery import EXTENSION_SUFFIXES, ExtensionFileLoader, PathFinder
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -255,8 +256,63 @@ def _native_fingerprint() -> str:
         raise AdmissionError("runtime native artifact evidence is unavailable") from exc
 
 
+def _solders_fingerprint() -> str:
+    """Bind the installed transaction-building extension without importing it.
+
+    PathFinder bypasses package execution and custom meta-path finders. This is a
+    stable on-disk manifest independent of service/dashboard extension import sets,
+    not proof of loaded memory or of the complete SDK/dependency closure.
+    """
+    def extension_path() -> Path:
+        package = PathFinder.find_spec("solders")
+        if package is None or not package.submodule_search_locations:
+            raise ValueError
+        extension = PathFinder.find_spec("solders.solders", package.submodule_search_locations)
+        if (extension is None or not isinstance(extension.loader, ExtensionFileLoader)
+                or not isinstance(extension.origin, str)
+                or extension.origin != extension.loader.path):
+            raise ValueError
+        path = Path(extension.origin)
+        if not path.is_absolute() or path.name not in {
+            "solders" + suffix for suffix in EXTENSION_SUFFIXES
+        }:
+            raise ValueError
+        return path
+
+    def identity(evidence: os.stat_result) -> tuple[int, ...]:
+        return (evidence.st_dev, evidence.st_ino, evidence.st_mode, evidence.st_size,
+                evidence.st_mtime_ns, evidence.st_ctime_ns)
+
+    try:
+        path = extension_path()
+        initial = path.stat()
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size <= 0:
+            raise ValueError
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb", buffering=0) as stream:
+            if identity(os.fstat(stream.fileno())) != identity(initial):
+                raise ValueError
+            digest = hashlib.sha256()
+            size = 0
+            while chunk := stream.read(min(1024 * 1024, initial.st_size - size + 1)):
+                size += len(chunk)
+                if size > initial.st_size:
+                    raise ValueError
+                digest.update(chunk)
+            if (size != initial.st_size
+                    or identity(os.fstat(stream.fileno())) != identity(initial)
+                    or identity(path.stat()) != identity(initial)
+                    or extension_path() != path):
+                raise ValueError
+        # Do not bind installation prefixes: two processes in the same deployment
+        # must agree even when their imported module sets differ.
+        return hashlib.sha256(_canonical([path.name, digest.hexdigest()])).hexdigest()
+    except (OSError, ValueError, ImportError) as exc:
+        raise AdmissionError("runtime solders artifact evidence is unavailable") from exc
+
+
 def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
-    """Bind service sources, requirements, interpreter and foundational native files.
+    """Bind sources, interpreter, foundational libraries and the solders extension.
 
     This in-process digest is a drift check, not pre-execution attestation. An
     independently trusted launcher must still verify every installed artifact,
@@ -284,6 +340,8 @@ def build_fingerprint(root: str | os.PathLike[str] | None = None) -> str:
     digest.update(bytes.fromhex(_interpreter_fingerprint()))
     digest.update(b"\x00swapservice-linux-native-mappings-v1\x00")
     digest.update(bytes.fromhex(_native_fingerprint()))
+    digest.update(b"\x00swapservice-solders-extension-v1\x00")
+    digest.update(bytes.fromhex(_solders_fingerprint()))
     return digest.hexdigest()
 
 

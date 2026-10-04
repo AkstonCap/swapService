@@ -138,6 +138,43 @@ local custody prerequisite and diverging from local `main`. A passing narrow loc
 cannot authorize publishing that larger feature or reconciling remote documentation.
 No push or remote CI claim is made. Production and real funds remain blocked.
 
+### Maintenance increment — installed solders extension drift (2026-10-04)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority is complete executable-artifact identity. Existing root-entrypoint, interpreter
+and foundational-library repairs are preserved. This narrow increment adds a
+domain-separated fingerprint of the installed `solders.solders` native extension used
+for transaction construction. `PathFinder` locates the conventional extension without
+executing its package initializer or library. Exact extension-loader/origin agreement,
+absolute path and recognized interpreter suffix are required. Nonblocking streaming
+reads are bounded by the observed size, with descriptor/path identity, mode, size and
+nanosecond timestamp checks plus repeated extension discovery. Missing, empty,
+non-regular, unreadable, inconsistent or changing evidence refuses admission with a
+sanitized error before witness-permit consumption.
+
+The initial collected regression reproduced unchanged build identity after extension
+byte drift; it now requires a changed digest without execution. The **26-case** new
+module covers discovery without package side effects, invalid evidence, mutation,
+replacement, truncation, growth, discovery changes, stat/open races and FIFO refusal.
+Real offline witness fixtures preserve the ready permit, full custody image and receipt
+absence on rejection, then admit the original artifact, complete a healthy lease and
+seal the next generation. Separate service/dashboard processes retain equal build
+identity. The seven-module focused gate returned **134 passed**; the clean Python 3.12
+complete suite returned **1034 passed, 77 subtests passed** in 84.97 seconds. Independent
+review found no blocking defect in this narrow scope. Final static and isolation gates
+are recorded with the maintenance commit report. No live-chain or real-fund operation
+was performed.
+
+This is **in-process on-disk extension drift containment**, not trusted pre-execution
+attestation, loaded-memory identity or complete installed-package verification. Python
+wrappers, bytecode, other SDK/dependency artifacts, standard library and the external
+trusted launcher/immutable image remain Batch 0 exits. A changed fingerprint invalidates
+prior approvals; never silently rewrite or reuse certificates. Fresh fetch resolves
+`origin/main` to `a28c958`, diverging from local `main` and still lacking the custody
+prerequisite. Publishing this repair would also publish that larger feature and require
+remote-documentation reconciliation, outside this one-issue scope. No force push or
+remote CI claim is authorized. Production and real funds remain blocked.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |
