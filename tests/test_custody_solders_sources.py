@@ -16,8 +16,8 @@ from src.custody_witness import Certificate, Store, StoreClient
 
 
 # Independent expected list: direct runtime imports plus mandatory top-level Python
-# modules imported by the pinned solders initializer. Nested/optional imports are
-# outside this increment, not proof of complete dependency closure.
+# modules and token initializer imported by pinned solders. Other nested/optional
+# imports remain outside this manifest, not proof of complete dependency closure.
 INDIRECT_SOURCE_NAMES = (
     "account.py", "account_decoder.py", "address_lookup_table_account.py", "clock.py",
     "commitment_config.py", "compute_budget.py", "epoch_info.py", "epoch_rewards.py",
@@ -28,6 +28,7 @@ INDIRECT_SOURCE_NAMES = (
 SOURCE_NAMES = (
     "__init__.py", "hash.py", "instruction.py", "keypair.py", "message.py",
     "pubkey.py", "signature.py", "transaction.py", *INDIRECT_SOURCE_NAMES,
+    "token/__init__.py",
 )
 
 
@@ -35,6 +36,7 @@ def source_fixture(tmp_path, monkeypatch):
     package = tmp_path / "installed" / "solders"
     package.mkdir(parents=True)
     for name in SOURCE_NAMES:
+        package.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
         package.joinpath(name).write_text("# approved SDK source fixture\n")
     package.joinpath("solders.abi3.so").write_bytes(b"offline native fixture")
     monkeypatch.syspath_prepend(str(package.parent))
@@ -69,6 +71,18 @@ def test_solders_source_drift_changes_build_without_execution(tmp_path, monkeypa
     assert not marker.exists()
 
 
+def test_eager_token_initializer_drift_changes_build_without_execution(tmp_path, monkeypatch):
+    repository, package = source_fixture(tmp_path, monkeypatch)
+    approved = admission.build_fingerprint(repository)
+    marker = tmp_path / "token-side-effect"
+    package.joinpath("token", "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+
+    assert admission.build_fingerprint(repository) != approved
+    assert not marker.exists()
+
+
 def test_solders_source_manifest_covers_direct_runtime_imports():
     imported = set()
     for path in Path(admission.__file__).parent.glob("*.py"):
@@ -77,12 +91,15 @@ def test_solders_source_manifest_covers_direct_runtime_imports():
                 imported.add(node.module.removeprefix("solders."))
     manifest = set(admission._SOLDERS_SOURCE_MODULES)
     assert imported <= manifest
-    assert manifest == {Path(name).stem for name in SOURCE_NAMES if name != "__init__.py"}
+    assert manifest == {
+        Path(name).stem for name in SOURCE_NAMES if name != "__init__.py" and "/" not in name
+    }
+    assert admission._SOLDERS_SOURCE_PACKAGES == ("token",)
 
 
 def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
-    # Inspect the pinned package without executing it. Optional imports and the
-    # nested token package are explicitly outside this flat-source increment.
+    # Inspect the pinned package without execution. Optional imports and token's
+    # not-eagerly-imported submodules remain outside this finite manifest.
     package = PathFinder.find_spec("solders")
     assert package is not None and isinstance(package.origin, str)
     tree = ast.parse(Path(package.origin).read_text())
@@ -92,8 +109,13 @@ def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
         if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module is None
         for alias in node.names
     }
-    assert eager - set(admission._SOLDERS_SOURCE_MODULES) == {"token"}
-    assert set(admission._SOLDERS_SOURCE_MODULES) <= eager
+    assert eager == set(admission._SOLDERS_SOURCE_MODULES) | {"token"}
+    token = Path(package.origin).parent / "token" / "__init__.py"
+    token_imports = [
+        node for node in ast.walk(ast.parse(token.read_text()))
+        if isinstance(node, ast.ImportFrom) and node.level
+    ]
+    assert {(node.level, node.module) for node in token_imports} == {(2, "solders")}
 
 
 def test_source_discovery_reads_manifest_without_execution(tmp_path, monkeypatch):
@@ -138,6 +160,7 @@ def test_invalid_source_evidence_is_sanitized(tmp_path, monkeypatch, name, state
 
 @pytest.mark.parametrize("module", [
     "solders", "solders.transaction", "solders.system_program", "solders.sysvar",
+    "solders.token",
 ])
 @pytest.mark.parametrize("state", ["absent", "bytecode", "origin_mismatch", "relative", "package_paths"])
 def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, state):
@@ -167,10 +190,42 @@ def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, sta
         admission._solders_sources_fingerprint()
 
 
+@pytest.mark.parametrize("state", [
+    "not_package", "extra_search_path", "loader_path_mismatch", "flat_module",
+])
+def test_token_package_discovery_requires_exact_initializer(tmp_path, monkeypatch, state):
+    source_fixture(tmp_path, monkeypatch)
+    original_find = PathFinder.find_spec
+
+    def find_spec(name, path=None, target=None):
+        found = original_find(name, path, target)
+        if name != "solders.token":
+            return found
+        assert found is not None and isinstance(found.origin, str)
+        assert found.submodule_search_locations is not None
+        if state == "not_package":
+            found.submodule_search_locations = None
+        elif state == "extra_search_path":
+            found.submodule_search_locations.append("/unapproved")
+        elif state == "loader_path_mismatch":
+            found.loader = SourceFileLoader(name, found.origin + ".other")
+        else:
+            found.origin = str(Path(found.origin).parent.with_suffix(".py"))
+            found.loader = SourceFileLoader(name, found.origin)
+            found.submodule_search_locations = None
+        return found
+
+    monkeypatch.setattr(PathFinder, "find_spec", find_spec)
+    with pytest.raises(admission.AdmissionError, match="solders source evidence is unavailable"):
+        admission._solders_sources_fingerprint()
+
+
 @pytest.mark.parametrize("change", [
     "in_place", "replacement", "truncation", "growth", "earlier_source", "discovery",
 ])
-@pytest.mark.parametrize("name", ["transaction.py", "system_program.py", "transaction_status.py"])
+@pytest.mark.parametrize("name", [
+    "transaction.py", "system_program.py", "transaction_status.py", "token/__init__.py",
+])
 def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name
@@ -198,8 +253,9 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
                 if change == "earlier_source":
                     package.joinpath("hash.py").write_bytes(b"changed after it was hashed")
                 elif change == "discovery":
+                    module_name = name.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
                     def find_spec(name, path=None, target=None):
-                        return None if name == "solders." + source.stem else original_find(name, path, target)
+                        return None if name == "solders." + module_name else original_find(name, path, target)
                     monkeypatch.setattr(PathFinder, "find_spec", find_spec)
                 elif change == "replacement":
                     replacement = source.with_suffix(".new")
@@ -224,7 +280,7 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
 
 
 @pytest.mark.parametrize("change", ["mutation", "fifo"])
-@pytest.mark.parametrize("name", ["transaction.py", "system_program.py"])
+@pytest.mark.parametrize("name", ["transaction.py", "system_program.py", "token/__init__.py"])
 def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name
@@ -246,7 +302,7 @@ def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize("state", ["exact", "changed", "missing", "empty", "directory"])
-@pytest.mark.parametrize("name", ["transaction.py", *INDIRECT_SOURCE_NAMES])
+@pytest.mark.parametrize("name", ["transaction.py", *INDIRECT_SOURCE_NAMES, "token/__init__.py"])
 def test_source_admission_preserves_permit_until_exact_build(tmp_path, monkeypatch, state, name):
     repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name

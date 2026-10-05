@@ -313,9 +313,9 @@ def _solders_fingerprint() -> str:
         raise AdmissionError("runtime solders artifact evidence is unavailable") from exc
 
 
-# Explicit on-disk source manifest: direct runtime imports and the mandatory
-# top-level Python wrappers eagerly imported by the pinned solders initializer.
-# Nested packages, optional modules, bytecode and pre-import execution remain gated.
+# Explicit on-disk source manifest: direct runtime imports, mandatory flat
+# wrappers and the token package initializer eagerly imported by pinned solders.
+# Other nested/optional modules, bytecode and pre-import execution remain gated.
 _SOLDERS_SOURCE_MODULES = (
     "account", "account_decoder", "address_lookup_table_account", "clock",
     "commitment_config", "compute_budget", "epoch_info", "epoch_rewards",
@@ -323,6 +323,7 @@ _SOLDERS_SOURCE_MODULES = (
     "null_signer", "presigner", "pubkey", "rent", "signature", "slot_history",
     "stake_history", "system_program", "sysvar", "transaction", "transaction_status",
 )
+_SOLDERS_SOURCE_PACKAGES = ("token",)
 
 
 def _solders_sources_fingerprint() -> str:
@@ -347,6 +348,15 @@ def _solders_sources_fingerprint() -> str:
                     or module.submodule_search_locations is not None):
                 raise ValueError
             paths[name + ".py"] = expected
+        for name in _SOLDERS_SOURCE_PACKAGES:
+            nested = PathFinder.find_spec("solders." + name, [str(initializer.parent)])
+            expected = initializer.parent / name / "__init__.py"
+            if (nested is None or not isinstance(nested.loader, SourceFileLoader)
+                    or nested.origin != str(expected) or nested.loader.path != str(expected)
+                    or nested.submodule_search_locations is None
+                    or list(nested.submodule_search_locations) != [str(expected.parent)]):
+                raise ValueError
+            paths[name + "/__init__.py"] = expected
         return paths
 
     def identity(evidence: os.stat_result) -> tuple[int, ...]:

@@ -244,6 +244,39 @@ publish that larger feature and reconcile unrelated documentation, outside this 
 No push or remote CI claim is made. Production and real funds remain blocked;
 all chain boundaries were offline.
 
+### Maintenance increment — eager solders token-initializer drift (2026-10-06)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains executable-artifact identity. Existing repairs bind the solders root
+initializer and mandatory flat wrappers but omit the mandatory `solders.token` package
+initializer that the pinned root initializer eagerly imports. This narrow increment
+adds `token/__init__.py` to the deterministic on-disk source manifest. Non-executing
+`PathFinder` discovery requires the conventional source initializer, exact source-loader
+origin/path agreement and exactly its own package search directory. Existing bounded
+nonblocking reads and whole-manifest discovery/metadata rechecks apply to the new file.
+
+A collected regression first reproduced an unchanged build digest after inserting a
+side effect into the token initializer. It now requires changed identity without
+executing inspected source. Expanded tests cover missing/empty/non-file/unreadable
+sources, invalid loaders/origins/package paths, flat-module substitution, mutation,
+replacement, truncation, growth and discovery changes during reads, plus stat/open
+races. Offline witness fixtures preserve the ready permit, full custody bytes and
+receipt/sidecar absence on rejection, then claim, complete, report healthy and seal
+with the exact restored artifact. The focused eight-module custody gate returned
+**459 passed**, including equal fresh service/dashboard build identities. Full-suite,
+static and CI-isolation gate results are recorded in the maintenance commit report.
+
+This remains **in-process on-disk drift containment**, not executed-bytecode identity,
+complete dependency verification or independently trusted pre-execution attestation.
+Other nested token/RPC modules, optional SDK artifacts, other dependencies, standard
+library/bytecode and the external trusted launcher/immutable image remain Batch 0 exits.
+The changed manifest invalidates prior approvals; never silently rewrite certificates.
+Fresh fetch still resolves `origin/main` to `a28c958`, lacking the local custody
+prerequisite and diverging from local `main`. Publishing this increment would implicitly
+publish that larger feature and require unrelated documentation reconciliation, outside
+this repair. No push or remote CI claim is made. Production and real funds remain blocked;
+all exercised chain boundaries were offline.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |
