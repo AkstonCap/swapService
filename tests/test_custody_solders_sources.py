@@ -5,6 +5,7 @@ import ast
 import hashlib
 import os
 import sqlite3
+import sys
 from contextlib import closing
 from importlib.machinery import PathFinder, SourceFileLoader, SourcelessFileLoader
 from pathlib import Path
@@ -156,6 +157,28 @@ def test_invalid_source_evidence_is_sanitized(tmp_path, monkeypatch, name, state
     with pytest.raises(admission.AdmissionError) as rejected:
         admission._solders_sources_fingerprint()
     assert str(rejected.value) == "runtime solders source evidence is unavailable"
+
+
+@pytest.mark.parametrize("state", ["missing", "directory", "fifo"])
+def test_token_namespace_without_imported_parent_is_sanitized(tmp_path, monkeypatch, state):
+    _repository, package = source_fixture(tmp_path, monkeypatch)
+    marker = tmp_path / "parent-side-effect"
+    package.joinpath("__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+    source = package / "token" / "__init__.py"
+    source.unlink()
+    if state == "directory":
+        source.mkdir()
+    elif state == "fifo":
+        os.mkfifo(source)
+    # Namespace discovery must not depend on some other test importing solders.
+    monkeypatch.delitem(sys.modules, "solders", raising=False)
+    with pytest.raises(admission.AdmissionError) as rejected:
+        admission._solders_sources_fingerprint()
+    assert str(rejected.value) == "runtime solders source evidence is unavailable"
+    assert "solders" not in sys.modules
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("module", [

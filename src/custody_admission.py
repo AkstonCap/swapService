@@ -349,7 +349,13 @@ def _solders_sources_fingerprint() -> str:
                 raise ValueError
             paths[name + ".py"] = expected
         for name in _SOLDERS_SOURCE_PACKAGES:
-            nested = PathFinder.find_spec("solders." + name, [str(initializer.parent)])
+            try:
+                nested = PathFinder.find_spec("solders." + name, [str(initializer.parent)])
+            except KeyError as exc:
+                # Invalid initializers can become namespace candidates. PathFinder
+                # then looks up an unimported parent in sys.modules; reject that
+                # evidence rather than importing inspected code to satisfy it.
+                raise ValueError from exc
             expected = initializer.parent / name / "__init__.py"
             if (nested is None or not isinstance(nested.loader, SourceFileLoader)
                     or nested.origin != str(expected) or nested.loader.path != str(expected)

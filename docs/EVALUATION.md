@@ -277,6 +277,25 @@ publish that larger feature and require unrelated documentation reconciliation, 
 this repair. No push or remote CI claim is made. Production and real funds remain blocked;
 all exercised chain boundaries were offline.
 
+### Review correction — cold-parent token namespace discovery
+
+The full suite at local `afba882` passed **1359 tests and 77 subtests**, but a fresh
+standalone run of the source/native SDK modules exposed **five failures**. When the
+selected token initializer is missing, a directory or a FIFO, `PathFinder` can try
+to construct a namespace path and raise `KeyError('solders')` if the parent package
+has not been imported. This still refuses admission, but escapes the documented
+sanitized `AdmissionError` boundary; broader collection masked the import dependency.
+
+The local correction converts that nested-discovery `KeyError` into invalid evidence
+through the existing sanitized refusal path. It does not import the inspected parent,
+relax loader/path checks or change permit ordering. Three explicit cold-parent tests
+failed before the correction and now verify refusal without parent execution/import.
+Existing standalone witness cases also verify unchanged permit/custody evidence.
+The source/native SDK shard now passes **354 tests**; the clean Python 3.12 full suite
+passes **1362 tests and 77 subtests**, with no skips. This is a local follow-up only;
+publication and production remain blocked by the same prerequisite/divergence and
+trusted-attestation requirements above.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |
