@@ -313,10 +313,15 @@ def _solders_fingerprint() -> str:
         raise AdmissionError("runtime solders artifact evidence is unavailable") from exc
 
 
-# Explicit on-disk source manifest for the solders wrappers imported by src/*.py.
-# Other SDK modules, bytecode and pre-import execution remain externally gated.
+# Explicit on-disk source manifest: direct runtime imports and the mandatory
+# top-level Python wrappers eagerly imported by the pinned solders initializer.
+# Nested packages, optional modules, bytecode and pre-import execution remain gated.
 _SOLDERS_SOURCE_MODULES = (
-    "hash", "instruction", "keypair", "message", "pubkey", "signature", "transaction",
+    "account", "account_decoder", "address_lookup_table_account", "clock",
+    "commitment_config", "compute_budget", "epoch_info", "epoch_rewards",
+    "epoch_schedule", "errors", "hash", "instruction", "keypair", "message",
+    "null_signer", "presigner", "pubkey", "rent", "signature", "slot_history",
+    "stake_history", "system_program", "sysvar", "transaction", "transaction_status",
 )
 
 

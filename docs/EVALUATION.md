@@ -209,6 +209,41 @@ and diverging from local `main`. A narrow local commit cannot authorize publishi
 larger feature or reconciling unrelated remote documentation. No push or remote CI claim
 is made. Production and real funds remain blocked; no live-chain operation was used.
 
+### Maintenance increment — eager indirect solders source drift (2026-10-05)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority is executable-artifact identity. This increment preserves the previous repairs
+and adds the eighteen mandatory top-level Python wrappers eagerly imported by the pinned
+`solders==0.26.0` initializer. The source manifest now binds the initializer plus all
+25 mandatory flat wrappers, including `account`, `system_program`, `sysvar` and
+`transaction_status`, even when service/dashboard import sets differ. Existing
+non-executing source discovery, exact loader/origin validation, bounded nonblocking
+reads and complete discovery/metadata rechecks apply without changing admission ordering.
+
+All eighteen new drift regressions first reproduced unchanged build identity; the
+expanded manifest now changes the digest without executing inspected source. An independent
+expected inventory and AST inspection of the installed initializer check the scope.
+Expanded invalid-file, loader, race and offline witness tests cover the added wrappers:
+rejection preserves the ready permit, full custody bytes and absence of receipts/sidecars;
+restoring the exact artifact permits claim, healthy completion and next-generation seal.
+The focused eight-module gate returned **445 passed**. Independent review found no
+blocking defect in this narrow scope. The clean Python 3.12 complete suite returned
+**1330 passed, 77 subtests passed** in 101.37 seconds, with no skips. All three
+CI-isolation shards passed (**35/36/85 tests**, with **52 subtests** in each recovery
+shard). Dependency consistency, compilation, Markdown links, intended-index literal
+inventory (**274 active lines**) and candidate whitespace checks passed.
+
+This is **in-process on-disk drift containment**, not proof of executed bytecode or
+trusted pre-execution attestation. Nested `solders.token`/`solders.rpc` packages,
+optional `litesvm`/`transaction_metadata`, other installed artifacts, standard library,
+bytecode and the external trusted launcher/immutable image remain Batch 0 exits.
+The changed manifest invalidates prior approvals; never silently rewrite certificates.
+Fresh fetch resolves `origin/main` to `a28c958`, still lacking the local custody
+prerequisite and diverging from local `main`. Publishing this increment would implicitly
+publish that larger feature and reconcile unrelated documentation, outside this repair.
+No push or remote CI claim is made. Production and real funds remain blocked;
+all chain boundaries were offline.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |

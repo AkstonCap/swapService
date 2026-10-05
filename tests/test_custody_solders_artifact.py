@@ -30,7 +30,9 @@ def extension_fixture(tmp_path, monkeypatch):
     extension.write_bytes(b"approved transaction SDK fixture")
     initializer = package / "__init__.py"
     initializer.write_text("# offline SDK fixture\n")
-    for name in ("hash", "instruction", "keypair", "message", "pubkey", "signature", "transaction"):
+    # This extension-focused fixture needs the complete selected source manifest;
+    # its independent exact-membership contract lives in the source-focused tests.
+    for name in admission._SOLDERS_SOURCE_MODULES:
         package.joinpath(name + ".py").write_text("# offline SDK wrapper\n")
     package_spec = ModuleSpec("solders", SourceFileLoader("solders", str(initializer)),
                               origin=str(initializer), is_package=True)

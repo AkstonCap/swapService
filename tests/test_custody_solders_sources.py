@@ -15,9 +15,19 @@ from src import custody_admission as admission
 from src.custody_witness import Certificate, Store, StoreClient
 
 
+# Independent expected list: direct runtime imports plus mandatory top-level Python
+# modules imported by the pinned solders initializer. Nested/optional imports are
+# outside this increment, not proof of complete dependency closure.
+INDIRECT_SOURCE_NAMES = (
+    "account.py", "account_decoder.py", "address_lookup_table_account.py", "clock.py",
+    "commitment_config.py", "compute_budget.py", "epoch_info.py", "epoch_rewards.py",
+    "epoch_schedule.py", "errors.py", "null_signer.py", "presigner.py", "rent.py",
+    "slot_history.py", "stake_history.py", "system_program.py", "sysvar.py",
+    "transaction_status.py",
+)
 SOURCE_NAMES = (
     "__init__.py", "hash.py", "instruction.py", "keypair.py", "message.py",
-    "pubkey.py", "signature.py", "transaction.py",
+    "pubkey.py", "signature.py", "transaction.py", *INDIRECT_SOURCE_NAMES,
 )
 
 
@@ -65,7 +75,25 @@ def test_solders_source_manifest_covers_direct_runtime_imports():
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("solders."):
                 imported.add(node.module.removeprefix("solders."))
-    assert imported == set(admission._SOLDERS_SOURCE_MODULES)
+    manifest = set(admission._SOLDERS_SOURCE_MODULES)
+    assert imported <= manifest
+    assert manifest == {Path(name).stem for name in SOURCE_NAMES if name != "__init__.py"}
+
+
+def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
+    # Inspect the pinned package without executing it. Optional imports and the
+    # nested token package are explicitly outside this flat-source increment.
+    package = PathFinder.find_spec("solders")
+    assert package is not None and isinstance(package.origin, str)
+    tree = ast.parse(Path(package.origin).read_text())
+    eager = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module is None
+        for alias in node.names
+    }
+    assert eager - set(admission._SOLDERS_SOURCE_MODULES) == {"token"}
+    assert set(admission._SOLDERS_SOURCE_MODULES) <= eager
 
 
 def test_source_discovery_reads_manifest_without_execution(tmp_path, monkeypatch):
@@ -108,7 +136,9 @@ def test_invalid_source_evidence_is_sanitized(tmp_path, monkeypatch, name, state
     assert str(rejected.value) == "runtime solders source evidence is unavailable"
 
 
-@pytest.mark.parametrize("module", ["solders", "solders.transaction"])
+@pytest.mark.parametrize("module", [
+    "solders", "solders.transaction", "solders.system_program", "solders.sysvar",
+])
 @pytest.mark.parametrize("state", ["absent", "bytecode", "origin_mismatch", "relative", "package_paths"])
 def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, state):
     source_fixture(tmp_path, monkeypatch)
@@ -140,9 +170,10 @@ def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, sta
 @pytest.mark.parametrize("change", [
     "in_place", "replacement", "truncation", "growth", "earlier_source", "discovery",
 ])
-def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("name", ["transaction.py", "system_program.py", "transaction_status.py"])
+def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
-    source = package / "transaction.py"
+    source = package / name
     original_fdopen = os.fdopen
     original_find = PathFinder.find_spec
 
@@ -168,7 +199,7 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change):
                     package.joinpath("hash.py").write_bytes(b"changed after it was hashed")
                 elif change == "discovery":
                     def find_spec(name, path=None, target=None):
-                        return None if name == "solders.transaction" else original_find(name, path, target)
+                        return None if name == "solders." + source.stem else original_find(name, path, target)
                     monkeypatch.setattr(PathFinder, "find_spec", find_spec)
                 elif change == "replacement":
                     replacement = source.with_suffix(".new")
@@ -193,9 +224,10 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change):
 
 
 @pytest.mark.parametrize("change", ["mutation", "fifo"])
-def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("name", ["transaction.py", "system_program.py"])
+def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
-    source = package / "transaction.py"
+    source = package / name
     original_open = os.open
 
     def opening(path, flags, *args, **kwargs):
@@ -214,9 +246,10 @@ def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize("state", ["exact", "changed", "missing", "empty", "directory"])
-def test_source_admission_preserves_permit_until_exact_build(tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("name", ["transaction.py", *INDIRECT_SOURCE_NAMES])
+def test_source_admission_preserves_permit_until_exact_build(tmp_path, monkeypatch, state, name):
     repository, package = source_fixture(tmp_path, monkeypatch)
-    source = package / "transaction.py"
+    source = package / name
     original = source.read_bytes()
     build = admission.build_fingerprint
     monkeypatch.setattr(admission, "build_fingerprint", lambda: build(repository))
@@ -238,7 +271,7 @@ def test_source_admission_preserves_permit_until_exact_build(tmp_path, monkeypat
     client = StoreClient(store, runtime)
     head = client.get_head(cert.deployment_id)
     if state == "changed":
-        source.write_bytes(b"unapproved transaction wrapper")
+        source.write_bytes(b"unapproved SDK wrapper")
     elif state == "empty":
         source.write_bytes(b"")
     elif state in {"missing", "directory"}:
