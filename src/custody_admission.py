@@ -314,14 +314,17 @@ def _solders_fingerprint() -> str:
 
 
 # Explicit on-disk source manifest: direct runtime imports, mandatory flat
-# wrappers and token/RPC package initializers eagerly imported by pinned solders.
-# Other nested/optional modules, bytecode and pre-import execution remain gated.
+# wrappers (including conditionally attempted LiteSVM/metadata imports) and
+# token/RPC package initializers eagerly imported by pinned solders. Suppressed
+# ImportError does not stop a present wrapper executing. Require the selected
+# pinned-wheel files; other nested modules/bytecode/pre-import execution stay gated.
 _SOLDERS_SOURCE_MODULES = (
     "account", "account_decoder", "address_lookup_table_account", "clock",
     "commitment_config", "compute_budget", "epoch_info", "epoch_rewards",
     "epoch_schedule", "errors", "hash", "instruction", "keypair", "message",
     "null_signer", "presigner", "pubkey", "rent", "signature", "slot_history",
     "stake_history", "system_program", "sysvar", "transaction", "transaction_status",
+    "litesvm", "transaction_metadata",
 )
 _SOLDERS_SOURCE_PACKAGES = ("token", "rpc")
 # The pinned wheel's RPC initializer is empty but still executable import evidence.

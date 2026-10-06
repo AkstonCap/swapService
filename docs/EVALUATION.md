@@ -329,6 +329,40 @@ publish that larger feature and reconcile unrelated documentation, outside this 
 No push or remote CI claim is made. Production and real funds remain blocked;
 all exercised chain boundaries were offline.
 
+### Maintenance increment — eagerly attempted LiteSVM/metadata source drift (2026-10-06)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains executable-artifact identity. The pinned solders initializer eagerly
+attempts to import `litesvm` and `transaction_metadata` under suppressed `ImportError`.
+That suppression does not prevent present wrappers executing; both installed files
+were outside the source manifest. This narrow increment binds `litesvm.py` and
+`transaction_metadata.py` through the existing deterministic, non-executing discovery,
+exact source-loader/origin validation, bounded nonblocking reads and whole-manifest
+metadata/discovery rechecks. Both files are required and nonempty in this pinned-wheel
+manifest, even though the SDK treats their imports as optional.
+
+Two collected drift regressions first reproduced unchanged build identity after adding
+side effects to these wrappers. They now require changed identity without executing
+inspected source. Expanded existing cases cover missing/empty/non-file/unreadable
+artifacts, invalid discovery/loaders, read/open races and source changes. Offline witness
+cases preserve the ready permit, custody bytes and receipt/sidecar absence on rejection,
+then admit, complete, report healthy and seal the exact restored artifact. The focused
+eight-module custody gate returned **558 passed**. Independent read-only review found
+no blocking defect. The clean Python 3.12 complete suite returned **1443 passed,
+77 subtests passed** in 105.92 seconds, with no skips. Final static and CI-isolation
+checks are recorded in the maintenance commit report.
+
+This is **in-process on-disk drift containment**, not complete dependency, executed-
+bytecode, loaded-memory or independently trusted pre-execution attestation. Nested SDK
+modules, other dependencies, standard library/bytecode and the external trusted
+launcher/immutable image remain Batch 0 exits. The changed manifest invalidates earlier
+approvals; never silently rewrite certificates. Fresh fetch still resolves `origin/main`
+to `a28c958800f64e802b3dfc367ac49ecf7a18e5fb`, lacking the custody prerequisite; the
+branches diverge by two remote-only and ten local-only commits before this increment.
+Publishing would implicitly publish that larger feature and require unrelated remote
+documentation reconciliation, outside this repair. No push or remote CI claim is made.
+Production and real funds remain blocked; all exercised chain boundaries were offline.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |

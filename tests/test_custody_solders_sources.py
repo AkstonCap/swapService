@@ -17,14 +17,14 @@ from src.custody_witness import Certificate, Store, StoreClient
 
 
 # Independent expected list: direct runtime imports plus mandatory top-level Python
-# modules and token/RPC initializers imported by pinned solders. Other nested/optional
-# imports remain outside this manifest, not proof of complete dependency closure.
+# modules, conditionally attempted wrappers and token/RPC initializers imported by
+# pinned solders. Other nested imports stay outside this finite dependency manifest.
 INDIRECT_SOURCE_NAMES = (
     "account.py", "account_decoder.py", "address_lookup_table_account.py", "clock.py",
     "commitment_config.py", "compute_budget.py", "epoch_info.py", "epoch_rewards.py",
     "epoch_schedule.py", "errors.py", "null_signer.py", "presigner.py", "rent.py",
     "slot_history.py", "stake_history.py", "system_program.py", "sysvar.py",
-    "transaction_status.py",
+    "transaction_status.py", "litesvm.py", "transaction_metadata.py",
 )
 SOURCE_NAMES = (
     "__init__.py", "hash.py", "instruction.py", "keypair.py", "message.py",
@@ -101,6 +101,19 @@ def test_eager_rpc_initializer_drift_changes_build_without_execution(tmp_path, m
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("name", ["litesvm.py", "transaction_metadata.py"])
+def test_eager_optional_wrapper_drift_changes_build_without_execution(tmp_path, monkeypatch, name):
+    repository, package = source_fixture(tmp_path, monkeypatch)
+    source = package / name
+    source.write_text("# approved eagerly attempted wrapper\n")
+    approved = admission.build_fingerprint(repository)
+    marker = tmp_path / "optional-wrapper-side-effect"
+    source.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+
+    assert admission.build_fingerprint(repository) != approved
+    assert not marker.exists()
+
+
 def test_solders_source_manifest_covers_direct_runtime_imports():
     imported = set()
     for path in Path(admission.__file__).parent.glob("*.py"):
@@ -116,8 +129,8 @@ def test_solders_source_manifest_covers_direct_runtime_imports():
 
 
 def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
-    # Inspect the pinned package without execution. Optional imports and token's
-    # not-eagerly-imported submodules remain outside this finite manifest.
+    # Inspect the pinned package without execution. Conditional imports are checked
+    # separately; token's not-eagerly-imported submodules stay outside this manifest.
     package = PathFinder.find_spec("solders")
     assert package is not None and isinstance(package.origin, str)
     tree = ast.parse(Path(package.origin).read_text())
@@ -127,7 +140,8 @@ def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
         if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module is None
         for alias in node.names
     }
-    assert eager == set(admission._SOLDERS_SOURCE_MODULES) | {"token"}
+    assert eager == (set(admission._SOLDERS_SOURCE_MODULES)
+                     - {"litesvm", "transaction_metadata"}) | {"token"}
     token = Path(package.origin).parent / "token" / "__init__.py"
     token_imports = [
         node for node in ast.walk(ast.parse(token.read_text()))
@@ -146,7 +160,11 @@ def test_pinned_rpc_initializer_is_eagerly_imported_and_valid_when_empty():
         if isinstance(child, ast.ImportFrom) and child.level == 1 and child.module is None
         for alias in child.names
     }
-    assert "rpc" in conditional_imports
+    assert conditional_imports == {"rpc", "litesvm", "transaction_metadata"}
+    for name in ("litesvm", "transaction_metadata"):
+        assert name in admission._SOLDERS_SOURCE_MODULES
+        source = Path(package.origin).parent / (name + ".py")
+        assert source.is_file() and source.stat().st_size > 0
     assert Path(package.origin).parent.joinpath("rpc", "__init__.py").read_bytes() == b""
     assert admission._SOLDERS_EMPTY_SOURCES == frozenset({"rpc/__init__.py"})
     assert len(admission._solders_sources_fingerprint()) == 64
@@ -220,7 +238,7 @@ def test_nested_namespace_without_imported_parent_is_sanitized(tmp_path, monkeyp
 
 @pytest.mark.parametrize("module", [
     "solders", "solders.transaction", "solders.system_program", "solders.sysvar",
-    "solders.token", "solders.rpc",
+    "solders.token", "solders.rpc", "solders.litesvm", "solders.transaction_metadata",
 ])
 @pytest.mark.parametrize("state", ["absent", "bytecode", "origin_mismatch", "relative", "package_paths"])
 def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, state):
@@ -286,7 +304,7 @@ def test_nested_package_discovery_requires_exact_initializer(tmp_path, monkeypat
 ])
 @pytest.mark.parametrize("name", [
     "transaction.py", "system_program.py", "transaction_status.py", "token/__init__.py",
-    "rpc/__init__.py",
+    "rpc/__init__.py", "litesvm.py", "transaction_metadata.py",
 ])
 def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
@@ -346,6 +364,7 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
 @pytest.mark.parametrize("change", ["mutation", "fifo"])
 @pytest.mark.parametrize("name", [
     "transaction.py", "system_program.py", "token/__init__.py", "rpc/__init__.py",
+    "litesvm.py", "transaction_metadata.py",
 ])
 def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
