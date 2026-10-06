@@ -1,16 +1,16 @@
 # Recovery admission and capacity-fairness repair plan — 2026-09-25
 
-**Current assessment: 2026-10-02.** This maintained plan is updated in place rather than
-duplicated under a new date. Published Batch 1 containment now includes retained ordinary dispositions,
-debit-submission metadata, capacity siblings and terminal siblings. The staged sealed-custody candidate
-implements an exact-image continuity gate plus durable dashboard authorization, but introduces a P0
-artifact-attestation exit and does not close service identity, node freshness, witness operations,
-capacity fairness or live acceptance.
+## Governing vision and portfolio traceability
+
+Read [the repository vision](../../vision.md) and [Distordia alignment/dependency map](../DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this development plan → tasks/code/tests/external evidence and human release.
+
+**Portfolio purpose:** O4 attributable settlement and bounded risk; O1 open evidence contracts. Reduce discretionary custody and make exact authorization, liabilities, recovery and finality independently inspectable. The current one-pair operator-custodial bridge is transitional, not non-custodial settlement or company underwriting. The alignment map supplies customer-evidence qualification, batch ownership, upstream prerequisites and human gates. Each material task must name those fields alongside its exact production paths and collected acceptance tests. This documentation alignment changes no runtime, test result or release status; dated evidence below remains evidence for its stated snapshot only.
+
+**Current assessment lineage:** the October 2 review covered four published Batch 1 containments and an unpublished, locally staged sealed-custody implementation candidate. That runtime candidate's 947-test gate and the separate committed-runtime documentation candidate's 848-test gate plus 77 subtests remain historical evidence for their exact snapshots. The current source includes the custody implementation and later narrow in-process fingerprint increments, but does not close trusted pre-execution artifact identity, service identity, node freshness, witness operations, capacity fairness or live acceptance. Production and real funds remain blocked.
 
 ## Decision and scope
 
-Reviewed `HEAD`: `ee10b6e20dfe85f15347386adecb9dc99db55bb5`; staged index tree:
-`a73785b8653e3ad03c9216072b7366999ba1e854`; compared with
+Historical October 2 identities: committed runtime/documentation-publication base `7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc`; separately reviewed local documentation `HEAD` `ee10b6e20dfe85f15347386adecb9dc99db55bb5`; unpublished runtime index tree `a73785b8653e3ad03c9216072b7366999ba1e854`; compared with review base
 `ed73c513ee22f9626502273aa0d8e42a4c238b7a`.
 
 Keep all accepted containment controls:
@@ -23,7 +23,7 @@ Keep all accepted containment controls:
 - holding of ready rows with any disposition-capacity sibling; and
 - holding of ready rows with any processed/refunded/quarantined sibling.
 
-Also preserve the staged candidate's fail-closed witness state machine, claim-before-init ordering,
+Also preserve the current implementation's fail-closed witness state machine, claim-before-init ordering,
 whole-file/schema verification, recovery-before-running, per-cycle lease check, worker drain, quiescent
 seal and read-only snapshot dashboard while repairing the exits below.
 
@@ -34,11 +34,11 @@ receipt enablement, live transaction, commit, or publication authorization.
 
 | Batch | Status at reviewed candidate | Evidence and remaining exit |
 |---|---|---|
-| 0 — executable artifact identity | **Blocked / P0** | Local `ebedff7` binds root-entrypoint drift; `89fddc7` binds running Linux interpreter bytes. The October 4 increments add on-disk conventional libpython/libc/libm/loader drift evidence, the installed solders native-extension fingerprint and service/dashboard identity regressions. The October 5 increments bind the solders initializer, seven directly imported Python wrappers and eighteen additional mandatory flat wrappers eagerly imported by that initializer. The October 6 increment also binds the eagerly imported `solders.token` package initializer, requiring exact source-loader, origin and package-search evidence without execution. The next October 6 increment binds the eagerly attempted `solders.rpc` package initializer too, including the pinned wheel's valid empty file; missing or substituted evidence still refuses admission. These increments also bind the eagerly attempted `litesvm.py` and `transaction_metadata.py` wrappers shipped in the pinned wheel, despite the initializer suppressing `ImportError`; missing or invalid selected artifacts refuse admission. These are in-process checks only: other nested SDK modules and other dependency artifacts, standard library/bytecode, other libraries, mapped-memory identity and independent pre-execution attestation remain open. The custody prerequisite is absent from `origin/main`, so this narrow increment cannot publish the larger feature implicitly. |
-| 1 — restore/image admission | **Partial** | Four published row containments plus staged exact-image witness are green offline. External approval must establish financial coherence; exact bytes alone cannot discover an incomplete/pre-fix approved image. |
-| 2 — durable startup outcome | **Implemented offline in staged candidate** | Claimed/running/held witness plus local receipt suppress stale healthy dashboard values. Requires artifact and independent deployment acceptance. |
+| 0 — executable artifact identity | **Blocked / P0** | Current in-process evidence binds root `swapService.py`, the running Linux interpreter, conventional executable libpython/libc/libm/loader mappings, the installed `solders.solders` extension, the solders initializer and 25 mandatory flat wrappers, `token`/`rpc` package initializers, and eagerly attempted `litesvm.py`/`transaction_metadata.py`. Other nested SDK/dependency artifacts, standard library/bytecode, other libraries, mapped-memory identity and independent pre-execution attestation remain open. |
+| 1 — restore/image admission | **Partial** | Four published row containments plus the current exact-image witness are green offline. External approval must establish financial coherence; exact bytes alone cannot discover an incomplete/pre-fix approved image. |
+| 2 — durable startup outcome | **Implemented offline in current source** | Claimed/running/held witness plus local receipt suppress stale healthy dashboard values. Requires artifact and independent deployment acceptance. |
 | 3 — eligible capacity FIFO | **Open** | Malformed oldest evidence still blocks a younger fitting hold. |
-| 4 — read-only dashboard | **Implemented offline in staged candidate** | One read-only snapshot and missing-path no-create tests pass; retain witness-before/after consistency and target deployment acceptance. |
+| 4 — read-only dashboard | **Implemented offline in current source** | One read-only snapshot and missing-path no-create tests pass; retain witness-before/after consistency and target deployment acceptance. |
 | 5 — service/chain admission | **Blocked** | Heartbeat owner/address/pair is unbound; genesis-only checks omit Solana health/root and Nexus sync/tip freshness. |
 | 6 — witness operations and hold resolution | **Open** | Required settings/bootstrap certificate ceremony are not integrated; non-capacity Solana holds lack audited disposition. |
 | 7 — target acceptance/release | **Open** | No live node, crash/restore or operator rehearsal evidence. |
@@ -227,7 +227,7 @@ reservation, delete a source, invent a fee or authorize transport.
 
 ### Batch 4 — make the dashboard actually read-only and snapshot-consistent
 
-**Priority: P2 hardening. Status: implemented offline in the staged candidate.**
+**Priority: P2 hardening. Status: implemented offline in the current source.**
 
 `api_summary()` now uses one `mode=ro` connection and transaction for metrics, counts and payout exposure,
 then rechecks the exact witness lease. A missing path returns unknown without creating DB/WAL/SHM. Keep
@@ -243,7 +243,7 @@ Acceptance:
 
 ### Batch 5 — bind service identity and node readiness
 
-The staged candidate makes heartbeat validation fatal and pins both genesis identities, but that is only
+The current implementation makes heartbeat validation fatal and pins both genesis identities, but that is only
 partial. Before database mutation, require exact heartbeat address, owner, schema, pair/custody identity
 and terms. Require Solana health/root freshness and Nexus `synchronized=true`, `syncing=false`, expected
 mode/network and fresh tip from the exact configured endpoints. Wrong-typed/missing/stale evidence starts

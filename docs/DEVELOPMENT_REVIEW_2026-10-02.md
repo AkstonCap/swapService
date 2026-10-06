@@ -4,7 +4,7 @@
 
 **Release blocked.** Four published recovery containments since
 `ed73c513ee22f9626502273aa0d8e42a4c238b7a` are accepted for their narrow offline scope.
-The staged sealed-custody candidate materially improves restore continuity, startup truth and
+The unpublished, locally staged sealed-custody implementation candidate materially improves restore continuity, startup truth and
 read-only monitoring, but its build certificate does not bind the executable root entrypoint and its
 chain/heartbeat admission still proves neither the configured service identity nor node freshness.
 No live-chain or production acceptance was performed.
@@ -16,8 +16,10 @@ source index tree: a73785b8653e3ad03c9216072b7366999ba1e854
 remote main:       7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc
 ```
 
-`HEAD` is one local documentation commit ahead of `origin/main`. The sealed-custody runtime and tests
-are staged but uncommitted; maintained documentation and this report are unstaged. This review made
+At review time, `HEAD` was one local documentation commit ahead of `origin/main`. The sealed-custody
+runtime and tests were staged but uncommitted; maintained documentation and this report were unstaged.
+The documentation-publication candidate is prepared separately from committed remote runtime
+`7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc` and includes none of that staged runtime. This review made
 documentation changes only and preserved all pre-existing staged, unstaged and untracked work.
 
 ## Changes since the September 28 baseline
@@ -35,7 +37,7 @@ Published runtime changes extend the startup transaction in
 5. `ee10b6e` changes only the Markdown-link inventory contract so the informative untracked root
    `vision.md` is not treated as a publication document.
 
-The staged candidate adds:
+The unpublished staged implementation candidate adds:
 
 - a separately stored witness with one-use `ready → claimed → running → ready(next generation)`
   permits and permanent holds;
@@ -141,16 +143,37 @@ limits, without making the blocked row sendable.
 | Invalid capacity rows cannot starve eligible frozen work | No new scheduler state/acceptance regression | **Open** |
 | Target-chain semantics and operational ceremony | No live activity authorized or executed | **Open** |
 
-## Executed verification
+## Documentation-publication candidate verification
+
+The detached publication candidate is based on committed remote runtime
+`7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc`. It stages only the reviewed maintained documentation,
+this dated review, the unpublished sealed-custody proposal and the token inventory regenerated from that
+committed runtime plus those documents. It contains none of the dirty or staged runtime/test changes from
+the review worktree.
+
+| Gate | Result |
+|---|---|
+| Complete committed-runtime + candidate-docs suite | **848 passed, 77 subtests passed** |
+| Recovery standalone isolation shard | **35 passed, 52 subtests passed** |
+| Recovery + installed SDK isolation shard | **36 passed, 52 subtests passed** |
+| Receipt/payout/Nexus-fee/SDK isolation shard | **85 passed** |
+| Dependency consistency and byte compilation | Passed |
+| Local Markdown links | Passed |
+| Staged-index token-pair inventory | Passed; **274 active lines** |
+| Staged and unstaged candidate whitespace | Passed |
+
+This candidate has no publication commit or exact-head CI yet. Those remain publication-time gates.
+
+## Unpublished runtime-candidate verification
 
 All tests and probes were offline. Chain/RPC boundaries were mocked or pointed at unreachable local
 fixtures; no credentials, production state or funds were used.
 
 | Gate | Result |
 |---|---|
-| Initial shared-tree complete suite | **947 passed, 77 subtests passed in 128.61s** |
-| Final documentation worktree complete suite | **947 passed, 77 subtests passed in 147.43s** |
-| Final disposable-index candidate complete suite | **947 passed, 77 subtests passed** |
+| Initial unpublished-runtime shared-tree complete suite | **947 passed, 77 subtests passed in 128.61s** |
+| Final unpublished-runtime review worktree complete suite | **947 passed, 77 subtests passed in 147.43s** |
+| Final disposable-index unpublished-runtime candidate complete suite | **947 passed, 77 subtests passed** |
 | Focused retained-source + sealed-custody modules | **324 passed in 59.73s** |
 | Recovery standalone | **35 passed, 52 subtests passed in 2.86s** |
 | Recovery + installed SDK | **36 passed, 52 subtests passed in 3.23s** |
@@ -160,7 +183,8 @@ fixtures; no credentials, production state or funds were used.
 | Baseline-to-worktree and staged whitespace | Passed |
 | Review probes | **3 passed**: reproduced unbound entrypoint, genesis-only admission and unbound heartbeat identity |
 
-There is no CI run for local `HEAD` `ee10b6e` and no CI can cover the staged/uncommitted sealed-custody
+The three 947-test rows above cover the unpublished staged runtime candidate, not committed runtime or this
+documentation-only publication candidate. There is no CI run for local `HEAD` `ee10b6e` and no CI can cover the staged/uncommitted sealed-custody
 candidate. Exact remote source `7b2d1c4` has successful CI run `36857060922`; that run predates
 `ee10b6e` and excludes all staged candidate files.
 

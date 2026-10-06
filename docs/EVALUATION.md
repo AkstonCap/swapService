@@ -1,13 +1,29 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-## Current verdict — 2026-10-02
+## Current source and publication boundary — 2026-10-06
 
-**Release blocked.** Reviewed range and candidate identity:
+**Release and real funds remain blocked.** Current source includes the sealed-image/witness
+implementation and the narrow drift repairs through `e8d070296d5d34e32755cab4b7876f3fd340b9f2`.
+The operator has authorized committing and pushing this accumulated source together with the
+remote documentation history at `a28c958800f64e802b3dfc367ac49ecf7a18e5fb`, without force push.
+Publication is not deployment, trusted pre-execution attestation or release approval. Complete
+artifact identity, service/node freshness, bootstrap/restore operations, capacity fairness,
+hold resolution and live-chain acceptance remain open.
+
+The October 2 verdict and maintenance increments below preserve their original source identities,
+test counts and then-unpublished status. They are dated evidence, not statements that the current
+source still omits the root entrypoint or selected interpreter/SDK files. Exact merged-source
+checks and remote CI must pass for publication; those do not close the production gates.
+
+## Historical verdict — 2026-10-02
+
+**Release blocked.** Committed-runtime and separately reviewed candidate identity:
 
 ```text
-base:        ed73c513ee22f9626502273aa0d8e42a4c238b7a
-source HEAD: ee10b6e20dfe85f15347386adecb9dc99db55bb5
-index tree:  a73785b8653e3ad03c9216072b7366999ba1e854
+review base:                       ed73c513ee22f9626502273aa0d8e42a4c238b7a
+committed runtime / publication base: 7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc
+reviewed local documentation HEAD:    ee10b6e20dfe85f15347386adecb9dc99db55bb5
+unpublished runtime index tree:       a73785b8653e3ad03c9216072b7366999ba1e854
 ```
 
 Four published startup containments now hold retained ordinary dispositions, ready rows with prior debit
@@ -15,11 +31,17 @@ metadata, ready rows with capacity siblings, and ready rows with terminal siblin
 principal and conflicting evidence rather than deriving current terms, repeating a Nexus debit or deleting
 a disputed source. The focused changed-area gate passed 324 tests; keep all four controls.
 
-The staged sealed-custody candidate adds an independent one-use witness, exact whole-SQLite-image and
+The unpublished, locally staged sealed-custody implementation candidate adds an independent one-use witness, exact whole-SQLite-image and
 schema admission, configuration/source fingerprints, pinned chain genesis checks, recovery-before-running,
 per-cycle lease verification, quiescent sealing and a read-only snapshot dashboard. The complete offline
-suite passed 947 tests plus 77 subtests. This materially closes the previous missing-database dashboard and
+suite for that unpublished runtime candidate passed 947 tests plus 77 subtests; those are not the committed
+runtime's test counts. This materially closes the previous missing-database dashboard and
 non-durable-startup-truth gaps **only for an exact independently approved image**.
+
+A separate documentation-only publication candidate based on committed runtime `7b2d1c4` and containing
+none of the staged sealed-custody runtime passed **848 tests plus 77 subtests**. That publication gate
+verifies the committed runtime together with these candidate documents; it does not verify the unpublished
+sealed-custody implementation.
 
 It is not release-acceptable yet:
 
@@ -369,7 +391,7 @@ Production and real funds remain blocked; all exercised chain boundaries were of
 |---|---|---|
 | Four retained-source conflict containments | **Accepted narrowly offline** | Preserve in every later batch; zero transport/full liability regressions remain collected |
 | Sealed image/witness continuity | **Implemented, partial** | Externally attest every executed byte and dependency artifact; rehearse independent deployment and restore |
-| Dashboard startup truth/read-only snapshot | **Accepted for staged offline scope** | Keep missing-path/no-write and witness-transition tests; target deployment still required |
+| Dashboard startup truth/read-only snapshot | **Accepted for current offline scope** | Keep missing-path/no-write and witness-transition tests; target deployment still required |
 | Heartbeat/service and chain admission | **Blocked** | Exact owner/address/schema/pair/terms plus Solana health/root freshness and Nexus sync/tip freshness before mutation |
 | Capacity eligible progress | **Blocked** | Move malformed/conflicting rows outside automatic FIFO without authorizing them |
 | Hold resolution/live acceptance | **Blocked** | Evidence-bound operator workflow and explicit devnet/testnet matrix |
@@ -692,18 +714,18 @@ worker tests with a malformed/conflicting oldest row, more rows than the worker 
 deduplication and later reviewed resolution. Require the younger valid original intent to submit
 exactly once without deleting or reducing the blocked row's liability.
 
-### R-1c — Superseded offline: staged witness makes startup refusal externally durable
+### R-1c — Superseded offline: current witness makes startup refusal externally durable
 
-The staged candidate replaces absence-of-latch readiness with external `ready/claimed/running/held`
+The current implementation replaces absence-of-latch readiness with external `ready/claimed/running/held`
 evidence plus a local live-process receipt. Recovery, session and heartbeat failures occur before
 `running`; failed/ambiguous claimed generations remain non-running or permanently held. The dashboard
 suppresses retained healthy values unless the same exact running lease brackets its snapshot. Focused
 runtime/dashboard tests cover failure boundaries and witness changes. Keep this integration-gated until
 artifact identity and independent witness deployment are accepted.
 
-### R-1d — Superseded offline: staged dashboard is read-only and snapshot-consistent
+### R-1d — Superseded offline: current dashboard is read-only and snapshot-consistent
 
-The staged dashboard uses one `mode=ro` SQLite transaction for summary counts, metrics and payout exposure,
+The current dashboard uses one `mode=ro` SQLite transaction for summary counts, metrics and payout exposure,
 then rechecks the witness lease. Missing-path tests prove no DB creation; concurrent-write tests prove one
 snapshot. Preserve these tests against the final artifact and deployment.
 
@@ -795,7 +817,7 @@ outputs and source hashes are retained in the complete local findings artifact f
 
 1. **Close artifact identity first:** externally bind `swapService.py`, every runtime module, interpreter
    and installed dependency artifact before any repository code can execute or claim a witness permit.
-2. Preserve all four published restored-source containments and the staged exact-image/witness state
+2. Preserve all four published restored-source containments and the current exact-image/witness state
    machine; independently approve image financial coherence rather than equating a matching hash with it.
 3. Bind the exact heartbeat owner/address/schema/pair/custody/terms and require Solana health/root freshness
    plus Nexus sync/mode/network/tip freshness before mutable startup.

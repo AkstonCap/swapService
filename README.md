@@ -4,7 +4,7 @@ A custodial, bidirectional bridge for **one operator-configured Solana SPL token
 
 The bridge uses a **1:1 whole-token backing/conversion model before fees and conservative decimal rounding**. It is not a market-price exchange, a multi-pair router, or a general cross-chain adapter. The current Solana transfer implementation uses the classic SPL Token program; configurable mint selection does not imply native-SOL or Token-2022 support.
 
-> **Release safety:** local engineering checks do not establish production readiness. The current staged candidate requires an independently witnessed sealed custody image before startup, but its executable-artifact, service-identity, node-freshness, bootstrap/restore and live-chain gates remain open. Real funds remain blocked. See the [current evaluation](docs/EVALUATION.md), [2026-10-02 development review](docs/DEVELOPMENT_REVIEW_2026-10-02.md), and [sealed-custody architecture](docs/maintenance/sealed-custody-admission.md).
+> **Release safety:** local engineering checks do not establish production readiness. The current source requires an independently witnessed sealed custody image before startup, but complete executable-artifact, service-identity, node-freshness, bootstrap/restore and live-chain gates remain open. Real funds remain blocked. See the [current evaluation](docs/EVALUATION.md), [2026-10-02 development review](docs/DEVELOPMENT_REVIEW_2026-10-02.md), and [sealed-custody architecture](docs/maintenance/sealed-custody-admission.md).
 
 ## Documentation
 
@@ -134,7 +134,7 @@ Processing time depends on chain finality, polling, asset discovery, RPC availab
 
 The current service requires valid custody checkpoints and affirmative complete startup recovery before exposure-producing loop work. Missing/zero waterlines, incompatible heartbeat data, incomplete scans and recovery errors refuse startup. Creating a heartbeat asset does not by itself establish a safe bootstrap checkpoint. Never set waterlines to the current time to bypass recovery.
 
-The staged sealed-custody candidate additionally requires a one-use permit from an independently operated
+The current sealed-custody implementation additionally requires a one-use permit from an independently operated
 witness for the exact whole SQLite image, schema, configuration and currently declared source manifest.
 It claims before schema creation, enters `running` only after recovery/session/heartbeat validation,
 checks the lease every cycle, and seals a next generation only after workers drain. The dashboard shows
@@ -182,7 +182,7 @@ The dashboard is separate from the service and exposes no retry/refund controls.
 A durable startup recovery hold appears in the summary, issue list and recovery banner.
 When held or admission evidence is unavailable, total obligations are **unknown, not zero**:
 backing ratio, fee totals and payout usage are unavailable even if a snapshot survives.
-Displayed row counts cover only the local database. In the staged candidate, healthy metrics additionally
+Displayed row counts cover only the local database. In the current implementation, healthy metrics additionally
 require a matching external `running` witness head and live local receipt before and after the read-only
 snapshot. That proves continuity of the approved image, not solvency or completeness of the original
 approval.

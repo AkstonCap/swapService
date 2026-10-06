@@ -1,15 +1,14 @@
 # Swap Service State Machines
 
-**Current candidate scope (2026-10-02):** one configured classic SPL token ↔ Nexus token pair.
-Reviewed `HEAD` `ee10b6e20dfe85f15347386adecb9dc99db55bb5` plus the staged sealed-custody
-candidate, compared with `ed73c513ee22f9626502273aa0d8e42a4c238b7a`.
+## Governing vision and portfolio traceability
 
-Published startup containment now holds four inconsistent restored-source families before workers:
-retained ordinary refund/quarantine states, ready rows with debit-submission metadata, ready rows with
-capacity siblings, and ready rows with terminal siblings. The staged candidate adds a separate witness
-for one-use exact SQLite image permits, chain-genesis pins, recovery-before-running, per-cycle lease
-checks, quiescent sealing and read-only snapshot dashboard authorization. The complete offline candidate
-passed 947 tests plus 77 subtests; focused changed-area modules passed 324 tests.
+Read [the repository vision](../vision.md) and [Distordia alignment/dependency map](DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this architecture → tasks/code/tests/external evidence and human release.
+
+**Portfolio purpose:** O4 attributable settlement and bounded risk; O1 open evidence contracts. Reduce discretionary custody and make exact authorization, liabilities, recovery and finality independently inspectable. The current one-pair operator-custodial bridge is transitional, not non-custodial settlement or company underwriting. The alignment map supplies customer-evidence qualification, batch ownership, upstream prerequisites and human gates. Each material task must name those fields alongside its exact production paths and collected acceptance tests. This documentation alignment changes no runtime, test result or release status; dated evidence below remains evidence for its stated snapshot only.
+
+**Current source scope:** one configured classic SPL token ↔ Nexus token pair. Published startup containment holds four inconsistent restored-source families before workers: retained ordinary refund/quarantine states, ready rows with debit-submission metadata, ready rows with capacity siblings, and ready rows with terminal siblings. The current source includes the sealed-custody witness plus later in-process fingerprint increments for the root entrypoint, running interpreter, foundational native libraries, the solders extension, its selected Python source manifest, token/RPC initializers and eagerly attempted LiteSVM/metadata wrappers. Complete trusted pre-execution artifact identity remains open; production and real funds remain blocked.
+
+**Historical review scope (2026-10-02):** the committed runtime and documentation-publication base was `7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc`; separately reviewed local documentation `HEAD` was `ee10b6e20dfe85f15347386adecb9dc99db55bb5`; and the sealed-custody implementation remained staged and unpublished. The review comparison base was `ed73c513ee22f9626502273aa0d8e42a4c238b7a`. That unpublished runtime candidate passed 947 tests plus 77 subtests, with 324 focused changed-area tests; those counts are historical evidence, not current-release acceptance. The following October 2 release-assessment paragraph is retained as historical evidence; its root/interpreter omission language is superseded by the current in-process bindings above, not by complete external attestation.
 
 **Release remains blocked.** The source fingerprint excludes the executed root `swapService.py` and
 installed artifacts; chain admission checks genesis but not health/sync/freshness; the heartbeat validator
@@ -45,8 +44,10 @@ statements in those snapshots are superseded only where the current sections exp
 
 ## Sealed custody image and process admission
 
-The staged candidate places an external continuity protocol in front of the existing recovery state
-machines:
+The current implementation places an external continuity protocol in front of the existing recovery state
+machines. The October 2 certificate wording below is a historical snapshot; the current finite in-process
+manifest is documented in [the sealed-custody note](maintenance/sealed-custody-admission.md), while complete
+trusted pre-execution identity remains open:
 
 ```mermaid
 flowchart LR
@@ -382,10 +383,13 @@ For settings/timeouts see [CONFIG.md](../CONFIG.md); for operator procedures see
 
 Incomplete recovery blocks `main.run()` before pollers. Published source-level containment still audits
 unseen/invalid-policy/ordinary/debit/capacity-sibling/terminal-sibling Solana rows and remains necessary.
-The staged external witness adds a general startup outcome: any failure after claim leaves the generation
+The current external witness adds a general startup outcome: any failure after claim leaves the generation
 claimed or permanently held, and the dashboard requires a matching live `running` lease. Summary reads
 use one read-only snapshot and do not create a missing database. This supersedes the former stale-healthy
-and writable-dashboard defects for the staged offline candidate.
+and writable-dashboard defects for the current offline implementation.
+
+The next paragraph preserves the October 2 artifact-omission finding. Current source now binds the root
+entrypoint and selected installed artifacts in-process, but complete trusted pre-execution identity remains open.
 
 The stronger continuity gate does not establish initial image completeness. Its build fingerprint omits
 the root executable and installed artifacts, while heartbeat validation still accepts an unbound

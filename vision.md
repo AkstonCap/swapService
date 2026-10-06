@@ -1,5 +1,13 @@
 # swapService Vision
 
+## Portfolio roadmap authority
+
+The master Distordia project also owns `PORTFOLIO_DEVELOPMENT_PLAN.md` and its strategy-decision register. The full order is **master strategy/customer evidence → portfolio roadmap/decisions → this vision → architecture/development plan → tasks/code/tests/release evidence**. Read the [portable repository alignment](docs/DISTORDIA_ALIGNMENT.md) for objective, customer-evidence, ownership and dependency mapping. Master-source paths below are local workspace references, not promised GitHub links. This section adds portfolio sequencing; it does not certify the envisioned behavior or amend unresolved master strategy assumptions.
+
+## Accountability venture context — not canonical authority
+
+Staked Accountability Rails (local-workspace path: `../../projects/Distordia/staked-accountability-rails.md`) and Infrastructure Buildout (local-workspace path: `../../projects/Distordia/infrastructure-buildout.md`) are venture hypotheses and dependency-design context. They do not amend canonical strategy or prove enforceable collateral/slashing, non-custody, regulatory status, reputation, or adoption. Interpret unresolved claims through the master portfolio decision register (SD-002–SD-008); feasibility, legal assessment and human decisions remain required.
+
 ## Place within Distordia
 
 Cross-chain settlement is one part of Distordia's coordination and accountability infrastructure. As software and execution become abundant, the scarce value is trustworthy identity, verification, settlement evidence, accountability, and risk information. Distordia should make those properties legible without becoming the permanent custodian, market maker, or underwriter.
@@ -23,7 +31,7 @@ This repository is a **bounded transition system**, not that destination. Its cu
 
 When sources disagree, use this order:
 
-1. **Canonical Distordia strategy:** [Business Thesis and Strategy](../../projects/Distordia/Distordia_Labs_Business_Thesis_and_Strategy_v2.docx), [Customer Problem Atlas](../../projects/Distordia/Distordia_Customer_Problem_Atlas_v2.docx), [Staked Accountability Rails](../../projects/Distordia/staked-accountability-rails.md), and [Infrastructure Buildout](../../projects/Distordia/infrastructure-buildout.md).
+1. **Canonical master strategy and customer evidence** — Business Thesis and Strategy v2 (local-workspace path: `../../projects/Distordia/Distordia_Labs_Business_Thesis_and_Strategy_v2.docx`) and Customer Problem Atlas v2 (local-workspace path: `../../projects/Distordia/Distordia_Customer_Problem_Atlas_v2.docx`). The master `PORTFOLIO_DEVELOPMENT_PLAN.md` records portfolio sequencing and explicit strategy decisions before this repository vision.
 2. **This vision:** the durable strategic role and direction of cross-chain settlement within Distordia.
 3. **Repository architecture, security, evaluation, and development plans:** including [state machines](docs/STATE_MACHINES.md), [security boundaries](docs/SECURITY.md), and the [current evaluation](docs/EVALUATION.md). These define the intended and currently accepted engineering boundary, not portfolio strategy.
 4. **Code, tests, and target-chain evidence:** code and tests establish implemented local behavior; target-chain evidence establishes external behavior. Neither silently changes the strategy or broadens a release claim.
