@@ -315,9 +315,9 @@ def _solders_fingerprint() -> str:
 
 # Explicit on-disk source manifest: direct runtime imports, mandatory flat
 # wrappers (including conditionally attempted LiteSVM/metadata imports) and
-# token/RPC package initializers eagerly imported by pinned solders. Suppressed
-# ImportError does not stop a present wrapper executing. Require the selected
-# pinned-wheel files; other nested modules/bytecode/pre-import execution stay gated.
+# token/RPC package initializers eagerly imported by pinned solders, plus selected
+# RPC wire wrappers used by Solana's client. Suppressed ImportError does not stop
+# present source executing. Other modules/bytecode/pre-import execution stay gated.
 _SOLDERS_SOURCE_MODULES = (
     "account", "account_decoder", "address_lookup_table_account", "clock",
     "commitment_config", "compute_budget", "epoch_info", "epoch_rewards",
@@ -327,6 +327,9 @@ _SOLDERS_SOURCE_MODULES = (
     "litesvm", "transaction_metadata",
 )
 _SOLDERS_SOURCE_PACKAGES = ("token", "rpc")
+# Solana's RPC client imports these wire request/response wrappers and their
+# error definitions. Keep this finite manifest independent of loaded module sets.
+_SOLDERS_NESTED_SOURCE_MODULES = ("rpc.requests", "rpc.responses", "rpc.errors")
 # The pinned wheel's RPC initializer is empty but still executable import evidence.
 # Bind its empty digest rather than treating absence and a valid empty file alike.
 _SOLDERS_EMPTY_SOURCES = frozenset({"rpc/__init__.py"})
@@ -369,6 +372,21 @@ def _solders_sources_fingerprint() -> str:
                     or list(nested.submodule_search_locations) != [str(expected.parent)]):
                 raise ValueError
             paths[name + "/__init__.py"] = expected
+        for name in _SOLDERS_NESTED_SOURCE_MODULES:
+            parent, leaf = name.split(".")
+            directory = paths[parent + "/__init__.py"].parent
+            expected = directory / (leaf + ".py")
+            try:
+                module = PathFinder.find_spec("solders." + name, [str(directory)])
+            except KeyError as exc:
+                # A substituted namespace directory cannot require executing its
+                # cold parent merely to classify the evidence as invalid.
+                raise ValueError from exc
+            if (module is None or not isinstance(module.loader, SourceFileLoader)
+                    or module.origin != str(expected) or module.loader.path != str(expected)
+                    or module.submodule_search_locations is not None):
+                raise ValueError
+            paths[parent + "/" + leaf + ".py"] = expected
         return paths
 
     def identity(evidence: os.stat_result) -> tuple[int, ...]:

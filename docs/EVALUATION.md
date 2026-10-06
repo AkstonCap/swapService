@@ -385,6 +385,55 @@ Publishing would implicitly publish that larger feature and require unrelated re
 documentation reconciliation, outside this repair. No push or remote CI claim is made.
 Production and real funds remain blocked; all exercised chain boundaries were offline.
 
+### Maintenance increment — installed RPC wire-source drift (2026-10-07)
+
+**Implemented; Batch 0 and production remain blocked.** The first unresolved priority
+is complete executable-artifact identity. Existing fingerprint repairs are preserved.
+The pinned Solana RPC client imports `solders.rpc.requests` and `solders.rpc.responses`;
+the latter eagerly imports `solders.rpc.errors`. These three installed Python wrappers
+were omitted from the selected source fingerprint. This increment binds `rpc/requests.py`,
+`rpc/responses.py` and `rpc/errors.py` through non-executing discovery within the already
+validated RPC package directory. Exact conventional source-loader/origin agreement and
+flat-module shape are required. Existing bounded nonblocking reads and whole-manifest
+metadata/discovery rechecks apply; invalid evidence refuses before permit consumption.
+
+All three collected byte-drift regressions first reproduced unchanged build identity.
+They now require changed identity without executing inspected sources. An independent
+AST inventory checks the installed client imports and the response-to-error dependency.
+Expanded tests cover missing/empty/non-file/unreadable files, invalid loaders/origins,
+namespace/package substitution with cold parents, read/open/discovery races, unchanged
+witness permits and custody bytes on rejection, and exact claim/completion/sealing.
+The eight-module focused gate returned **637 passed**; the standalone source/native SDK
+shard returned **514 passed**. Independent read-only review found no blocking defect.
+The clean Python 3.12 full suite returned **1522 passed, 77 subtests passed** in 106.01s,
+with no skips. CI-isolation shards returned **35 passed/52 subtests**, **36 passed/52
+subtests** and **85 passed**. Final static/index and publication results accompany the
+maintenance commit report.
+
+**Work-item grounding:** O4 attributable settlement/bounded risk and O1 inspectable
+artifact evidence; settlement remains an explicit non-Atlas customer hypothesis.
+Component owner is swapService startup/witness; the scheduled maintainer acts under the
+operator's one-issue maintenance authorization. Production paths are
+`src/custody_admission.py`, pinned `solana==0.36.9` and `solders==0.26.0`; collected tests
+are `tests/test_custody_solders_sources.py` and `tests/test_custody_solders_artifact.py`.
+No financial authority, dependency upgrade or live-chain operation is added.
+
+Publication base is `8f710dd3a4c7227e668bc0f72c32c038483cd92a`, matching freshly fetched
+`origin/main`; the previous prerequisite/divergence blocker is resolved for this repair.
+Runtime/test SHA-256 evidence before documentation-only recording:
+
+```text
+8c82bd6280945e7bbcb12cd154f782615d97ce3afa93f73fb631070ed0497049  src/custody_admission.py
+4d3daa508abe0b05284a47054cd8d9105f7f670bf4608f3e7a336ff69c1b8690  tests/test_custody_solders_sources.py
+e3dd097e330f6d36be84ed68b10432f45302da92c881ef0b010bf270eccbc27b  tests/test_custody_solders_artifact.py
+```
+
+This remains **in-process on-disk drift containment**, not executed-bytecode, mapped-
+memory, complete dependency or trusted pre-execution attestation. Other nested SDK
+modules, Solana/HTTP dependencies, standard library/bytecode and an external trusted
+launcher/immutable image remain Batch 0 exits. The changed manifest invalidates prior
+approvals; never silently rewrite certificates. All real-fund and release gates remain.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |

@@ -18,7 +18,8 @@ from src.custody_witness import Certificate, Store, StoreClient
 
 # Independent expected list: direct runtime imports plus mandatory top-level Python
 # modules, conditionally attempted wrappers and token/RPC initializers imported by
-# pinned solders. Other nested imports stay outside this finite dependency manifest.
+# pinned solders plus the selected RPC wire wrappers used by Solana's client.
+# Other nested imports stay outside this finite dependency manifest.
 INDIRECT_SOURCE_NAMES = (
     "account.py", "account_decoder.py", "address_lookup_table_account.py", "clock.py",
     "commitment_config.py", "compute_budget.py", "epoch_info.py", "epoch_rewards.py",
@@ -29,7 +30,7 @@ INDIRECT_SOURCE_NAMES = (
 SOURCE_NAMES = (
     "__init__.py", "hash.py", "instruction.py", "keypair.py", "message.py",
     "pubkey.py", "signature.py", "transaction.py", *INDIRECT_SOURCE_NAMES,
-    "token/__init__.py", "rpc/__init__.py",
+    "token/__init__.py", "rpc/__init__.py", "rpc/requests.py", "rpc/responses.py", "rpc/errors.py",
 )
 
 
@@ -126,6 +127,7 @@ def test_solders_source_manifest_covers_direct_runtime_imports():
         Path(name).stem for name in SOURCE_NAMES if name != "__init__.py" and "/" not in name
     }
     assert admission._SOLDERS_SOURCE_PACKAGES == ("token", "rpc")
+    assert admission._SOLDERS_NESTED_SOURCE_MODULES == ("rpc.requests", "rpc.responses", "rpc.errors")
 
 
 def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
@@ -168,6 +170,56 @@ def test_pinned_rpc_initializer_is_eagerly_imported_and_valid_when_empty():
     assert Path(package.origin).parent.joinpath("rpc", "__init__.py").read_bytes() == b""
     assert admission._SOLDERS_EMPTY_SOURCES == frozenset({"rpc/__init__.py"})
     assert len(admission._solders_sources_fingerprint()) == 64
+
+
+def test_selected_rpc_wrappers_are_imported_by_installed_solana_client():
+    # Independent, non-executing inspection of the pinned wire-client entrypoints.
+    solana = PathFinder.find_spec("solana")
+    solders = PathFinder.find_spec("solders")
+    assert solana is not None and isinstance(solana.origin, str)
+    assert solders is not None and isinstance(solders.origin, str)
+    imported = set()
+    for name in ("api.py", "core.py"):
+        tree = ast.parse(Path(solana.origin).parent.joinpath("rpc", name).read_text())
+        imported.update(
+            node.module for node in tree.body if isinstance(node, ast.ImportFrom)
+        )
+    assert {"solders.rpc.requests", "solders.rpc.responses"} <= imported
+    for name in ("requests.py", "responses.py", "errors.py"):
+        source = Path(solders.origin).parent / "rpc" / name
+        assert source.is_file() and source.stat().st_size > 0
+        relative = {
+            (node.level, node.module) for node in ast.walk(ast.parse(source.read_text()))
+            if isinstance(node, ast.ImportFrom) and node.level
+        }
+        assert relative == ({(2, "solders"), (1, "errors")} if name == "responses.py"
+                            else {(2, "solders")})
+
+
+@pytest.mark.parametrize("leaf", ["requests", "responses", "errors"])
+@pytest.mark.parametrize("replacement", ["namespace", "package"])
+def test_rpc_wrapper_substitution_with_cold_parent_refuses_without_execution(
+    tmp_path, monkeypatch, leaf, replacement,
+):
+    _repository, package = source_fixture(tmp_path, monkeypatch)
+    marker = tmp_path / "rpc-side-effect"
+    package.joinpath("rpc", "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+    package.joinpath("rpc", leaf + ".py").unlink()
+    substitute = package / "rpc" / leaf
+    substitute.mkdir()
+    if replacement == "package":
+        substitute.joinpath("__init__.py").write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+        )
+    monkeypatch.delitem(sys.modules, "solders", raising=False)
+    monkeypatch.delitem(sys.modules, "solders.rpc", raising=False)
+    with pytest.raises(admission.AdmissionError) as rejected:
+        admission._solders_sources_fingerprint()
+    assert str(rejected.value) == "runtime solders source evidence is unavailable"
+    assert "solders" not in sys.modules and "solders.rpc" not in sys.modules
+    assert not marker.exists()
 
 
 def test_source_discovery_reads_manifest_without_execution(tmp_path, monkeypatch):
@@ -239,6 +291,7 @@ def test_nested_namespace_without_imported_parent_is_sanitized(tmp_path, monkeyp
 @pytest.mark.parametrize("module", [
     "solders", "solders.transaction", "solders.system_program", "solders.sysvar",
     "solders.token", "solders.rpc", "solders.litesvm", "solders.transaction_metadata",
+    "solders.rpc.requests", "solders.rpc.responses", "solders.rpc.errors",
 ])
 @pytest.mark.parametrize("state", ["absent", "bytecode", "origin_mismatch", "relative", "package_paths"])
 def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, state):
@@ -305,6 +358,7 @@ def test_nested_package_discovery_requires_exact_initializer(tmp_path, monkeypat
 @pytest.mark.parametrize("name", [
     "transaction.py", "system_program.py", "transaction_status.py", "token/__init__.py",
     "rpc/__init__.py", "litesvm.py", "transaction_metadata.py",
+    "rpc/requests.py", "rpc/responses.py", "rpc/errors.py",
 ])
 def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
@@ -364,7 +418,7 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
 @pytest.mark.parametrize("change", ["mutation", "fifo"])
 @pytest.mark.parametrize("name", [
     "transaction.py", "system_program.py", "token/__init__.py", "rpc/__init__.py",
-    "litesvm.py", "transaction_metadata.py",
+    "litesvm.py", "transaction_metadata.py", "rpc/requests.py", "rpc/responses.py", "rpc/errors.py",
 ])
 def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
@@ -388,7 +442,8 @@ def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize("name,state", [
     (name, state)
-    for name in ("transaction.py", *INDIRECT_SOURCE_NAMES, "token/__init__.py", "rpc/__init__.py")
+    for name in ("transaction.py", *INDIRECT_SOURCE_NAMES, "token/__init__.py", "rpc/__init__.py",
+                 "rpc/requests.py", "rpc/responses.py", "rpc/errors.py")
     for state in ("exact", "changed", "missing", "empty", "directory")
     if (name, state) != ("rpc/__init__.py", "empty")
 ])
