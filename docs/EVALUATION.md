@@ -296,6 +296,39 @@ passes **1362 tests and 77 subtests**, with no skips. This is a local follow-up 
 publication and production remain blocked by the same prerequisite/divergence and
 trusted-attestation requirements above.
 
+### Maintenance increment — eager solders RPC-initializer drift (2026-10-06)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains executable-artifact identity. Previous fingerprint repairs are preserved.
+The pinned solders root initializer eagerly attempts to import `solders.rpc`, but the
+selected source manifest omitted its package initializer. This increment binds
+`rpc/__init__.py` with the existing non-executing source-loader, exact origin/package-path,
+bounded nonblocking read and whole-manifest discovery/metadata checks. The pinned wheel
+ships this initializer as an empty file: only this exact manifest-relative source may
+be empty, and its empty-byte digest is included. Missing evidence is still rejected.
+
+The collected regression first reproduced unchanged build identity after adding a
+side effect to the empty initializer; it now changes the fingerprint without executing
+that source. Expanded regressions cover invalid files/loaders/package paths, cold-parent
+namespace and flat-module substitutions, empty-file growth/replacement and read/open
+races. Offline witness cases preserve the ready permit, custody bytes and absence of
+receipts/sidecars on rejection, then claim, complete, report healthy and seal the exact
+restored build. The eight-module focused gate passed **508 tests**. The clean Python 3.12
+complete suite passed **1393 tests and 77 subtests** in 102.08 seconds, with no skips.
+Independent read-only review found no blocking defect in this narrow scope. Final
+static and CI-isolation gate results are recorded in the maintenance commit report.
+
+This is **in-process on-disk drift containment**, not complete dependency or executed-
+bytecode verification or independently trusted pre-execution admission. Nested token/RPC
+wrappers, optional SDK artifacts, other dependencies, standard library/bytecode and the
+external trusted launcher/immutable image remain Batch 0 exits. The changed manifest
+invalidates previous approvals; never silently rewrite certificates. Fresh fetch resolves
+`origin/main` to `a28c958800f64e802b3dfc367ac49ecf7a18e5fb`, which lacks the custody
+prerequisite and diverges from local `main`. Publishing this increment would implicitly
+publish that larger feature and reconcile unrelated documentation, outside this repair.
+No push or remote CI claim is made. Production and real funds remain blocked;
+all exercised chain boundaries were offline.
+
 ### Current acceptance register
 
 | Area | Status | Next executable exit |

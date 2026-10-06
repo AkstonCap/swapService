@@ -314,7 +314,7 @@ def _solders_fingerprint() -> str:
 
 
 # Explicit on-disk source manifest: direct runtime imports, mandatory flat
-# wrappers and the token package initializer eagerly imported by pinned solders.
+# wrappers and token/RPC package initializers eagerly imported by pinned solders.
 # Other nested/optional modules, bytecode and pre-import execution remain gated.
 _SOLDERS_SOURCE_MODULES = (
     "account", "account_decoder", "address_lookup_table_account", "clock",
@@ -323,7 +323,10 @@ _SOLDERS_SOURCE_MODULES = (
     "null_signer", "presigner", "pubkey", "rent", "signature", "slot_history",
     "stake_history", "system_program", "sysvar", "transaction", "transaction_status",
 )
-_SOLDERS_SOURCE_PACKAGES = ("token",)
+_SOLDERS_SOURCE_PACKAGES = ("token", "rpc")
+# The pinned wheel's RPC initializer is empty but still executable import evidence.
+# Bind its empty digest rather than treating absence and a valid empty file alike.
+_SOLDERS_EMPTY_SOURCES = frozenset({"rpc/__init__.py"})
 
 
 def _solders_sources_fingerprint() -> str:
@@ -375,7 +378,9 @@ def _solders_sources_fingerprint() -> str:
         observed = {}
         for name, path in sorted(paths.items()):
             initial = path.stat()
-            if not stat.S_ISREG(initial.st_mode) or initial.st_size <= 0:
+            if (not stat.S_ISREG(initial.st_mode)
+                    or (initial.st_size == 0 and name not in _SOLDERS_EMPTY_SOURCES)
+                    or initial.st_size < 0):
                 raise ValueError
             descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
             with os.fdopen(descriptor, "rb", buffering=0) as stream:

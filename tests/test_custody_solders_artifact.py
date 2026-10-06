@@ -36,7 +36,9 @@ def extension_fixture(tmp_path, monkeypatch):
         package.joinpath(name + ".py").write_text("# offline SDK wrapper\n")
     for name in admission._SOLDERS_SOURCE_PACKAGES:
         package.joinpath(name).mkdir()
-        package.joinpath(name, "__init__.py").write_text("# offline SDK package\n")
+        package.joinpath(name, "__init__.py").write_text(
+            "" if name == "rpc" else "# offline SDK package\n"
+        )
     package_spec = ModuleSpec("solders", SourceFileLoader("solders", str(initializer)),
                               origin=str(initializer), is_package=True)
     package_spec.submodule_search_locations = [str(package)]

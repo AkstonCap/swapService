@@ -17,7 +17,7 @@ from src.custody_witness import Certificate, Store, StoreClient
 
 
 # Independent expected list: direct runtime imports plus mandatory top-level Python
-# modules and token initializer imported by pinned solders. Other nested/optional
+# modules and token/RPC initializers imported by pinned solders. Other nested/optional
 # imports remain outside this manifest, not proof of complete dependency closure.
 INDIRECT_SOURCE_NAMES = (
     "account.py", "account_decoder.py", "address_lookup_table_account.py", "clock.py",
@@ -29,7 +29,7 @@ INDIRECT_SOURCE_NAMES = (
 SOURCE_NAMES = (
     "__init__.py", "hash.py", "instruction.py", "keypair.py", "message.py",
     "pubkey.py", "signature.py", "transaction.py", *INDIRECT_SOURCE_NAMES,
-    "token/__init__.py",
+    "token/__init__.py", "rpc/__init__.py",
 )
 
 
@@ -38,7 +38,9 @@ def source_fixture(tmp_path, monkeypatch):
     package.mkdir(parents=True)
     for name in SOURCE_NAMES:
         package.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
-        package.joinpath(name).write_text("# approved SDK source fixture\n")
+        package.joinpath(name).write_text(
+            "" if name == "rpc/__init__.py" else "# approved SDK source fixture\n"
+        )
     package.joinpath("solders.abi3.so").write_bytes(b"offline native fixture")
     monkeypatch.syspath_prepend(str(package.parent))
     original_find = PathFinder.find_spec
@@ -84,6 +86,21 @@ def test_eager_token_initializer_drift_changes_build_without_execution(tmp_path,
     assert not marker.exists()
 
 
+def test_eager_rpc_initializer_drift_changes_build_without_execution(tmp_path, monkeypatch):
+    repository, package = source_fixture(tmp_path, monkeypatch)
+    rpc = package / "rpc"
+    # The pinned wheel deliberately ships an empty RPC package initializer.
+    rpc.joinpath("__init__.py").write_bytes(b"")
+    approved = admission.build_fingerprint(repository)
+    marker = tmp_path / "rpc-side-effect"
+    rpc.joinpath("__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+
+    assert admission.build_fingerprint(repository) != approved
+    assert not marker.exists()
+
+
 def test_solders_source_manifest_covers_direct_runtime_imports():
     imported = set()
     for path in Path(admission.__file__).parent.glob("*.py"):
@@ -95,7 +112,7 @@ def test_solders_source_manifest_covers_direct_runtime_imports():
     assert manifest == {
         Path(name).stem for name in SOURCE_NAMES if name != "__init__.py" and "/" not in name
     }
-    assert admission._SOLDERS_SOURCE_PACKAGES == ("token",)
+    assert admission._SOLDERS_SOURCE_PACKAGES == ("token", "rpc")
 
 
 def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
@@ -119,6 +136,22 @@ def test_source_manifest_covers_installed_mandatory_flat_initializer_imports():
     assert {(node.level, node.module) for node in token_imports} == {(2, "solders")}
 
 
+def test_pinned_rpc_initializer_is_eagerly_imported_and_valid_when_empty():
+    package = PathFinder.find_spec("solders")
+    assert package is not None and isinstance(package.origin, str)
+    tree = ast.parse(Path(package.origin).read_text())
+    conditional_imports = {
+        alias.name for node in tree.body if isinstance(node, ast.With)
+        for child in ast.walk(node)
+        if isinstance(child, ast.ImportFrom) and child.level == 1 and child.module is None
+        for alias in child.names
+    }
+    assert "rpc" in conditional_imports
+    assert Path(package.origin).parent.joinpath("rpc", "__init__.py").read_bytes() == b""
+    assert admission._SOLDERS_EMPTY_SOURCES == frozenset({"rpc/__init__.py"})
+    assert len(admission._solders_sources_fingerprint()) == 64
+
+
 def test_source_discovery_reads_manifest_without_execution(tmp_path, monkeypatch):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     marker = tmp_path / "side-effect"
@@ -132,8 +165,11 @@ def test_source_discovery_reads_manifest_without_execution(tmp_path, monkeypatch
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("name", SOURCE_NAMES)
-@pytest.mark.parametrize("state", ["missing", "empty", "directory", "fifo", "unreadable"])
+@pytest.mark.parametrize("name,state", [
+    (name, state) for name in SOURCE_NAMES
+    for state in ("missing", "empty", "directory", "fifo", "unreadable")
+    if (name, state) != ("rpc/__init__.py", "empty")
+])
 def test_invalid_source_evidence_is_sanitized(tmp_path, monkeypatch, name, state):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name
@@ -160,13 +196,14 @@ def test_invalid_source_evidence_is_sanitized(tmp_path, monkeypatch, name, state
 
 
 @pytest.mark.parametrize("state", ["missing", "directory", "fifo"])
-def test_token_namespace_without_imported_parent_is_sanitized(tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("nested", ["token", "rpc"])
+def test_nested_namespace_without_imported_parent_is_sanitized(tmp_path, monkeypatch, state, nested):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     marker = tmp_path / "parent-side-effect"
     package.joinpath("__init__.py").write_text(
         f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
     )
-    source = package / "token" / "__init__.py"
+    source = package / nested / "__init__.py"
     source.unlink()
     if state == "directory":
         source.mkdir()
@@ -183,7 +220,7 @@ def test_token_namespace_without_imported_parent_is_sanitized(tmp_path, monkeypa
 
 @pytest.mark.parametrize("module", [
     "solders", "solders.transaction", "solders.system_program", "solders.sysvar",
-    "solders.token",
+    "solders.token", "solders.rpc",
 ])
 @pytest.mark.parametrize("state", ["absent", "bytecode", "origin_mismatch", "relative", "package_paths"])
 def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, state):
@@ -216,13 +253,14 @@ def test_invalid_source_discovery_is_rejected(tmp_path, monkeypatch, module, sta
 @pytest.mark.parametrize("state", [
     "not_package", "extra_search_path", "loader_path_mismatch", "flat_module",
 ])
-def test_token_package_discovery_requires_exact_initializer(tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("nested", ["token", "rpc"])
+def test_nested_package_discovery_requires_exact_initializer(tmp_path, monkeypatch, state, nested):
     source_fixture(tmp_path, monkeypatch)
     original_find = PathFinder.find_spec
 
     def find_spec(name, path=None, target=None):
         found = original_find(name, path, target)
-        if name != "solders.token":
+        if name != "solders." + nested:
             return found
         assert found is not None and isinstance(found.origin, str)
         assert found.submodule_search_locations is not None
@@ -248,10 +286,13 @@ def test_token_package_discovery_requires_exact_initializer(tmp_path, monkeypatc
 ])
 @pytest.mark.parametrize("name", [
     "transaction.py", "system_program.py", "transaction_status.py", "token/__init__.py",
+    "rpc/__init__.py",
 ])
 def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name
+    if name == "rpc/__init__.py" and change == "truncation":
+        source.write_bytes(b"# approved nonempty RPC initializer\n")
     original_fdopen = os.fdopen
     original_find = PathFinder.find_spec
 
@@ -271,7 +312,7 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
 
         def read(self, size):
             chunk = self.stream.read(size)
-            if chunk and not self.changed:
+            if not self.changed:
                 self.changed = True
                 if change == "earlier_source":
                     package.joinpath("hash.py").write_bytes(b"changed after it was hashed")
@@ -288,7 +329,7 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
                     with source.open("ab") as writer:
                         writer.write(b"added bytes")
                 else:
-                    source.write_bytes(b"z" * len(chunk) if change == "in_place" else b"")
+                    source.write_bytes(b"z" * max(1, len(chunk)) if change == "in_place" else b"")
             return chunk
 
     def fdopen(descriptor, *args, **kwargs):
@@ -303,7 +344,9 @@ def test_source_change_during_read_is_rejected(tmp_path, monkeypatch, change, na
 
 
 @pytest.mark.parametrize("change", ["mutation", "fifo"])
-@pytest.mark.parametrize("name", ["transaction.py", "system_program.py", "token/__init__.py"])
+@pytest.mark.parametrize("name", [
+    "transaction.py", "system_program.py", "token/__init__.py", "rpc/__init__.py",
+])
 def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, change, name):
     _repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name
@@ -316,7 +359,7 @@ def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, 
                 source.unlink()
                 os.mkfifo(source)
             else:
-                source.write_bytes(b"z" * source.stat().st_size)
+                source.write_bytes(b"z" * max(1, source.stat().st_size))
         return original_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", opening)
@@ -324,8 +367,12 @@ def test_source_change_between_stat_and_open_is_rejected(tmp_path, monkeypatch, 
         admission._solders_sources_fingerprint()
 
 
-@pytest.mark.parametrize("state", ["exact", "changed", "missing", "empty", "directory"])
-@pytest.mark.parametrize("name", ["transaction.py", *INDIRECT_SOURCE_NAMES, "token/__init__.py"])
+@pytest.mark.parametrize("name,state", [
+    (name, state)
+    for name in ("transaction.py", *INDIRECT_SOURCE_NAMES, "token/__init__.py", "rpc/__init__.py")
+    for state in ("exact", "changed", "missing", "empty", "directory")
+    if (name, state) != ("rpc/__init__.py", "empty")
+])
 def test_source_admission_preserves_permit_until_exact_build(tmp_path, monkeypatch, state, name):
     repository, package = source_fixture(tmp_path, monkeypatch)
     source = package / name
