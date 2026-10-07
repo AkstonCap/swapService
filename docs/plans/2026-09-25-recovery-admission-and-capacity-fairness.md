@@ -4,9 +4,23 @@
 
 Read [the repository vision](../../vision.md) and [Distordia alignment/dependency map](../DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this development plan → tasks/code/tests/external evidence and human release.
 
-**Portfolio purpose:** O4 attributable settlement and bounded risk; O1 open evidence contracts. Reduce discretionary custody and make exact authorization, liabilities, recovery and finality independently inspectable. The current one-pair operator-custodial bridge is transitional, not non-custodial settlement or company underwriting. The alignment map supplies customer-evidence qualification, batch ownership, upstream prerequisites and human gates. Each material task must name those fields alongside its exact production paths and collected acceptance tests. This documentation alignment changes no runtime, test result or release status; dated evidence below remains evidence for its stated snapshot only.
+**Portfolio purpose:** primary O4 attributable settlement and bounded risk, supported by O3
+reproducible provenance and O1 inspectable/open evidence contracts. O5 remains an external-
+acceptance objective; service-record identity is an O2 prerequisite, not proof of namespace
+authority. The current one-pair operator-custodial bridge remains transitional SD-002. This is a
+non-Atlas settlement hypothesis, not marine Class A evidence; SD-003–SD-008 and non-custody,
+slashing, regulatory and adoption claims remain open. The alignment map supplies ownership,
+upstream prerequisites and human gates. Every batch below must carry these qualifications plus its
+exact production paths and collected acceptance tests.
 
-**Current assessment lineage:** the October 2 review covered four published Batch 1 containments and an unpublished, locally staged sealed-custody implementation candidate. That runtime candidate's 947-test gate and the separate committed-runtime documentation candidate's 848-test gate plus 77 subtests remain historical evidence for their exact snapshots. The current source includes the custody implementation and later narrow in-process fingerprint increments, but does not close trusted pre-execution artifact identity, service identity, node freshness, witness operations, capacity fairness or live acceptance. Production and real funds remain blocked.
+**Current assessment lineage:** exact source
+`2c4ed319d251836f01dfb83de68da71b1c6c6a23`, matching `origin/main`, now publishes the sealed-
+custody runtime and selected in-process artifact-drift increments. Fresh offline collection found
+1,522 tests; all passed with 77 subtests. Ten custody modules passed 667 tests and ten recovery/
+capacity modules passed 414 tests plus 52 subtests. These results accept the finite selected drift
+and recovery containments only. They do not close trusted pre-execution artifact identity, complete
+restore authority, service/node freshness, witness operations, capacity fairness, hold resolution
+or live acceptance. Production and real funds remain blocked.
 
 ## Decision and scope
 
@@ -34,14 +48,14 @@ receipt enablement, live transaction, commit, or publication authorization.
 
 | Batch | Status at reviewed candidate | Evidence and remaining exit |
 |---|---|---|
-| 0 — executable artifact identity | **Blocked / P0** | Current in-process evidence binds root `swapService.py`, the running Linux interpreter, conventional executable libpython/libc/libm/loader mappings, the installed `solders.solders` extension, the solders initializer and 25 mandatory flat wrappers, `token`/`rpc` package initializers, and eagerly attempted `litesvm.py`/`transaction_metadata.py`, plus installed RPC `requests.py`/`responses.py`/`errors.py` wire wrappers. Other nested SDK/dependency artifacts, standard library/bytecode, other libraries, mapped-memory identity and independent pre-execution attestation remain open. |
-| 1 — restore/image admission | **Partial** | Four published row containments plus the current exact-image witness are green offline. External approval must establish financial coherence; exact bytes alone cannot discover an incomplete/pre-fix approved image. |
-| 2 — durable startup outcome | **Implemented offline in current source** | Claimed/running/held witness plus local receipt suppress stale healthy dashboard values. Requires artifact and independent deployment acceptance. |
-| 3 — eligible capacity FIFO | **Open** | Malformed oldest evidence still blocks a younger fitting hold. |
-| 4 — read-only dashboard | **Implemented offline in current source** | One read-only snapshot and missing-path no-create tests pass; retain witness-before/after consistency and target deployment acceptance. |
-| 5 — service/chain admission | **Blocked** | Heartbeat owner/address/pair is unbound; genesis-only checks omit Solana health/root and Nexus sync/tip freshness. |
-| 6 — witness operations and hold resolution | **Open** | Required settings/bootstrap certificate ceremony are not integrated; non-capacity Solana holds lack audited disposition. |
-| 7 — target acceptance/release | **Open** | No live node, crash/restore or operator rehearsal evidence. |
+| 0 — executable artifact identity | **Blocked / P0; finite containment accepted offline** | Current in-process evidence binds all repository `src/*.py`, root `swapService.py`, requirements, the running Linux interpreter, conventional executable libpython/libc/libm/loader mappings, the installed `solders` extension, selected root/flat/token/RPC/optional wrappers and selected RPC request/response/error wrappers. Repository imports still execute first; other transitive Solana/HTTP/stdlib/bytecode/shared-library artifacts, mapped-memory identity and independent pre-execution attestation remain open. |
+| 1 — restore/image admission | **Partial / P0** | Four retained-row conflict containments, the empty-DB latch, recovery boundary and exact-image witness are green offline. External approval must establish financial coherence; exact bytes cannot discover an incomplete/pre-fix approved image, and no all-status coherent-restore audit exists. |
+| 2 — durable startup outcome | **Implemented narrowly offline** | Claimed/running/held witness plus local receipt suppress stale healthy dashboard values. Independent-process contention/crash coverage, artifact authority and deployment acceptance remain open. |
+| 3 — eligible capacity FIFO | **Open; defect freshly reproduced** | An older malformed refund hold retained full principal and made zero sends, but two runs still blocked a younger valid fitting hold and increased its attempt count to 3. |
+| 4 — read-only dashboard | **Accepted for current offline scope** | One read-only snapshot and missing-path no-create tests pass; retain witness-before/after consistency and target deployment acceptance. |
+| 5 — service/chain admission | **Blocked; defects freshly reproduced** | A mismatched heartbeat owner/address/provider/pair/vault passed when three scalar fields parsed; genesis-only Solana/Nexus checks passed without health/sync/freshness. |
+| 6 — witness operations and hold resolution | **Open** | Required evidence export, independently administered bootstrap/restore ceremony, real-process contention/crash rehearsal and evidence-bound non-capacity Solana disposition are absent. |
+| 7 — target acceptance/release | **Open / O5 unvalidated** | No authorized live node, crash/restore or operator rehearsal evidence. |
 
 ## Repair order
 
@@ -49,10 +63,14 @@ receipt enablement, live transaction, commit, or publication authorization.
 
 **Priority: P0 executable integrity.**
 
-An in-process fingerprint cannot prove the approved executable when the root entrypoint that invokes the
-checker is outside its manifest. Define an external trusted launcher or immutable deployment image whose
-digest covers `swapService.py`, every imported runtime module, dependency artifact and interpreter. The
-witness certificate must bind that identity; a changed wrapper cannot run code before refusal.
+The current in-process fingerprint now includes the root entrypoint, repository sources, running
+interpreter and a finite selected native/solders manifest. It still cannot prove the approved
+executable: repository imports and root code run before the checker, while unselected transitive
+artifacts, bytecode, standard-library/shared-library code and mapped memory remain outside the
+manifest. Define an external trusted launcher or immutable deployment image whose independently
+approved digest covers the complete execution closure before repository code runs. The witness
+certificate must bind that authority; changing any pre-admission byte cannot produce a side effect
+before refusal.
 
 Acceptance:
 
@@ -264,6 +282,28 @@ create/readback and migration acceptance succeeds.
 Only then run explicitly authorized target-infrastructure acceptance for provider pagination, authoritative
 network/finality, Nexus completeness/reference/TLS, both bridge directions, accepted-but-unparsed outcomes,
 durable-boundary crashes, backup/restore, total loss and operator rehearsal.
+
+## Batch grounding and executable acceptance matrix
+
+Every row uses the **explicit non-Atlas settlement hypothesis** evidence class; none inherits marine
+Class A evidence. O4 is the primary vision outcome. O3 applies to provenance/recovery/artifact
+proof, O1 to inspectable evidence contracts, O2 only to the exact namespace/service-identity
+prerequisite, and O5 only to authorized external validation. A named human owner and approver must
+replace the role labels below at kickoff.
+
+| Batch | Objective and production ownership | Prerequisite / pinned source-interface dependency | Human authority boundary | Negative / concurrency / recovery exit |
+|---|---|---|---|---|
+| 0 — executable authority | O4/O3/O1; deployment launcher/image plus `swapService.py`, `src/custody_admission.py` and complete runtime closure | Published `2c4ed319` sealed-witness and finite-fingerprint behavior is the compatibility baseline; pin an independent launcher/immutable-image authority and its complete closure manifest before implementation. The current in-process digest is not that authority. | Independent artifact approver selects the immutable digest; runtime/operator credentials cannot issue or rewrite it | Mutate every root/module/dependency/interpreter/launcher byte, including pre-import effects; race two processes on one image/permit; kill before/after claim/complete/seal. New default-collected external-launcher module must prove refusal before lock/DB/witness/chain and one exact run/seal. |
+| 1 — restore admission | O4/O3; recovery owner for `src/state_db.py`, `src/startup_recovery.py`, `src/solana_client.py`, `src/nexus_client.py` and migration/backup format | Batch 0 external executable admission plus a versioned, independently approved coherent restore/bootstrap identity covering the SQLite image, schema, configuration, witness generation and all policy/capacity/submission/fee/terminal evidence. | Operator separately approves audited new bootstrap or coherent restore; absent history has no send authority | Parameterize every nonterminal status and required field with absent/wrong/conflicting evidence; race audit with scanner/workers; exercise empty, unrelated-row partial, source/capacity/terminal/cap-only, pre-fix, online backup, DB+WAL and total loss. Require zero transport/full liability or exact original intent once. |
+| 2 — durable startup outcome | O4/O3; witness/runtime/dashboard in `src/custody_witness.py`, `src/custody_admission.py`, `src/main.py`, `src/dashboard.py` | Batch 0 executable identity and Batch 1 coherent restore admission; preserve the published `ready → claimed → running → ready(next generation)` witness states and exact-image/configuration interfaces. | Independent witness administrator owns bootstrap/hold recovery; service runtime owns only one-use transitions | Use distinct OS processes/connections to contend on claim/complete/hold/seal; kill at each boundary; read from a third connection. Exactly one owner may run, stale green state is forbidden and no claimed/held generation revives automatically. |
+| 3 — capacity progress | O4; state/workers/dashboard in `src/state_db.py`, `src/solana_client.py`, `src/dashboard.py` | Batch 1 complete state audit and the accepted frozen-policy, liability, reservation and capacity-hold schemas at `2c4ed319`; malformed/conflicting evidence must move classifications without changing principal or inventing send authority. | Human disposition requires frozen evidence and audit; no direct send/SQL edit | Put malformed/conflicting/unknown oldest rows ahead of same/cross-kind valid holds, beyond worker limits; race refund/quarantine workers; restart and vary cap/age. Younger valid intent sends once; blocked principal/evidence stays unchanged and outside eligible FIFO. |
+| 4 — dashboard | O4/O3; `src/dashboard.py` plus witness/read-only state APIs | Batches 1–3 state and liability interfaces plus the accepted read-only snapshot and live-lease match; observers consume only those APIs and never open a writable recovery path. | Read-only observers gain no financial authority | Missing/corrupt DB and witness mismatch remain unknown; witness transitions around one snapshot cannot yield stale green; reads across restart create/change no DB/WAL/SHM bytes. |
+| 5 — service/node admission | O4 with O2 prerequisite and O3 provenance; `src/custody_chain.py`, `src/nexus_client.py`, `src/main.py` and exact endpoints | Batch 0 pre-execution boundary plus jointly pinned heartbeat address/owner/schema/pair/custody/terms and authoritative Solana health/root and Nexus sync/mode/network/tip APIs for the exact configured endpoints. | Operator pins address/owner/schema/pair/custody/terms and freshness policy | Wrong/stale/unsynced/wrong-typed evidence, query failure and identity change between reads refuse before DB/recovery. Exact authorized target fixtures must prove health/root and sync/mode/network/tip freshness. |
+| 6 — witness/hold operations | O3/O4; evidence exporter, deployment runbook and operator-resolution tool | Batch 2 independent-process witness exit, Batch 3 durable hold classifications, Batch 4 read-only evidence API and Batch 5 exact chain-evidence contract; preserve the narrower witness/snapshot controls already accepted at `2c4ed319`, and pin independent TLS/anti-rollback administration and attributable role identities. | Distinct bootstrap/restore/disposition roles with attributable rationale; permanent retention is an explicit human policy | Export is read-only; TLS/anti-rollback rehearsal survives crash; resolution races workers, verifies exact chain evidence and either finalizes once with cap/fee effects or leaves the quantified hold unchanged. |
+| 7 — external acceptance | O5 with O4; exact immutable release artifact and approved Solana/Nexus test infrastructure | Accepted exits for Batches 0–6, one exact externally attested artifact, authorized isolated target infrastructure, pinned provider/wallet/node/service revisions and a no-production-funds test plan. | Explicit target-activity authorization and separate human release decision | Unsupported versions, pagination truncation, finality mismatch, concurrent arrivals, timeout-after-acceptance, crashes at every durable boundary, coherent restore and total loss pass on devnet/testnet. No production funds. |
+
+Current offline commands are recorded in [the evaluation](../EVALUATION.md). Add the missing
+matrix rows to default pytest collection rather than accepting standalone probes.
 
 ## Gate after every batch
 

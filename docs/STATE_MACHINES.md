@@ -4,17 +4,34 @@
 
 Read [the repository vision](../vision.md) and [Distordia alignment/dependency map](DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this architecture → tasks/code/tests/external evidence and human release.
 
-**Portfolio purpose:** O4 attributable settlement and bounded risk; O1 open evidence contracts. Reduce discretionary custody and make exact authorization, liabilities, recovery and finality independently inspectable. The current one-pair operator-custodial bridge is transitional, not non-custodial settlement or company underwriting. The alignment map supplies customer-evidence qualification, batch ownership, upstream prerequisites and human gates. Each material task must name those fields alongside its exact production paths and collected acceptance tests. This documentation alignment changes no runtime, test result or release status; dated evidence below remains evidence for its stated snapshot only.
+**Portfolio purpose:** primary O4 attributable settlement and bounded risk, supported by O3
+reproducible provenance and O1 inspectable/open evidence contracts. O5 remains an external-
+acceptance objective; exact service-record identity is an O2 prerequisite, not proof that this
+repository establishes namespace authority. The settlement use case is a non-Atlas hypothesis and
+must not inherit marine Class A evidence. The current one-pair operator-custodial bridge remains the
+transitional SD-002 condition; SD-003–SD-008 and all non-custody, slashing, regulatory and adoption
+claims remain open. The alignment map supplies batch ownership, upstream prerequisites and human
+gates. Each material task must name those fields alongside exact production paths and collected
+acceptance tests.
 
-**Current source scope:** one configured classic SPL token ↔ Nexus token pair. Published startup containment holds four inconsistent restored-source families before workers: retained ordinary refund/quarantine states, ready rows with debit-submission metadata, ready rows with capacity siblings, and ready rows with terminal siblings. The current source includes the sealed-custody witness plus later in-process fingerprint increments for the root entrypoint, running interpreter, foundational native libraries, the solders extension, its selected Python source manifest, token/RPC initializers and eagerly attempted LiteSVM/metadata wrappers. Complete trusted pre-execution artifact identity remains open; production and real funds remain blocked.
+**Current source scope (2026-10-07):** exact source
+`2c4ed319d251836f01dfb83de68da71b1c6c6a23` implements one configured classic SPL token ↔ Nexus
+token pair. Published startup containment holds four inconsistent restored-source families before
+workers: retained ordinary refund/quarantine states, ready rows with debit-submission metadata,
+ready rows with capacity siblings, and ready rows with terminal siblings. The published sealed-
+custody witness and later in-process fingerprint increments bind the root entrypoint, running
+interpreter, conventional foundational native mappings, the installed `solders` extension, its
+selected root/flat/token/RPC/optional wrapper sources and selected RPC wire wrappers. Fresh offline
+collection found 1,522 tests; all passed with 77 subtests. This is finite in-process drift
+containment, not complete trusted pre-execution artifact identity. Production and real funds remain
+blocked.
 
-**Historical review scope (2026-10-02):** the committed runtime and documentation-publication base was `7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc`; separately reviewed local documentation `HEAD` was `ee10b6e20dfe85f15347386adecb9dc99db55bb5`; and the sealed-custody implementation remained staged and unpublished. The review comparison base was `ed73c513ee22f9626502273aa0d8e42a4c238b7a`. That unpublished runtime candidate passed 947 tests plus 77 subtests, with 324 focused changed-area tests; those counts are historical evidence, not current-release acceptance. The following October 2 release-assessment paragraph is retained as historical evidence; its root/interpreter omission language is superseded by the current in-process bindings above, not by complete external attestation.
-
-**Release remains blocked.** The source fingerprint excludes the executed root `swapService.py` and
-installed artifacts; chain admission checks genesis but not health/sync/freshness; the heartbeat validator
-does not bind owner/address/pair/custody identity; witness bootstrap/restore operations are incomplete;
-and malformed capacity evidence can still starve eligible work. Exact image continuity does not prove
-that the initially approved image contains complete liabilities or correct historical authorization.
+**Current release blockers:** an external immutable launcher/image must verify every executable byte
+before repository imports or other side effects; coherent restore/bootstrap authority and an all-
+status evidence audit remain incomplete; heartbeat owner/address/schema/pair/custody/terms and node
+health/sync/freshness are unbound; malformed oldest capacity evidence still starves a younger valid
+hold; witness/hold operations and target acceptance remain open. Exact image continuity does not
+prove that the approved image contains complete liabilities or correct historical authorization.
 
 See [EVALUATION.md](EVALUATION.md), the
 [October 2 review](DEVELOPMENT_REVIEW_2026-10-02.md), the
@@ -66,11 +83,13 @@ worker exits; unresolved work permanently holds the generation. The dashboard re
 only from the same running lease before and after one read-only SQLite snapshot.
 
 The certificate binds whole-file hash/size, schema digest, effective public configuration, expected chain
-genesis and the current `src/*.py` plus `requirements.txt` manifest. **Current limitation:** that build
-fingerprint does not bind executed root `swapService.py`, installed dependencies or the interpreter, so
-it is not complete pre-execution artifact attestation. The reference witness also supplies continuity,
-not independent proof that an approved image is financially coherent. An externally enforced immutable
-artifact and audited bootstrap/restore certificate ceremony are required.
+genesis and an in-process build digest over current `src/*.py`, root `swapService.py`,
+`requirements.txt`, the running interpreter, conventional foundational native mappings, the installed
+`solders` extension, selected root/flat/token/RPC/optional solders source wrappers and selected RPC
+wire wrappers. This rejects drift in the finite selected set before witness-permit consumption, but it
+still runs after repository imports and does not cover the complete transitive dependency/bytecode/
+stdlib/shared-library/mapped-memory closure. An externally enforced immutable artifact and audited
+bootstrap/restore certificate ceremony remain required.
 
 Genesis equality identifies a chain but does not prove node readiness. Current admission still needs
 Solana health/root freshness, Nexus synchronization/tip freshness, and exact heartbeat owner/address/
@@ -388,14 +407,18 @@ claimed or permanently held, and the dashboard requires a matching live `running
 use one read-only snapshot and do not create a missing database. This supersedes the former stale-healthy
 and writable-dashboard defects for the current offline implementation.
 
-The next paragraph preserves the October 2 artifact-omission finding. Current source now binds the root
-entrypoint and selected installed artifacts in-process, but complete trusted pre-execution identity remains open.
+The October 2 artifact-omission finding is historical and is superseded in part: current source now binds
+the root entrypoint, running interpreter and selected installed artifacts in-process. The narrower current
+finding remains release-blocking because this finite check is neither external nor pre-execution and does
+not cover the complete execution closure.
 
-The stronger continuity gate does not establish initial image completeness. Its build fingerprint omits
-the root executable and installed artifacts, while heartbeat validation still accepts an unbound
-name-resolved record. Genesis pins do not prove Solana health/root freshness or Nexus sync/tip freshness.
-Complete artifact, service-record and node-readiness admission plus independent witness bootstrap/restore
-operations remain required before release.
+The stronger continuity gate still does not establish initial image completeness or trusted
+pre-execution identity. The current in-process fingerprint binds the root executable and the finite
+selected interpreter/native/solders artifacts listed above, but repository imports precede the check
+and the full transitive execution closure remains unattested. Heartbeat validation still accepts an
+unbound name-resolved record, while genesis pins do not prove Solana health/root freshness or Nexus
+sync/tip freshness. Complete external artifact, service-record and node-readiness admission plus
+independent witness bootstrap/restore operations remain required before release.
 
 Provider-v2 is committed library code with no production importer. Actual registration, heartbeat and
 recovery still use named v1 records; the parsed legacy opt-in flag is not enforced. V2 needs a target-valid
