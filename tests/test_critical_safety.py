@@ -13,7 +13,7 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from typing import cast
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -2586,7 +2586,8 @@ class CriticalSafetyTests(unittest.TestCase):
             patch.object(main, "poll_solana_deposits") as poll_solana,
             patch.object(main.alerts, "critical"),
         ):
-            main.run()
+            # Exercise the reconciliation gate after independent image admission.
+            main._run_admitted(Mock(spec=['complete', 'assert_running', 'verify_image', 'check_file_identity']))
 
         poll_solana.assert_called_once_with(paused=True)
 
@@ -3338,12 +3339,13 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertFalse(repeated.executed)
         self.assertEqual(repeated.status, "outcome_unknown")
 
+    @patch.object(startup_recovery, "_terminal_solana_dispositions_have_provenance", return_value=True)
     @patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99)
     @patch.object(startup_recovery, "_fallback_recent_scan", return_value={"fallback_mode": True})
     @patch.object(startup_recovery.nexus_client, "get_heartbeat_asset", return_value=None)
     @patch.object(state_db, "recover_interrupted_nexus_transfer_intents", return_value=1)
     def test_startup_recovery_holds_interrupted_nexus_transfers_before_scanning(
-        self, recover, _heartbeat, _fallback, _reference
+        self, recover, _heartbeat, _fallback, _reference, _provenance
     ):
         stats = startup_recovery.perform_startup_recovery()
 
@@ -3482,6 +3484,7 @@ class CriticalSafetyTests(unittest.TestCase):
         ])
         self.assertTrue(all(event["actor"] == "alice" for event in events))
 
+    @patch.object(startup_recovery, "_terminal_solana_dispositions_have_provenance", return_value=True)
     @patch.object(startup_recovery.nexus_client, "get_last_reference", return_value=99)
     @patch.object(startup_recovery, "_rebuild_solana_from_waterline", return_value={"solana_rebuilt": True, "recovery_complete": True, "_nexus_payouts": {}})
     @patch.object(startup_recovery, "_rebuild_nexus_from_waterline", return_value={"nexus_rebuilt": True, "recovery_complete": True})
@@ -3497,8 +3500,10 @@ class CriticalSafetyTests(unittest.TestCase):
             "last_safe_timestamp_solana": "1999999500",
         },
     )
+    @patch.object(state_db, "latch_empty_custody_recovery", return_value=False)
+    @patch.object(state_db, "record_solana_recovery_boundary")
     def test_startup_recovery_reads_runtime_top_level_heartbeat_waterlines(
-        self, _heartbeat, _recover, fallback, rebuild_nexus, rebuild_solana, _reference
+        self, _boundary, _admission, _heartbeat, _recover, fallback, rebuild_nexus, rebuild_solana, _reference, _provenance
     ):
         """A standard runtime heartbeat must rebuild both chains, never take the legacy fallback."""
         stats = startup_recovery.perform_startup_recovery()
@@ -3526,8 +3531,11 @@ class CriticalSafetyTests(unittest.TestCase):
         self.assertTrue(refunded_first)
         self.assertFalse(refunded_sibling)
 
-    def test_startup_recovery_never_clamps_a_custody_waterline_forward(self):
-        """A wipeout rebuild must scan the published checkpoint, however old it is."""
+    @patch.object(startup_recovery, "_terminal_solana_dispositions_have_provenance", return_value=True)
+    @patch.object(state_db, "latch_empty_custody_recovery", return_value=False)
+    @patch.object(state_db, "record_solana_recovery_boundary")
+    def test_startup_recovery_never_clamps_a_custody_waterline_forward(self, _boundary, _admission, _provenance):
+        """An admitted rebuild must scan the published checkpoint, however old it is."""
         heartbeat = {
             "address": "heartbeat-address",
             "last_poll_timestamp": "2000000000",

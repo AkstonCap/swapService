@@ -1,0 +1,16 @@
+SOURCE_SHA256: 765192b65534cef03f993fff9dfda030f0abb5346b0a9e6874713def2b482c61  docs/review_evidence/2026-09-15/targeted_review_probes.txt
+
+===== committed-runtime blocker reproductions =====
+...                                                                      [100%]
+3 passed, 2 deselected in 1.37s
+EXIT: 0
+
+===== dirty provider-v2 blocker reproductions =====
+..                                                                       [100%]
+2 passed, 3 deselected in 0.07s
+EXIT: 0
+
+===== all focused blocker probes =====
+.....                                                                    [100%]
+5 passed in 0.78s
+EXIT: 0

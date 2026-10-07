@@ -1,170 +1,982 @@
 # swapService — Current Engineering Evaluation and Remediation Plan
 
-**Repair baseline:** `b91401a907eb5955f2ebebe767ca5dc94058a8f9` plus local changes.
-**Status:** reviewed code blockers corrected and offline verification passed; **not approved for real funds**.
+## Current exact-source assessment — 2026-10-07
 
-This is the current issue register. The complete earlier evaluation and state-machine notes,
-including pre-existing staged documentation, are preserved in the
-[pre-repair snapshot](POST_CHANGE_REVIEW_2026-09-13_PRE_REPAIR_DOCUMENTATION.md).
-Dated reviews describe their own snapshots, not the current working tree.
+**Release and real funds remain blocked.** This assessment covers detached exact source
+`2c4ed319d251836f01dfb83de68da71b1c6c6a23`, matching `origin/main`, against previous remote
+source `a28c958800f64e802b3dfc367ac49ecf7a18e5fb`. The source-assessment phase made documentation changes only. No live
+Solana/Nexus request, credential, transaction, deployment or approval reroute was performed.
+Subsequent documentation-only publication is recorded separately and grants no release authority.
 
-## Architecture and scope
+The strategic scope is **O4 attributable settlement and bounded risk**, supported by **O3
+reproducible provenance** for artifact/recovery evidence and **O1 open coordination** through
+inspectable evidence contracts. **O5 validated reliance remains an unpassed external-acceptance
+objective.** This repository does not establish O2 namespace authority beyond requiring an exact
+service-record identity. The settlement use case remains an explicit non-Atlas hypothesis; it must
+not inherit marine Class A evidence. Operator custody remains the transitional SD-002 condition.
+No result here proves non-custody, enforceable slashing/collateral, regulatory status, adoption or
+closure of SD-003–SD-008.
 
-One process bridges one configured classic-SPL-token/Nexus-token pair. `config.SWAP_PAIR`
-provides immutable token/custody identities, independent decimals, display metadata and fee terms.
-Gross conversion is 1:1 in whole-token units before fees and rounding; this is not market pricing.
-Native SOL, Token-2022, arbitrary-chain routing and simultaneous pairs are not implemented.
+### Accepted progress since `a28c958`
 
-Helius is a **trusted primary Solana history provider**, not an untrusted hint requiring a second
-attestor. Application validation still requires correct network selection, exact integer amounts,
-transaction success/finality and durable continuation. Core RPC is an operational alternative;
-one provider's cursor must never be interpreted under another query or network.
+The sealed-image/witness runtime is now published. Its one-use `ready → claimed → running →
+ready(next generation)` protocol, exact SQLite image/schema/configuration checks, recovery-before-
+running ordering, runtime lease checks, quiescent seal and read-only snapshot dashboard all pass
+the current offline suite. Subsequent increments now bind, inside `build_fingerprint()`, the root
+entrypoint, running interpreter bytes, conventional foundational native mappings, the installed
+`solders` extension, its root/flat/token/RPC/optional wrapper sources, and the selected
+`rpc.requests`, `rpc.responses` and `rpc.errors` wire wrappers. Invalid selected evidence refuses
+before witness-permit consumption. These are accepted as **finite in-process drift containment**,
+not as complete or trusted pre-execution attestation.
 
-Every financial side effect follows:
+The four retained-source conflict containments remain accepted narrowly offline: ordinary
+refund/quarantine states, ready rows with prior debit metadata, ready rows with capacity siblings,
+and ready rows with terminal siblings preserve principal/evidence and call no transport. The
+empty-database latch, monotonic recovery boundary, exact frozen-policy checks, terminal-provenance
+migration, typed capacity holds and read-only dashboard controls also remain required. None proves
+a coherent partial restore or historical authorization after lost SQLite evidence.
+
+### Fresh offline verification
+
+The installed reusable environment was Python **3.11.15** with `python-dotenv==1.2.2`,
+`solana==0.36.9`, `solders==0.26.0`, `requests==2.33.0` and `pytest==9.1.1`; GitHub CI remains
+configured for Python 3.12. Collection found exactly **1,522 tests**. The complete suite passed
+**1,522 tests and 77 subtests** in 121.35 seconds. The current remote SHA has successful CI run
+[37547865322](https://github.com/distordialabs-brutus/swapService/actions/runs/37547865322);
+that remote status is publication evidence, not live or release acceptance.
+
+| Executed boundary | Fresh result |
+|---|---|
+| `python -m pytest --collect-only -q` | **1,522 collected** |
+| `python -m pytest -q` | **1,522 passed, 77 subtests passed** |
+| Ten custody admission/artifact/witness/runtime/dashboard modules | **667 passed** |
+| Ten recovery/retained-state/capacity modules | **414 passed, 52 subtests passed** |
+| Focused negative/concurrency/restart selection | **39 passed** |
+| CI isolation shards | **35 passed/52 subtests; 36 passed/52 subtests; 85 passed** |
+| dependency consistency, compilation, Markdown links, token-pair inventory and whitespace | Passed; inventory has **274 active lines** |
+
+### Current blocking findings
+
+1. **P0 — artifact authority is still in-process and incomplete.** Repository imports and root code
+   execute before `build_fingerprint()` can refuse. The finite manifest deliberately omits other
+   transitive Solana/HTTP/stdlib/bytecode/shared-library artifacts and does not attest mapped memory.
+   A digest computed by the mutable artifact cannot attest itself. Batch 0 therefore remains open
+   until an external trusted launcher or immutable-image authority verifies the complete executable
+   closure before repository code, lock creation, database access, witness claim or chain access.
+2. **P0 — complete restore authorization remains unproved.** Exact image continuity can preserve an
+   incomplete, stale or pre-fix image. Table non-emptiness, local timestamps and source rediscovery
+   are not proof that every policy, capacity, submission, fee and terminal component belongs to one
+   coherent generation. The next recovery batch must audit every selectable/nonterminal state or
+   require independently approved coherent restore/bootstrap identity.
+3. **High — service and node readiness remain identity-incomplete.** A fresh offline probe supplied a
+   heartbeat object with different address, owner, provider, pair and vault but the three required
+   scalar fields; `validate_heartbeat_asset()` returned true. A second probe showed
+   `custody_chain.verify()` succeeds after only Solana `getGenesisHash` and Nexus
+   `ledger/get/blockhash height=0`; no health, sync or freshness query is required.
+4. **High operability — malformed capacity evidence still starves valid work.** The current historical
+   actual-worker probe retained 120 units and made zero sends, but two worker runs left the younger
+   valid 60-unit refund behind an older malformed hold; its attempt count reached 3. Containment is
+   safe, but eligible FIFO progress is not implemented.
+5. **High operability — witness and hold operations are incomplete.** The reference witness has no
+   collected independent-process contested-claim/crash matrix, supported certificate evidence export,
+   audited bootstrap/restore ceremony or evidence-bound resolution protocol for non-capacity Solana
+   holds. The existing SQLite/API unit coverage does not establish independent anti-rollback deployment.
+6. **External acceptance remains absent.** No approved devnet/testnet node, pagination, finality,
+   accepted-but-unparsed, crash/restore, total-loss or operator rehearsal was executed. O5 remains open.
+
+### Grounded next batches
+
+| Batch | Objective / evidence / vision outcome | Production owner and paths | Human authority boundary | Executable exit |
+|---|---|---|---|---|
+| 0 — external executable authority | O4/O3 with supporting O1; non-Atlas hypothesis; prove which bytes executed before value-moving admission | Deployment launcher/image owner plus swapService startup; `swapService.py`, `src/custody_admission.py`, every imported runtime/dependency/interpreter artifact | Independent artifact approver chooses the immutable digest; runtime/operator credentials cannot create or rewrite approval | Mutation of every root/module/dependency/interpreter/launcher byte, including a pre-import side effect, refuses before any repository side effect; exact approved image completes one claim/run/seal generation |
+| 1 — closed restore admission | O4/O3; preserve exact authorization and quantified liabilities rather than infer history | swapService recovery owner; `src/state_db.py`, `src/startup_recovery.py`, `src/solana_client.py`, `src/nexus_client.py`, migration/backup format | Named operator approves new bootstrap or coherent restore; missing evidence has no automatic-send authority | Schema-driven all-status audit plus partial/stale/pre-fix/DB+WAL/online-backup/total-loss cases prove zero transport and full liability unless exact original intent is restored once |
+| 2 — service/node admission | O4 with O2 identity prerequisite and O3 provenance; bind the exact service and authoritative endpoints | swapService adapters; `src/custody_chain.py`, `src/nexus_client.py`, `src/main.py`; pinned Solana/Nexus semantics | Operator pins address/owner/schema/pair/custody/terms and freshness policy; configuration labels cannot repair observations | Wrong/stale/unsynced/malformed evidence refuses before database mutation or recovery; exact target-node evidence passes on authorized infrastructure |
+| 3 — capacity progress and hold disposition | O4; retain liabilities while making eligible obligations progress | swapService state/workers/dashboard; `src/state_db.py`, `src/solana_client.py`, `src/dashboard.py`, operator tooling | Human may disposition only through an evidence-bound audited protocol; no SQL/direct-send bypass | Malformed/conflicting/unknown rows move atomically outside automatic FIFO; younger valid same/cross-kind work sends once across restart and worker limits; blocked principal remains visible and unchanged |
+| 4 — operational witness and O5 acceptance | O3/O5; independently reproducible deployment and externally validated reliance | Deployment/operator owner plus exact final swapService artifact and approved Solana/Nexus test infrastructure | Separate bootstrap/restore/release approvals; target activity requires explicit authorization | Independent-process witness contention/crash rehearsal, evidence export, TLS/anti-rollback deployment, both bridge directions and the full pagination/finality/unknown-outcome/restore matrix pass before a separate release decision |
+
+### Executable negative, concurrency and recovery matrix
+
+The named commands are offline until the final explicitly authorized target-infrastructure row.
+Add missing cases to default pytest collection; a scratch script alone is not acceptance.
+
+| Boundary | Negative cases | Concurrency cases | Recovery cases | Exit command / expected result |
+|---|---|---|---|---|
+| External artifact admission | root pre-import side effect; omitted transitive wrapper, bytecode, stdlib, HTTP/Solana dependency, interpreter/launcher mutation; missing/raced/FIFO artifact | two independent processes contend for one permit and one custody image; loser performs no side effect | crash before claim, after claim, after complete response loss and during seal response loss | New collected `tests/test_custody_external_launcher.py`; exact image runs once, every mutation refuses before lock/DB/witness/chain |
+| Witness lifecycle | malformed/duplicate certificate JSON, stale generation, wrong owner, lost/ambiguous response | real independent processes and distinct witness connections race claim/complete/hold/seal; observe exactly one owner from a third connection | kill owner at every transition; restart remains held unless an exact next-generation permit was durably sealed | Extend `tests/test_custody_witness.py` and `tests/test_custody_runtime.py`; one owner, no automatic revival, bounded completion |
+| Restore admission | every nonterminal status with each required field absent, wrong-typed, contradictory or orphaned; pre-fix manufactured terminal | scanner and worker start attempts race the startup audit; no selector observes unaudited rows | empty, unrelated-row partial, source-only, capacity-only, terminal-only, cap-only, online backup, copied DB+WAL and total loss | Parameterized `tests/test_recovery_admission_matrix.py` through real startup/workers; zero transport/full liability unless exact original intent is restored once |
+| Capacity FIFO | malformed/source-conflict/terminal-conflict/unknown-submission oldest row ahead of valid refund/quarantine | real refund and quarantine workers race at exact cap across same- and cross-kind queues | restart, cap aging/decrease/increase, more blocked rows than worker limits | Extend `tests/test_solana_capacity_holds.py`; younger eligible intent sends exactly once, blocked row stays non-sendable with unchanged principal |
+| Service/node identity | wrong address/owner/schema/pair/vault/terms; Solana unhealthy/stale root; Nexus unsynced/syncing/wrong network or stale tip; query exceptions | identity/freshness changes between read and witness completion | restart against changed endpoint; retained older healthy observation cannot admit | Extend `tests/test_custody_chain.py` plus target fixtures; no DB/scanner/poller call on failure, exact fresh evidence only |
+| Dashboard/operations | missing/unreadable DB, witness mismatch, corrupt hold evidence, absent resolution proof | witness changes around one read-only snapshot; operator resolution races worker selection | restart during resolution and after accepted-but-unparsed disposition | Existing dashboard tests plus new collected operator protocol tests; no writes from reads, no stale green state, one attributable disposition or unchanged hold |
+| Authorized external acceptance | unsupported transaction version, pagination truncation, wrong finality/transfer, Nexus incomplete references/TLS failure | concurrent arrivals, timeout after remote acceptance, competing restart | process crash at each intent/submission/finalization boundary; coherent restore and total loss | Explicit devnet/testnet command recorded against the exact immutable artifact; no production funds; human release remains separate |
+
+## Historical verdict — 2026-10-02
+
+**Release blocked.** Committed-runtime and separately reviewed candidate identity:
 
 ```text
-persist intent → execute once → record remote identity →
-resolve uncertain outcome against the chain → finalize atomically
+review base:                       ed73c513ee22f9626502273aa0d8e42a4c238b7a
+committed runtime / publication base: 7b2d1c4e3c9d3b2f006a083f9372cfadf80830fc
+reviewed local documentation HEAD:    ee10b6e20dfe85f15347386adecb9dc99db55bb5
+unpublished runtime index tree:       a73785b8653e3ad03c9216072b7366999ba1e854
 ```
 
-A timeout is not failure. A bounded empty lookup is not proof of non-execution. A finalized
-signature alone does not prove the intended transfer. Unknown outcomes retain liabilities and
-budget capacity. Public recovery waterlines must not pass unresolved obligations that would be
-lost with the database.
+Four published startup containments now hold retained ordinary dispositions, ready rows with prior debit
+metadata, ready rows with capacity siblings, and ready rows with terminal siblings. They preserve full
+principal and conflicting evidence rather than deriving current terms, repeating a Nexus debit or deleting
+a disputed source. The focused changed-area gate passed 324 tests; keep all four controls.
 
-## Current repair batch
+The unpublished, locally staged sealed-custody implementation candidate adds an independent one-use witness, exact whole-SQLite-image and
+schema admission, configuration/source fingerprints, pinned chain genesis checks, recovery-before-running,
+per-cycle lease verification, quiescent sealing and a read-only snapshot dashboard. The complete offline
+suite for that unpublished runtime candidate passed 947 tests plus 77 subtests; those are not the committed
+runtime's test counts. This materially closes the previous missing-database dashboard and
+non-durable-startup-truth gaps **only for an exact independently approved image**.
 
-| Area | Implementation / required acceptance |
+A separate documentation-only publication candidate based on committed runtime `7b2d1c4` and containing
+none of the staged sealed-custody runtime passed **848 tests plus 77 subtests**. That publication gate
+verifies the committed runtime together with these candidate documents; it does not verify the unpublished
+sealed-custody implementation.
+
+It is not release-acceptable yet:
+
+1. `build_fingerprint()` omits the executed root `swapService.py`; a scratch mutation that performed a
+   pre-admission side effect retained the approved fingerprint. Installed interpreter/package artifacts are
+   also not attested by hashing `requirements.txt`.
+2. Genesis equality is not node health/sync/freshness. Heartbeat validation accepts a name-resolved object
+   with a different address, owner, provider, pair and vault when the three required fields parse.
+3. Required witness/genesis configuration and audited initial/restore certificate generation are not
+   integrated into the normal setup/configuration path.
+4. Malformed capacity evidence can still starve later eligible frozen work; non-capacity Solana holds still
+   lack audited resolution; target-chain acceptance remains absent.
+
+See the [October 2 review](DEVELOPMENT_REVIEW_2026-10-02.md),
+[sealed-custody architecture note](maintenance/sealed-custody-admission.md), and the
+[current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
+
+### Maintenance increment — root-entrypoint fingerprint drift
+
+**Implemented locally, unpublished; Batch 0 remains blocked.** The in-process
+`build_fingerprint()` now includes the required root `swapService.py` alongside the
+existing runtime sources and declared requirements. A collected regression first
+reproduced an unchanged digest after adding a pre-admission side effect; it now
+requires a changed digest without executing the inspected entrypoint. Additional
+fixtures reject changed, missing and non-file entrypoints before witness-permit
+consumption, preserve the custody image/receipt absence, and exercise exact-build
+claim, completion and next-generation sealing.
+
+The focused admission module returned **29 passed**; the clean-environment shared-tree
+suite returned **952 passed, 77 subtests passed**. Dependency consistency, compilation,
+Markdown links, the existing index's literal inventory and whitespace checks passed.
+These results cover the local candidate, not a published commit or production artifact.
+The fix depends on the pre-existing staged/uncommitted custody implementation, so it
+is intentionally not committed or pushed independently of that feature. The pre-existing
+index is unchanged. No live chain or real-fund operation was performed.
+
+This fixes only accidental root-entrypoint drift in the in-process certificate. It
+cannot prevent an altered wrapper from executing before the checker; the external
+trusted launcher/immutable image, interpreter and installed-artifact attestation in
+Batch 0 remain required. Previously approved build digests must not be reused or
+silently rewritten for the changed manifest.
+
+### Maintenance increment — running-interpreter fingerprint drift (2026-10-03)
+
+**Implemented in the local candidate; Batch 0 and publication remain blocked.** Local
+commit `ebedff796bd201d0c0b690074922cfde21a7a883` already contains the root-entrypoint
+repair above and the sealed-custody implementation. This increment addresses the next
+missing byte identity: `build_fingerprint()` now incorporates a domain-separated SHA-256
+of the running Linux interpreter obtained from `/proc/self/exe`, not `PATH`,
+`sys.executable`, a version label or an installed-package declaration. Missing, unreadable,
+empty, non-regular or changing executable evidence refuses fingerprint construction.
+Streaming reads compare descriptor/path identity, byte size and nanosecond modification
+and change times before and after hashing; candidate interpreter bytes are never executed.
+
+Collected coverage in `tests/test_custody_interpreter.py` first reproduced unchanged build
+identity after interpreter-byte drift. It now covers drift, invalid evidence, in-place
+mutation/replacement/truncation during hashing, sanitized read failure, real running-binary
+selection despite spoofed labels, unchanged custody bytes/no receipt/no permit consumption
+on rejection, and exact-build claim, completion and next-generation sealing.
+The focused five-module custody gate returned **67 passed**; the clean Python 3.12 complete
+suite returned **967 passed, 77 subtests passed**. All boundaries remain offline.
+
+`origin/main` is `dba5f358bbe82e09acfbcb3582ae1f8d5d2abeda`, based on `7b2d1c4`, and does
+not contain `src/custody_admission.py`. The local prerequisite commits `ee10b6e` and
+`ebedff7` are absent from that branch. Publishing this increment would therefore also
+publish the larger custody feature or require resolving divergent documentation; neither
+is authorized as this narrow maintenance issue. No force push or implicit feature
+publication is allowed by this increment.
+
+This is **in-process drift containment only**, not interpreter trust or pre-execution
+attestation. Shared libraries, standard library/bytecode, installed dependencies and the
+external trusted launcher/immutable image remain Batch 0 exits. Protected filesystem
+writing is still required; metadata checks are not an immutable-image guarantee. The
+new fingerprint intentionally invalidates prior approvals, including unchanged-interpreter
+approvals under the previous manifest. Do not silently rewrite or reuse certificates.
+Production and real funds remain blocked.
+
+### Maintenance increment — foundational native-runtime drift (2026-10-04)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains artifact identity. Root-entrypoint and interpreter-byte containments
+in local `ebedff7` and `89fddc7` are preserved, not reimplemented. This increment binds
+the on-disk files backing conventional executable `libpython`, C/math-library and
+Linux-loader mappings in `/proc/self/maps` into a domain-separated build digest.
+Paths are checked against the observed device/inode before streaming their bytes;
+descriptor/path size, mode and nanosecond timestamps are rechecked, as is the selected
+mapping set. Empty, missing, malformed, unreadable, deleted, anonymous or inconsistent
+native evidence refuses fingerprint construction with a sanitized error. Reads are
+bounded by the observed size; a raced-in FIFO cannot block the file open.
+
+The initial regression reproduced unchanged build identity after native-file drift.
+Race regressions then reproduced acceptance of in-place mutation, replacement,
+truncation and changed mappings; all now refuse. A fresh service/dashboard subprocess
+regression caught a separate-process identity mismatch when every native extension was
+included. The final manifest is deliberately limited to foundational runtime libraries:
+normal extension import differences, ASLR, mapping order and duplicate segments do not
+change it. Conventional glibc/musl and `ld`/`ld64` loader names are collected; unsupported
+names are not attested. Rejection preserves the original ready witness permit, custody
+bytes and receipt absence. Exact-build fixtures claim, complete, report healthy and seal
+a next generation. Independent review found no blocking defect in this narrow scope.
+
+The six-module focused gate returned **108 passed**, including **41 native-artifact
+cases**. The clean Python 3.12 complete suite returned **1008 passed, 77 subtests passed**
+in 85.40 seconds. Dependency consistency, compilation, local Markdown links, the
+intended index's token-literal inventory (**274 active lines**) and candidate whitespace
+passed. The three required CI-isolation shards returned **35 passed/52 subtests**,
+**36 passed/52 subtests** and **85 passed**. All chain boundaries remain offline;
+no live send, production credential or real-fund operation was used.
+
+This is **in-process on-disk drift containment**, not pre-execution or mapped-memory
+attestation. Other shared libraries/extensions, standard library/bytecode, installed
+packages, alternate filenames and the external trusted launcher/immutable image remain
+Batch 0 exits. The manifest change invalidates existing approvals; never silently rewrite
+certificates. `origin/main` remains `dba5f358bbe82e09acfbcb3582ae1f8d5d2abeda`, lacking the
+local custody prerequisite and diverging from local `main`. A passing narrow local commit
+cannot authorize publishing that larger feature or reconciling remote documentation.
+No push or remote CI claim is made. Production and real funds remain blocked.
+
+### Maintenance increment — installed solders extension drift (2026-10-04)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority is complete executable-artifact identity. Existing root-entrypoint, interpreter
+and foundational-library repairs are preserved. This narrow increment adds a
+domain-separated fingerprint of the installed `solders.solders` native extension used
+for transaction construction. `PathFinder` locates the conventional extension without
+executing its package initializer or library. Exact extension-loader/origin agreement,
+absolute path and recognized interpreter suffix are required. Nonblocking streaming
+reads are bounded by the observed size, with descriptor/path identity, mode, size and
+nanosecond timestamp checks plus repeated extension discovery. Missing, empty,
+non-regular, unreadable, inconsistent or changing evidence refuses admission with a
+sanitized error before witness-permit consumption.
+
+The initial collected regression reproduced unchanged build identity after extension
+byte drift; it now requires a changed digest without execution. The **26-case** new
+module covers discovery without package side effects, invalid evidence, mutation,
+replacement, truncation, growth, discovery changes, stat/open races and FIFO refusal.
+Real offline witness fixtures preserve the ready permit, full custody image and receipt
+absence on rejection, then admit the original artifact, complete a healthy lease and
+seal the next generation. Separate service/dashboard processes retain equal build
+identity. The seven-module focused gate returned **134 passed**; the clean Python 3.12
+complete suite returned **1034 passed, 77 subtests passed** in 84.97 seconds. Independent
+review found no blocking defect in this narrow scope. Final static and isolation gates
+are recorded with the maintenance commit report. No live-chain or real-fund operation
+was performed.
+
+This is **in-process on-disk extension drift containment**, not trusted pre-execution
+attestation, loaded-memory identity or complete installed-package verification. Python
+wrappers, bytecode, other SDK/dependency artifacts, standard library and the external
+trusted launcher/immutable image remain Batch 0 exits. A changed fingerprint invalidates
+prior approvals; never silently rewrite or reuse certificates. Fresh fetch resolves
+`origin/main` to `a28c958`, diverging from local `main` and still lacking the custody
+prerequisite. Publishing this repair would also publish that larger feature and require
+remote-documentation reconciliation, outside this one-issue scope. No force push or
+remote CI claim is authorized. Production and real funds remain blocked.
+
+### Maintenance increment — installed solders Python-source drift (2026-10-05)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains complete executable-artifact identity. Existing root-entrypoint,
+interpreter, foundational-library and native solders-extension repairs are preserved.
+This increment binds the installed `solders/__init__.py` and the seven wrappers directly
+imported by the runtime: `hash.py`, `instruction.py`, `keypair.py`, `message.py`,
+`pubkey.py`, `signature.py` and `transaction.py`. A domain-separated source manifest uses
+`PathFinder` without executing inspected packages/modules, requires conventional absolute
+source paths and exact `SourceFileLoader`/origin agreement, streams bounded nonblocking
+reads, and rechecks descriptor/path metadata, the complete discovery result and earlier
+files before accepting the digest. Missing, empty, non-regular, unreadable, bytecode-only,
+conflicting or changing selected evidence refuses admission before permit consumption.
+
+All eight initial drift regressions reproduced unchanged build identity before the fix.
+The new module also covers discovery without execution, invalid files/loaders/paths,
+stat/open races, mutation/replacement/truncation/growth, changes to previously read files,
+and changed discovery. Offline witness fixtures preserve the ready permit, full custody
+image and receipt absence on rejection, then admit the exact approved build, complete a
+healthy lease and seal the next generation. Existing fresh service/dashboard subprocess
+identity coverage remains green. The focused eight-module custody suite returned
+**233 passed**. Independent review found no blocker in this narrow scope. Complete-suite
+and static/isolation gate results are recorded in the maintenance commit report.
+
+This is **in-process on-disk source drift containment**, not proof of executed bytecode,
+loaded modules, complete installed dependencies or trusted pre-execution admission.
+Other wrappers/SDK artifacts (including indirect solders imports), standard library,
+bytecode and the external trusted launcher/immutable image remain Batch 0 exits.
+The changed manifest invalidates prior approvals; never silently rewrite certificates.
+Fresh fetch still resolves `origin/main` to `a28c958`, lacking the custody prerequisite
+and diverging from local `main`. A narrow local commit cannot authorize publishing that
+larger feature or reconciling unrelated remote documentation. No push or remote CI claim
+is made. Production and real funds remain blocked; no live-chain operation was used.
+
+### Maintenance increment — eager indirect solders source drift (2026-10-05)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority is executable-artifact identity. This increment preserves the previous repairs
+and adds the eighteen mandatory top-level Python wrappers eagerly imported by the pinned
+`solders==0.26.0` initializer. The source manifest now binds the initializer plus all
+25 mandatory flat wrappers, including `account`, `system_program`, `sysvar` and
+`transaction_status`, even when service/dashboard import sets differ. Existing
+non-executing source discovery, exact loader/origin validation, bounded nonblocking
+reads and complete discovery/metadata rechecks apply without changing admission ordering.
+
+All eighteen new drift regressions first reproduced unchanged build identity; the
+expanded manifest now changes the digest without executing inspected source. An independent
+expected inventory and AST inspection of the installed initializer check the scope.
+Expanded invalid-file, loader, race and offline witness tests cover the added wrappers:
+rejection preserves the ready permit, full custody bytes and absence of receipts/sidecars;
+restoring the exact artifact permits claim, healthy completion and next-generation seal.
+The focused eight-module gate returned **445 passed**. Independent review found no
+blocking defect in this narrow scope. The clean Python 3.12 complete suite returned
+**1330 passed, 77 subtests passed** in 101.37 seconds, with no skips. All three
+CI-isolation shards passed (**35/36/85 tests**, with **52 subtests** in each recovery
+shard). Dependency consistency, compilation, Markdown links, intended-index literal
+inventory (**274 active lines**) and candidate whitespace checks passed.
+
+This is **in-process on-disk drift containment**, not proof of executed bytecode or
+trusted pre-execution attestation. Nested `solders.token`/`solders.rpc` packages,
+optional `litesvm`/`transaction_metadata`, other installed artifacts, standard library,
+bytecode and the external trusted launcher/immutable image remain Batch 0 exits.
+The changed manifest invalidates prior approvals; never silently rewrite certificates.
+Fresh fetch resolves `origin/main` to `a28c958`, still lacking the local custody
+prerequisite and diverging from local `main`. Publishing this increment would implicitly
+publish that larger feature and reconcile unrelated documentation, outside this repair.
+No push or remote CI claim is made. Production and real funds remain blocked;
+all chain boundaries were offline.
+
+### Maintenance increment — eager solders token-initializer drift (2026-10-06)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains executable-artifact identity. Existing repairs bind the solders root
+initializer and mandatory flat wrappers but omit the mandatory `solders.token` package
+initializer that the pinned root initializer eagerly imports. This narrow increment
+adds `token/__init__.py` to the deterministic on-disk source manifest. Non-executing
+`PathFinder` discovery requires the conventional source initializer, exact source-loader
+origin/path agreement and exactly its own package search directory. Existing bounded
+nonblocking reads and whole-manifest discovery/metadata rechecks apply to the new file.
+
+A collected regression first reproduced an unchanged build digest after inserting a
+side effect into the token initializer. It now requires changed identity without
+executing inspected source. Expanded tests cover missing/empty/non-file/unreadable
+sources, invalid loaders/origins/package paths, flat-module substitution, mutation,
+replacement, truncation, growth and discovery changes during reads, plus stat/open
+races. Offline witness fixtures preserve the ready permit, full custody bytes and
+receipt/sidecar absence on rejection, then claim, complete, report healthy and seal
+with the exact restored artifact. The focused eight-module custody gate returned
+**459 passed**, including equal fresh service/dashboard build identities. Full-suite,
+static and CI-isolation gate results are recorded in the maintenance commit report.
+
+This remains **in-process on-disk drift containment**, not executed-bytecode identity,
+complete dependency verification or independently trusted pre-execution attestation.
+Other nested token/RPC modules, optional SDK artifacts, other dependencies, standard
+library/bytecode and the external trusted launcher/immutable image remain Batch 0 exits.
+The changed manifest invalidates prior approvals; never silently rewrite certificates.
+Fresh fetch still resolves `origin/main` to `a28c958`, lacking the local custody
+prerequisite and diverging from local `main`. Publishing this increment would implicitly
+publish that larger feature and require unrelated documentation reconciliation, outside
+this repair. No push or remote CI claim is made. Production and real funds remain blocked;
+all exercised chain boundaries were offline.
+
+### Review correction — cold-parent token namespace discovery
+
+The full suite at local `afba882` passed **1359 tests and 77 subtests**, but a fresh
+standalone run of the source/native SDK modules exposed **five failures**. When the
+selected token initializer is missing, a directory or a FIFO, `PathFinder` can try
+to construct a namespace path and raise `KeyError('solders')` if the parent package
+has not been imported. This still refuses admission, but escapes the documented
+sanitized `AdmissionError` boundary; broader collection masked the import dependency.
+
+The local correction converts that nested-discovery `KeyError` into invalid evidence
+through the existing sanitized refusal path. It does not import the inspected parent,
+relax loader/path checks or change permit ordering. Three explicit cold-parent tests
+failed before the correction and now verify refusal without parent execution/import.
+Existing standalone witness cases also verify unchanged permit/custody evidence.
+The source/native SDK shard now passes **354 tests**; the clean Python 3.12 full suite
+passes **1362 tests and 77 subtests**, with no skips. This is a local follow-up only;
+publication and production remain blocked by the same prerequisite/divergence and
+trusted-attestation requirements above.
+
+### Maintenance increment — eager solders RPC-initializer drift (2026-10-06)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains executable-artifact identity. Previous fingerprint repairs are preserved.
+The pinned solders root initializer eagerly attempts to import `solders.rpc`, but the
+selected source manifest omitted its package initializer. This increment binds
+`rpc/__init__.py` with the existing non-executing source-loader, exact origin/package-path,
+bounded nonblocking read and whole-manifest discovery/metadata checks. The pinned wheel
+ships this initializer as an empty file: only this exact manifest-relative source may
+be empty, and its empty-byte digest is included. Missing evidence is still rejected.
+
+The collected regression first reproduced unchanged build identity after adding a
+side effect to the empty initializer; it now changes the fingerprint without executing
+that source. Expanded regressions cover invalid files/loaders/package paths, cold-parent
+namespace and flat-module substitutions, empty-file growth/replacement and read/open
+races. Offline witness cases preserve the ready permit, custody bytes and absence of
+receipts/sidecars on rejection, then claim, complete, report healthy and seal the exact
+restored build. The eight-module focused gate passed **508 tests**. The clean Python 3.12
+complete suite passed **1393 tests and 77 subtests** in 102.08 seconds, with no skips.
+Independent read-only review found no blocking defect in this narrow scope. Final
+static and CI-isolation gate results are recorded in the maintenance commit report.
+
+This is **in-process on-disk drift containment**, not complete dependency or executed-
+bytecode verification or independently trusted pre-execution admission. Nested token/RPC
+wrappers, optional SDK artifacts, other dependencies, standard library/bytecode and the
+external trusted launcher/immutable image remain Batch 0 exits. The changed manifest
+invalidates previous approvals; never silently rewrite certificates. Fresh fetch resolves
+`origin/main` to `a28c958800f64e802b3dfc367ac49ecf7a18e5fb`, which lacks the custody
+prerequisite and diverges from local `main`. Publishing this increment would implicitly
+publish that larger feature and reconcile unrelated documentation, outside this repair.
+No push or remote CI claim is made. Production and real funds remain blocked;
+all exercised chain boundaries were offline.
+
+### Maintenance increment — eagerly attempted LiteSVM/metadata source drift (2026-10-06)
+
+**Implemented locally; Batch 0 and publication remain blocked.** The first unresolved
+priority remains executable-artifact identity. The pinned solders initializer eagerly
+attempts to import `litesvm` and `transaction_metadata` under suppressed `ImportError`.
+That suppression does not prevent present wrappers executing; both installed files
+were outside the source manifest. This narrow increment binds `litesvm.py` and
+`transaction_metadata.py` through the existing deterministic, non-executing discovery,
+exact source-loader/origin validation, bounded nonblocking reads and whole-manifest
+metadata/discovery rechecks. Both files are required and nonempty in this pinned-wheel
+manifest, even though the SDK treats their imports as optional.
+
+Two collected drift regressions first reproduced unchanged build identity after adding
+side effects to these wrappers. They now require changed identity without executing
+inspected source. Expanded existing cases cover missing/empty/non-file/unreadable
+artifacts, invalid discovery/loaders, read/open races and source changes. Offline witness
+cases preserve the ready permit, custody bytes and receipt/sidecar absence on rejection,
+then admit, complete, report healthy and seal the exact restored artifact. The focused
+eight-module custody gate returned **558 passed**. Independent read-only review found
+no blocking defect. The clean Python 3.12 complete suite returned **1443 passed,
+77 subtests passed** in 105.92 seconds, with no skips. Final static and CI-isolation
+checks are recorded in the maintenance commit report.
+
+This is **in-process on-disk drift containment**, not complete dependency, executed-
+bytecode, loaded-memory or independently trusted pre-execution attestation. Nested SDK
+modules, other dependencies, standard library/bytecode and the external trusted
+launcher/immutable image remain Batch 0 exits. The changed manifest invalidates earlier
+approvals; never silently rewrite certificates. Fresh fetch still resolves `origin/main`
+to `a28c958800f64e802b3dfc367ac49ecf7a18e5fb`, lacking the custody prerequisite; the
+branches diverge by two remote-only and ten local-only commits before this increment.
+Publishing would implicitly publish that larger feature and require unrelated remote
+documentation reconciliation, outside this repair. No push or remote CI claim is made.
+Production and real funds remain blocked; all exercised chain boundaries were offline.
+
+### Maintenance increment — installed RPC wire-source drift (2026-10-07)
+
+**Implemented; Batch 0 and production remain blocked.** The first unresolved priority
+is complete executable-artifact identity. Existing fingerprint repairs are preserved.
+The pinned Solana RPC client imports `solders.rpc.requests` and `solders.rpc.responses`;
+the latter eagerly imports `solders.rpc.errors`. These three installed Python wrappers
+were omitted from the selected source fingerprint. This increment binds `rpc/requests.py`,
+`rpc/responses.py` and `rpc/errors.py` through non-executing discovery within the already
+validated RPC package directory. Exact conventional source-loader/origin agreement and
+flat-module shape are required. Existing bounded nonblocking reads and whole-manifest
+metadata/discovery rechecks apply; invalid evidence refuses before permit consumption.
+
+All three collected byte-drift regressions first reproduced unchanged build identity.
+They now require changed identity without executing inspected sources. An independent
+AST inventory checks the installed client imports and the response-to-error dependency.
+Expanded tests cover missing/empty/non-file/unreadable files, invalid loaders/origins,
+namespace/package substitution with cold parents, read/open/discovery races, unchanged
+witness permits and custody bytes on rejection, and exact claim/completion/sealing.
+The eight-module focused gate returned **637 passed**; the standalone source/native SDK
+shard returned **514 passed**. Independent read-only review found no blocking defect.
+The clean Python 3.12 full suite returned **1522 passed, 77 subtests passed** in 106.01s,
+with no skips. CI-isolation shards returned **35 passed/52 subtests**, **36 passed/52
+subtests** and **85 passed**. Final static/index and publication results accompany the
+maintenance commit report.
+
+**Work-item grounding:** O4 attributable settlement/bounded risk and O1 inspectable
+artifact evidence; settlement remains an explicit non-Atlas customer hypothesis.
+Component owner is swapService startup/witness; the scheduled maintainer acts under the
+operator's one-issue maintenance authorization. Production paths are
+`src/custody_admission.py`, pinned `solana==0.36.9` and `solders==0.26.0`; collected tests
+are `tests/test_custody_solders_sources.py` and `tests/test_custody_solders_artifact.py`.
+No financial authority, dependency upgrade or live-chain operation is added.
+
+Publication base is `8f710dd3a4c7227e668bc0f72c32c038483cd92a`, matching freshly fetched
+`origin/main`; the previous prerequisite/divergence blocker is resolved for this repair.
+Runtime/test SHA-256 evidence before documentation-only recording:
+
+```text
+8c82bd6280945e7bbcb12cd154f782615d97ce3afa93f73fb631070ed0497049  src/custody_admission.py
+4d3daa508abe0b05284a47054cd8d9105f7f670bf4608f3e7a336ff69c1b8690  tests/test_custody_solders_sources.py
+e3dd097e330f6d36be84ed68b10432f45302da92c881ef0b010bf270eccbc27b  tests/test_custody_solders_artifact.py
+```
+
+This remains **in-process on-disk drift containment**, not executed-bytecode, mapped-
+memory, complete dependency or trusted pre-execution attestation. Other nested SDK
+modules, Solana/HTTP dependencies, standard library/bytecode and an external trusted
+launcher/immutable image remain Batch 0 exits. The changed manifest invalidates prior
+approvals; never silently rewrite certificates. All real-fund and release gates remain.
+
+### Current acceptance register
+
+| Area | Status | Next executable exit |
+|---|---|---|
+| Four retained-source conflict containments | **Accepted narrowly offline** | Preserve in every later batch; zero transport/full liability regressions remain collected |
+| Sealed image/witness continuity | **Implemented, partial** | Externally attest every executed byte and dependency artifact; rehearse independent deployment and restore |
+| Dashboard startup truth/read-only snapshot | **Accepted for current offline scope** | Keep missing-path/no-write and witness-transition tests; target deployment still required |
+| Heartbeat/service and chain admission | **Blocked** | Exact owner/address/schema/pair/terms plus Solana health/root freshness and Nexus sync/tip freshness before mutation |
+| Capacity eligible progress | **Blocked** | Move malformed/conflicting rows outside automatic FIFO without authorizing them |
+| Hold resolution/live acceptance | **Blocked** | Evidence-bound operator workflow and explicit devnet/testnet matrix |
+
+The sections below retain prior implementation detail and dated evidence. Their September 30 status labels
+are historical where they conflict with this register; they do not supersede the October 2 verdict.
+
+## Previous verdict — 2026-09-30
+
+**Release blocked.** Reviewed range:
+
+```text
+base:        ed73c513ee22f9626502273aa0d8e42a4c238b7a
+source:      1b267f2b708e484ec27ce53d0c85db4592d148c2
+source tree: 7eaad283abb2255b312f6e6c1dabbc9582056d03
+```
+
+Two commits since the review base add conservative startup containment. `17a9f17` holds every retained
+ordinary refund/quarantine state before its worker can derive a first disposition from current terms.
+`1b267f2` holds a ready row when any debit transaction ID, reference or frozen output remains, even if
+its input policy is valid. The first reproduced current-term Solana sends; the second reproduced a second
+mocked Nexus debit that overwrote retained debit identity. Real startup and actual-worker regressions now
+require zero transport, full liability and preserved evidence for both classes. Keep both controls.
+
+They do **not** establish coherent restore admission. Status-specific containment is not a complete
+deployment/restore identity or all-status evidence audit. General startup refusal can still look healthy
+on the dashboard, malformed capacity evidence can still starve valid work, and dashboard summary can
+create a missing database. See the [September 30 review](DEVELOPMENT_REVIEW_2026-09-30.md) and the
+[current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
+
+## Implemented containment — empty-database startup visibility
+
+**Implemented, reporting-only containment; R-1 remains open.** The read-only dashboard
+now exposes the durable empty-database admission latch in `/api/summary`, `/api/issues`
+and a prominent recovery banner. It reports total liabilities and open obligations as
+unknown rather than treating absent local rows as zero. While admission is held or its
+evidence is unreadable/malformed, backing ratio, fee totals and rolling payout usage are
+unavailable; a retained metrics snapshot cannot make the page look recovered. Local row
+counts remain explicitly local, and the backing-deficit banner cannot incorrectly claim
+refunds/quarantine continue during recovery refusal.
+
+The reader does not clear holds or write recovery state. Missing admission tables produce
+an explicit unknown status, not a healthy result; raw database errors are not published by
+the admission reader. An empty latch table means only `not_held`, with no claim of complete
+liabilities or successful recovery. Operators must restore and independently verify coherent
+custody evidence, never seed rows, clear holds or send funds manually to bypass admission.
+Collected tests in `tests/test_dashboard_recovery_admission.py` cover the real startup latch,
+retained healthy metrics, repeated reads/reinitialization, missing/malformed evidence, sanitized
+read failure, and execution of the shipped JavaScript renderer (Node.js required for that shard).
+Browser verification also exposed a pre-existing chained `Element.append()` call that broke
+nonempty issue tables; the renderer now appends the header separately so recovery issues display.
+
+This does not reconstruct principal, quantify lost liabilities, validate partial/stale restores,
+or implement source-specific authorization/resolution. Those R-1/R-3 release gates remain open.
+
+## R-1 maintenance containment — empty-database startup
+
+**Implemented, narrow containment; R-1 is not closed.** Startup now records a durable
+`recovery_admission_holds` latch when validated nonzero custody checkpoints meet a database
+with no source lifecycle rows on either chain and no durable Solana deposit holds. It refuses
+reconstruction before either chain scanner or reference seeding can make that database look
+recovered. The normal `main.run()` gate reports `empty_custody_database_recovery_held` and
+does not start pollers. Reinitialization, newer checkpoints and later source insertion do not
+clear the latch; database read/write failures also refuse admission.
+
+This intentionally blocks an empty new deployment too: there is no safe automatic bootstrap
+exception and no latch-clearing command. Restore and independently verify a coherent custody
+backup; do not seed dummy rows, alter checkpoints or delete the hold to force startup. Presence
+of some retained rows is **not** proof of complete history or backup validity. Partial/stale
+restores, databases already populated by an older unsafe replay, source-specific reconciliation,
+quantified recovery visibility and an audited bootstrap/resolution protocol remain open under
+R-1/R-3. No principal is reconstructed by this containment path, so an empty dashboard after
+refusal must not be interpreted as zero liabilities or safe backing.
+
+Collected coverage in `tests/test_empty_database_recovery.py` exercises the real startup caller
+after DB/WAL loss of below-minimum, nonpositive-output, refund-cap and quarantine-cap holds;
+durable refusal across restarts; persistence failures; and online-backup/DB+WAL restoration of
+original disposition terms with exactly one mocked submission. Existing scanner tests retain
+source history to exercise reconstruction past this new admission gate. All chain boundaries
+are offline; this is not live-chain acceptance or independent release approval.
+
+## Independent re-evaluation — 2026-09-28
+
+The three newer repairs close the exact source-admission paths they claim:
+
+1. unseen Solana inputs at or before the startup boundary become quantified historical-authorization
+   holds through both core and Helius page committers;
+2. retained ready rows with no policy become non-sendable before reconstruction; and
+3. retained ready rows with partial, malformed, source-conflicting or nonpayable policy receive the same
+   hold without rewriting their raw evidence, principal, reservations or capacity evidence.
+
+The focused two-module shard returned **49 passed**. The three direct actual-worker families returned
+**23 passed** across both providers, four lost-policy dispositions, three timestamp classes and twelve
+invalid-policy forms. They exercised the real startup, deposit, refund and quarantine workers with only
+external transport and provider boundaries replaced.
+
+Fresh residual probes found that a retained row already labelled `to be refunded` or
+`to be quarantined`, with both policy fields absent, is not audited because startup selects only
+`ready for processing`. Recovery returned complete and each real disposition worker made one mocked
+1,090-unit send from 1,100 units using the current 10-unit refund fee and current destination. This is
+the same missing historical-authorization class in a different lifecycle state, not a failure of the
+three narrower accepted controls.
+
+The previously reported malformed-oldest capacity starvation, stale healthy dashboard after heartbeat
+failure, and database creation by a missing-path summary read also reproduced unchanged. No live chain,
+production credential or real send was used. See the [September 28 review](DEVELOPMENT_REVIEW_2026-09-28.md);
+[September 25](DEVELOPMENT_REVIEW_2026-09-25.md) remains the pre-repair baseline.
+
+## Independent re-evaluation — 2026-09-30
+
+The published `17a9f17` ordinary-disposition fix closes the September 28 mocked-send reproductions:
+startup changes retained ordinary refund, quarantine and legacy failed-quarantine rows to the existing
+historical-authorization hold before either disposition worker can select them. Policy validity,
+timestamp, worker limit and retained capacity/terminal siblings do not exempt an inconsistent source
+status. Raw evidence, reservations and full principal remain unchanged.
+
+Review then found a sibling lifecycle conflict at `17a9f17`: a retained ready row with valid payable
+policy plus any previous debit-submission field remained selectable. In an isolated copy of that exact
+source, the new regression module returned **41 failures**; the transaction-ID-only case called the mocked
+Nexus debit a second time for 1,090 units and replaced its prior identity. `1b267f2` adds one atomic SQL
+containment before policy validation: any non-NULL debit transaction ID, reference or frozen output holds
+the row. Blank, zero, negative and malformed values also hold because none proves non-submission.
+
+The two real-worker modules now return **159 passed**. They cover ordinary dispositions, valid/invalid
+policy, every debit field alone and combined, absent/expired/active reservations, repeated startup, both
+page committers, rollback, timestamps outside scan ranges, worker-limit progress and unchanged in-flight
+states. This accepts both commits only as narrow containment. Coherent restore identity, complete per-state
+evidence schemas, Nexus-side recovery and audited hold resolution remain open.
+
+An isolated candidate containing the maintained architecture, plan and review update returned
+**775 passed, 77 subtests passed**. Dependency consistency, byte compilation, local Markdown links,
+the index-aware token-pair inventory (274 active lines), candidate/range whitespace and all three CI
+isolation shards passed. Local execution does not establish target-chain semantics or release approval.
+
+Fresh offline probes also reproduced malformed-oldest capacity starvation, stale healthy dashboard data
+after heartbeat-missing startup refusal, and creation of a missing SQLite file by a dashboard summary read.
+The current heartbeat validator still alerts and continues rather than forming a fail-closed chain/provider
+identity gate. No live chain, production credential or real send was used.
+
+## Architecture and verified progress
+
+One process bridges one configured classic SPL token ↔ Nexus token pair. `config.SWAP_PAIR`
+contains token/custody identity, independent decimals and fee terms. Gross conversion is 1:1 in
+whole-token units before fees/rounding, not market pricing. Native SOL, Token-2022, arbitrary
+chains and simultaneous pairs remain outside scope. Helius is a trusted primary provider; a
+second attestor is not required. Exact amounts, success/finality and complete enumeration remain
+application responsibilities.
+
+| Area | Current implementation and acceptance boundary |
 |---|---|
-| Trusted Helius ingestion | Full parsed pages, fixed query identity and atomic provider-token persistence are integrated. Endpoint precedence, known-network conflict rejection and unambiguous API-key network selection are regression-tested. The final review exposed an already-finalized replay bypass; replay now validates the actual provider endpoint before every promotion. Independent closure review passed. |
-| Finality and unsupported evidence | Holds freeze provenance and retain principal as a liability; unknown amounts fail accounting closed. Public recovery waterlines remain behind holds. Replay uses ≤256-signature status batches, validates all batches before promotion and fairly reaches beyond 1,000 holds. Liability reads use one SQLite snapshot during concurrent promotion. |
-| Classic SPL parsing | Exact vault deltas support ordinary classic-SPL transfers. A matching outer ATA-create/inner-initialization bundle is recognized as one creation; ambiguous sources, duplicate or conflicting evidence remain held. |
-| Refund/quarantine recovery — E-015, E-018 | Current versioned dispositions reconstruct exact source/terminal evidence, fees and rolling-cap spend. Recovery rejects active Nexus mint conflicts and normalizes missing memos consistently. Focused recovery and installed-SDK gates pass. |
-| Receipt outbox — E-016 | Settlement atomically retains an owner-independent obligation. Builder/payload failures enter explicit manual review. The shared all-string schema rejects overflowing JSON numbers before coercion; publication continues to valid later rows. Authenticated owner binding and budgeted one-shot creation remain separate. Focused independent receipt review/testing passed; its optional hash audit was incomplete. |
-| Simplification — E-010 | Shared receipt contract, one authoritative durable ingestion/admission path, one registration lookup per publication batch and completed-query seen-row cleanup reduce duplicate policy and work. Non-durable scanner helpers and the budget-bypassing receipt claim were retired; database compatibility remains supported. |
-| Test isolation — E-005, E-017 | Shared offline defaults support standalone modules, real installed-SDK checks and deposit/critical-safety collection in both orders. These gates pass on the current candidate. |
+| A — disposition recovery, E-015/E-018 | Strict provenance parsing, conservative legacy-terminal migration, full-principal evidence holds, inferred-fee reversal and preserved proven cap spend. Atomic DDL/data rollback, in-place upgrade, online-backup and copied DB+WAL tests pass. This does not reconstruct an unsent B/C authorization that was lost with SQLite. |
+| B — Solana input policy | Shared strict-integer minimum/maximum/decimal/fee classifier runs before destination routing. Below-minimum/nonpositive-output holds retain principal without fees. Frozen decisions survive restart **when the database survives**. |
+| C — typed capacity holds | Durable typed outcomes, exact capacity diagnostics, liability/alert visibility, original-term retry and eligible FIFO are implemented for valid retained evidence. An individually impossible payout does not starve fitting work. A malformed oldest hold is fail-closed but can globally block a later valid fitting hold; see R-1b. Frozen retry requires retained intent evidence. |
+| Ingestion/finality | Positive principal is durably retained; query/provider continuation is bound; unsupported/finality evidence is held; liability totals use one SQLite snapshot. Public waterlines pin behind unresolved sources. Source rediscovery alone does not reconstruct historical authorization. |
+| Nexus identity/reconciliation, E-001–E-004/E-014 | Composite `(txid, contract_id)` identity, exact payout evidence, integer math and fail-closed backing controls remain. Automatic Nexus compensating transfers remain disabled; a narrow explicit operator protocol exists. |
+| Optional receipts, E-016 | Durable outbox and independent positive-evidence/budget controls remain; production enablement is separately blocked pending cost/schema/target-chain acceptance. |
+| Provider-v2 | Builder/validator and tests are committed, but registration, heartbeat, recovery and inspection still use v1. This is library-only implementation, not a default-v2 runtime migration. |
 
-### Verified current candidate
+See [state machines](STATE_MACHINES.md) and the published
+[historical A/B/C acceptance record](RECOVERY_INPUT_CAP_ACCEPTANCE.md). That tracked record documents
+the original tested scope; the total-loss and scheduler qualifications in this evaluation are newer.
 
-The parent reran these gates against a disposable index containing the actual working candidate,
-including new files. The real staged entries were byte-for-byte unchanged by that verification.
+## September 30 findings retained for traceability
 
-| Gate | Actual result |
+The October 2 acceptance register supersedes statuses in this section. R-1c and R-1d are implemented in
+the staged offline witness/dashboard candidate but remain integration-gated by artifact and witness
+operations. R-2 is no longer alert-and-continue, yet exact heartbeat identity and node freshness remain
+blocked. R-1b, R-3 and live/provider gates remain open.
+
+### R-1 — Historical partial/stale restore analysis
+
+The empty-database latch and three new Solana controls are useful containment, not a coherent-restore
+protocol. Table non-emptiness still permits startup without proving that policy, capacity, fee, cap and
+terminal evidence belong to one complete generation. The previous source-only-ready replay to a current-
+term Nexus debit is now blocked by `record_solana_recovery_boundary()` and the page-commit boundary.
+
+The reviewed residual path was a retained **non-ready** source. That startup audited only
+`status = 'ready for processing'`. A partial restore can retain `to be refunded` or
+`to be quarantined` while losing both policy fields and any frozen capacity intent. Fresh offline probes
+at the reviewed source made recovery report complete and then exercised each real disposition worker.
+Each called the mocked Solana send boundary for 1,090 units from a 1,100-unit source using the current
+10-unit fee and current resolved destination. The full principal remained a local liability pending
+confirmation, so this proves replacement of historical authorization and one externally attempted send,
+not realized loss or duplicate settlement.
+
+Relevant code at the reviewed source was `state_db.py:1805-1853`, auditing only ready rows, and
+`solana_client.py:1267-1602`, where new non-capacity disposition work derives fee and destination from
+current configuration when no frozen capacity intent exists.
+
+**Containment:** keep the empty-DB latch and all three new holds. Do not treat any nonempty/partial database
+as verified; resume an existing deployment only from independently validated coherent DB+WAL/online-
+backup evidence, otherwise remain paused. Do not manually run refund or quarantine workers over restored
+rows whose frozen policy/capacity intent is absent or inconsistent.
+
+**Implemented maintenance containment — unseen pre-startup Solana inputs:** startup now persists
+an additive, monotonic `solana_recovery_boundary` before chain reconstruction. Both deposit page
+committers retain a previously unseen source at or before that boundary as
+`historical_solana_authorization_missing` rather than `ready for processing`. The full observed
+principal, source and custody/query provenance remain in `solana_deposit_holds`; liabilities and
+checkpoint pinning include those rows. Historical holds cannot be automatically promoted, including
+through repeated pages or direct hold replay, and are excluded before the automatic replay limit.
+The dashboard issues endpoint exposes them with exact integer principal and a no-manual-send warning.
+Retained lifecycle/finality/parser rows are not reclassified by this unseen-source containment; the
+additional source-only ready-row containment below applies at startup.
+
+This is **not R-1 closure**: the boundary is the greater of the startup local timestamp, Solana
+checkpoint and previously retained boundary, not an independent restore manifest or authoritative
+chain-clock certificate. Inputs received while offline can conservatively require permanent holds
+until an audited resolution protocol exists. Pre-fix replay rows, partial restores containing an
+incomplete lifecycle component, unseen sources outside enumeration, Nexus-side reconstruction and
+clock/identity assurance remain open. Do not infer complete liabilities from startup success or use
+post-boundary timestamps as proof of a coherent restore. Empty-database startup still refuses replay.
+
+Collected coverage in `tests/test_partial_restore_deposit_recovery.py` exercises stale backups retaining
+one unrelated processed source after lost below-minimum/nonpositive/refund/quarantine decisions, both
+page committers, changed terms, multiple pages, cutoff equality, restart/duplicate replay, full liability,
+zero mocked sends, retained hold eligibility, query rollback, upgrade and persistence failures.
+
+**Implemented maintenance containment — retained source-only ready rows:** in the same startup
+transaction as the replay boundary, every retained `ready for processing` Solana row with both
+`policy_decision` and `policy_evidence` absent becomes `historical_solana_authorization_missing`.
+No timestamp or worker-limit exemption applies. Source fields, full principal, submission metadata,
+reservations and capacity evidence are not rewritten or released. Existing liability/checkpoint logic
+continues to include these non-sendable rows; the dashboard exposes their hold without suggesting
+that retained capacity evidence authorizes retry. Reinitialization and duplicate pages cannot promote them.
+
+The regression first reproduced a current-term Nexus debit from a retained source-only row. Collected
+coverage in `tests/test_retained_source_recovery.py` now verifies zero transport for that case, sources
+older than scan ranges and newer than the local clock, repeated startup, both page committers, more
+held rows than the worker limit, preserved capacity evidence, and atomic rollback/refusal on a failed
+hold write. Positive controls retain the original frozen policy through terms drift and admit genuinely
+new post-startup sources. Existing online-backup/DB+WAL capacity-intent tests remain applicable.
+
+**Implemented maintenance containment — invalid retained ready-row policy:** startup now validates
+every retained ready row's frozen policy with the strict policy parser and exact source comparison.
+Partial fields, malformed evidence, mismatched source/decision, and an internally valid nonpayable
+decision on a ready row become the same non-sendable historical-authorization hold. No current
+configuration repairs the stored evidence. The boundary and all status changes commit atomically;
+raw evidence, principal, reservations, submission metadata and capacity evidence remain untouched.
+These holds are visible in the existing dashboard issue queue and cannot monopolize the ready-worker
+limit. Valid matching payable policy continues under its original terms after configuration drift.
+
+Collected regressions in `tests/test_retained_source_recovery.py` cover partial fields, corrupt JSON,
+all frozen source fields, decision/output conflicts and nonpayable-ready state, repeated startup and
+both replay providers, zero transport/fees for affected sources, full liability, capacity/reservation
+preservation, failed-write rollback and younger valid work behind more held rows than the worker limit.
+
+This remains **narrow R-1 containment**, not closure. A crash after source admission but before the
+first policy freeze now conservatively requires an audited resolution that does not yet exist.
+Pre-fix rows already classified under replacement terms, apparently valid policy alongside missing
+lifecycle components, remaining non-ready states and Nexus-side recovery still require the broader admission protocol.
+Do not clear or manually retry these holds; production remains blocked.
+
+**Implemented maintenance containment — retained ordinary dispositions:** the same startup transaction
+now moves every retained `to be refunded`, `to be quarantined` and `quarantine failed` source to
+`historical_solana_authorization_missing`, independent of timestamp, worker limit or policy validity.
+Those worker paths create a first disposition using current fee/destination terms; even a valid input
+policy does not authorize that replacement. A retained capacity/terminal sibling cannot exempt an
+inconsistent ordinary source status. No policy, principal, reservation, submission metadata or capacity
+evidence is overwritten. Existing dashboard warnings, liability accounting and checkpoint pinning apply.
+
+Collected real-startup/worker regressions in `tests/test_retained_source_recovery.py` first reproduced
+the unauthorized mocked sends. They cover all three ordinary states, missing/partial/corrupt/conflicting
+and valid input policies, terms drift (including a fee consuming all principal), restart, both replay
+providers, rollback/refusal on persistence failure, retained reservations/capacity evidence, and more
+held rows than the worker limit ahead of a younger valid original-term capacity retry. Existing online-
+backup and DB+WAL restore tests still verify exact frozen capacity-intent sends.
+
+This is deliberately conservative: legitimate work interrupted before disposition freeze is also held,
+with no manual bypass or audited release command. Frozen-capacity and in-flight/finality protocols are
+unchanged, not newly certified. Valid ready policies can still coexist with missing lifecycle components;
+all-status restore identity/completeness, Nexus-side recovery and operator resolution remain open.
+**R-1 and production release remain blocked.**
+
+**Implemented maintenance containment — ready rows with retained debit metadata (2026-09-30):**
+startup now also holds every retained ready row with a non-NULL `txid`, `reference` or
+`amount_usdd_units`, including blank, zero and malformed values. Valid payable input policy is not
+proof that an earlier debit was never submitted. A partial restore retaining only a prior transaction
+ID alongside a ready status previously reached a second mocked Nexus debit and overwrote that ID.
+The new status-only update commits atomically with the replay boundary and existing startup audits;
+raw policy/submission evidence, full principal and active/expired reservations remain unchanged.
+No current terms repair the row and no manual retry or hold-clear command is introduced.
+
+`tests/test_retained_ready_submission_recovery.py` covers isolated/combined metadata, absent/expired/
+active reservations, both replay providers, repeated startup, dashboard visibility, rollback/refusal,
+source timestamps outside scan ranges and beyond the local clock, and more held rows than the worker
+limit ahead of one valid original-term debit. Existing in-flight states are explicitly unchanged.
+This closes only an inconsistent-ready-state path: valid ready rows with other missing/conflicting
+lifecycle components, capacity/finality states, Nexus-side restore admission and coherent-restore
+identity remain unaudited by this slice. **R-1 and production release remain blocked.**
+
+**Exit:** bind admission to a complete restore/deployment identity, or audit every retained and
+rediscovered nonterminal lifecycle state before any worker can select it. A row without exact historical
+policy, disposition and submission evidence must become a quantified, visible, non-sendable recovery
+hold; current configuration cannot fill missing fields. Test stale/partial/pre-fix restores containing only
+one lifecycle component, every ready/refund/quarantine/in-flight/capacity status, both disposition workers,
+terms drift, multi-page replay and worker limits. Require zero transport, full liability and no inferred fee
+absent exact historical authorization.
+
+### R-1b — High operability: malformed oldest capacity evidence blocks later valid retries
+
+The retry protocol correctly refuses malformed frozen evidence and retains all principal. However,
+its global FIFO query still treats that unresolved row as the oldest eligible hold. A fresh real-worker
+probe created two ordinary refund capacity holds, corrupted only the older hold's frozen JSON, released
+the blocking budget, and ran the worker twice. Both runs returned zero; the valid younger 50-unit
+refund remained `refund capacity held`, its attempt count increased from 1 to 3 with reason
+`waiting behind older Solana payout capacity hold`, zero sends occurred, and the full 120-unit
+liability remained. This is safe containment, but not progress or the claimed eligible-FIFO behavior.
+The probe is session scratch only; its SHA-256 and exact output are recorded in the September 23 review.
+
+Relevant code is `state_db.py:4158-4214,4770-4830` and
+`solana_client.py:1289-1409`: loading the oldest hold returns `malformed_evidence`, while the later
+valid prepare still selects that malformed source in the global oldest-hold query. The existing
+suite covers malformed refusal, but not a younger fitting obligation behind it.
+
+**Exit:** keep malformed/source-conflict/unknown-submission evidence non-sendable, but remove it from
+automatic eligible FIFO after atomically promoting it to a distinct operator-action queue, or define
+another durable scheduler disposition that cannot authorize transport. Add real refund and quarantine
+worker tests with a malformed/conflicting oldest row, more rows than the worker limit, restart, alert
+deduplication and later reviewed resolution. Require the younger valid original intent to submit
+exactly once without deleting or reducing the blocked row's liability.
+
+### R-1c — Superseded offline: current witness makes startup refusal externally durable
+
+The current implementation replaces absence-of-latch readiness with external `ready/claimed/running/held`
+evidence plus a local live-process receipt. Recovery, session and heartbeat failures occur before
+`running`; failed/ambiguous claimed generations remain non-running or permanently held. The dashboard
+suppresses retained healthy values unless the same exact running lease brackets its snapshot. Focused
+runtime/dashboard tests cover failure boundaries and witness changes. Keep this integration-gated until
+artifact identity and independent witness deployment are accepted.
+
+### R-1d — Superseded offline: current dashboard is read-only and snapshot-consistent
+
+The current dashboard uses one `mode=ro` SQLite transaction for summary counts, metrics and payout exposure,
+then rechecks the witness lease. Missing-path tests prove no DB creation; concurrent-write tests prove one
+snapshot. Preserve these tests against the final artifact and deployment.
+
+### R-2 — Partially superseded: fatal validation remains identity/freshness-incomplete
+
+Heartbeat false/exception now returns before lease completion and workers, and both chain genesis values
+are pinned before database migration. However the heartbeat validator still accepts an object with a
+mismatched address, owner, provider, pair and vault when its name resolves and three fields parse.
+Genesis-only checks do not require Solana health/root freshness or Nexus sync/mode/network/tip freshness.
+Session/heartbeat validation also follows database migration and recovery scans.
+
+**Exit:** bind exact service-record address, owner, schema, pair/custody identity and terms, and require
+authoritative chain health/sync/freshness before mutable startup. Test mismatch, unavailable evidence,
+stale/unsynced nodes, wrong types and validator exceptions with zero database/scanner/poller/chain-write
+calls; validate semantics on intended nodes.
+
+### R-3 — High operability gate: non-capacity Solana holds lack audited resolution
+
+Capacity-only holds can retry their retained original intent. Policy, recovery-evidence,
+malformed-evidence, source/lifecycle-conflict and unknown-submission holds have no corresponding
+audited Solana resolution command. Dashboard visibility is not a disposition protocol.
+`nexus_transfer_operator.py` handles only an exact Nexus refund-hold family; actor strings do
+not enforce distinct human approval roles.
+
+**Do not follow** the direct-chain-transfer/manual-DB advice in `quarantine_viewer.py:409-418`.
+It bypasses intent/cap/evidence protocols. The source text is flagged for repair, not changed in
+this documentation-only review.
+
+**Exit:** implement an evidence-bound operator protocol, or explicitly approve permanent retention
+as policy. Require actor/rationale, competing-state checks, authoritative exact readback,
+capacity accounting, atomic terminalization, replay/crash tests and no blind retries. If two-person
+approval is required, enforce distinct identities rather than merely recording labels.
+
+### R-4 — Publication gate: verify the documentation candidate and published SHA
+
+[CI run 36316328344](https://github.com/distordialabs-brutus/swapService/actions/runs/36316328344)
+completed successfully for exact source SHA `6769f7a1bb68dd2a975f4b39aa910f2405d38d42`.
+Local exact-source dependency, compile, Markdown, inventory, full-suite, isolation and whitespace gates
+also pass. This establishes the source baseline only; the documentation changes described here were not
+part of that run.
+
+**Exit:** stage only the explicitly reviewed documentation paths, run the index-aware inventory and
+candidate whitespace/link/full-suite gates against that exact index, commit, push, read back the remote
+branch SHA, and verify CI for that SHA. Preserve the unrelated dirty/untracked September 22 files and
+untracked vision context; do not publish them implicitly.
+
+### R-5 — Provider-v2 cutover remains a separate, blocked migration
+
+`src/service_record.py` has no production importer. `ALLOW_LEGACY_PROVIDER_V1` is parsed but
+inert; runtime v1 is not disabled by its false default. Immutable asset address, expected owner,
+service ID and Nexus network settings do not currently protect registration/recovery callers.
+The reviewer and parent measured the v2 fixture with `last_poll=0` at 1,448 bytes using the repository's
+`service_record_size()` estimator, above its declared 1,024-byte budget. This is **not** proof of
+the target node's exact encoded size limit; it blocks assuming the proposed record fits.
+
+**Exit:** choose and verify a target-valid storage layout before any NXS-spending create, then
+wire address-selected create/read/update, startup, heartbeat and recovery to one identity policy.
+Enforce explicit legacy opt-in, exact owner/type/schema/service/pair/custody, monotonic terms,
+secret-safe publication and agreement between published economics and executable policy. Test
+multiple assets, name/address disagreement, readback delay, oversize rejection and migration on
+the intended Nexus build. Provider-v2 is not a prerequisite to repairing R-1 in the existing
+single-pair bridge; committing the library does not make it integrated.
+
+## Fresh verification at the reviewed runtime — 2026-09-28
+
+The exact tracked source ran in a detached disposable Git worktree, excluding every pre-existing dirty or
+untracked documentation path. External boundaries were mocked or blocked; no real transaction was made.
+
+| Executed gate | Result |
 |---|---|
-| Full pytest suite | **405 tests + 71 subtests passed** |
-| Helius ingestion + deposit scanner | **70 tests passed** |
-| Recovery standalone | **33 tests + 46 subtests passed** |
-| Recovery + installed-SDK boundary | **34 tests + 46 subtests passed** |
-| Receipt + payout + Nexus fee lifecycle + SDK | **85 tests passed** |
-| Deposit then critical safety | **169 tests + 25 subtests passed** |
-| Critical safety then deposit | **169 tests + 25 subtests passed** |
-| Dependency consistency / compilation / Markdown links / whitespace | Passed |
-| Candidate token-literal inventory | Passed; **274 active lines** |
+| Exact-source complete suite | **641 passed, 77 subtests passed in 81.69s** |
+| New partial/retained-source modules | **49 passed in 6.47s** |
+| Three direct actual-worker regression families | **23 passed in 3.68s** |
+| Recovery standalone | **35 passed, 52 subtests passed in 2.59s** |
+| Recovery plus installed SDK | **36 passed, 52 subtests passed in 2.97s** |
+| Receipt/payout/Nexus-fee/SDK shard | **85 passed in 6.23s** |
+| Dependency consistency, exact compilation and Markdown links | Passed |
+| Token-literal inventory | Passed; **274 active lines** |
+| Range and last-source-commit whitespace | Passed |
+| Residual actual-worker probe | Refund and quarantine each reached one mocked 1,090-unit send without frozen policy |
+| Three unchanged-risk probes | Reproduced capacity starvation, stale dashboard readiness and missing-path DB creation |
 
-These are offline results, not live-chain acceptance. The final independent ingestion review and
-its narrow replay-provider closure review completed; the latter independently passed the same
-70-test ingestion/scanner suite and additional core-replay probes. Runtime code was held unchanged
-during that review and the final full-suite verification. See the [repair report](POST_CHANGE_REVIEW_2026-09-13_BLOCKERS.md).
+Remote `main` resolved to the reviewed source, and exact-source CI run 36316328344 is green. That CI does
+not cover the documentation candidate. The untracked vision was read as context and not linked as a
+published source; all pre-existing dirty/untracked paths retained their original hashes. Exact commands,
+outputs and source hashes are retained in the complete local findings artifact for this review.
 
-### Applied cleanup and deliberately retained boundaries
+## Development and release sequence
 
-- Removed `fetch_incoming_deposits_via_helius`, `_fetch_deposits_helius`,
-  `_fetch_deposits_core_rpc`, `process_helius_deposits`, `core_get_transactions_for_address`
-  and `get_signatures_confirmation`; parser/SDK coverage now exercises authoritative scanners.
-- Removed the ingestion `min_units` parameter: all positive principal must enter the liability
-  lifecycle, where processing policy may classify it. History filtering cannot discard it.
-- Centralized pure receipt schema/name validation in `receipt_contract.py`; independent exact-payout
-  validation at the database boundary remains intentional defense, not duplicate code to delete.
-- Purged completed-query `scan_seen` rows atomically and reused provider registration within a receipt
-  batch. Kept immutable hold provenance, explicit unknown-outcome states and frozen database names.
-- Deferred broader typed-evidence/DB-layer restructuring and combined recovery-history projections:
-  these change safety-critical interfaces and are not justified as cosmetic cleanup.
+1. **Close artifact identity first:** externally bind `swapService.py`, every runtime module, interpreter
+   and installed dependency artifact before any repository code can execute or claim a witness permit.
+2. Preserve all four published restored-source containments and the current exact-image/witness state
+   machine; independently approve image financial coherence rather than equating a matching hash with it.
+3. Bind the exact heartbeat owner/address/schema/pair/custody/terms and require Solana health/root freshness
+   plus Nexus sync/mode/network/tip freshness before mutable startup.
+4. Operationalize independently administered witness bootstrap/restore, then move invalid capacity evidence
+   outside eligible FIFO without making it sendable and add evidence-bound Solana hold resolution.
+5. Keep provider-v2 and receipts disabled/unclaimed as runtime capabilities until their separate
+   migration/cost gates pass. Preserve compatibility; no dependency upgrade is part of this review.
+6. On explicitly approved Solana devnet/Nexus test infrastructure, run both directions, mixed decimals,
+   provider pagination/concurrent arrivals, finality, exact readback, Nexus references,
+   accepted-but-unparsed/timeout outcomes, durable-boundary crashes, backup/WAL and total-loss recovery.
+   Rehearse witness loss/ambiguity, alerts, holds, incident response, key rotation and TLS/session controls.
+7. Re-review the final immutable artifact, run the complete configured gate, verify exact-head CI, then make
+   a separate release decision. Production and real funds remain blocked; no live acceptance was performed.
 
-## Existing controls retained
-
-- **E-014:** Nexus source identity is `(txid, contract_id)` throughout admission, payout memos,
-  operator intents and terminalization; an unpaid sibling remains independent. Legacy identity
-  sentinels cannot authorize a guessed fresh transfer.
-- **E-001 / E-007:** automatic Nexus refunds/quarantine remain disabled. The separate operator
-  workflow prepares, authorizes, executes once, resolves positive evidence and finalizes one exact
-  source. Live operational acceptance remains required.
-- **E-002:** no heuristic amount filter hides Nexus credits. Mutable multi-page offset scans hold
-  checkpoints; processing-only passes cannot claim enumeration completeness.
-- **E-003 / E-004:** exact mixed-decimal money calculations and durable completed-payout evidence
-  support fail-closed reconciliation. Errors/unhealthy results latch an exposure pause.
-- **E-008 / E-009 / E-012:** explicit production admission requires configured pair/fee terms,
-  positive exposure caps, alerting, quarantine destinations and authenticated Nexus HTTPS transport.
-  The dashboard uses bearer-header authentication, not query tokens. Live TLS/proxy/alert verification
-  remains an operator gate.
-- **E-013:** earlier compatibility-tested dependency remediation is retained. This repair does not
-  upgrade dependencies; a dependency-consistency check is not a fresh vulnerability audit.
-- **E-011:** current documentation is separated from historical evidence. Persisted legacy names
-  are migration contracts, not proof that the bridge only supports its original token pair.
-
-## Remaining release gates
-
-### Local candidate gate — completed for this working tree
-
-- Full suite, focused financial regressions and installed-SDK/config-order shards passed.
-- Dependency consistency, byte compilation, local Markdown links and whitespace passed.
-- Token-literal inventory passed against the actual candidate in a disposable index; real staged
-  entries were unchanged. The working candidate has not been staged or committed.
-- Independent reviews identified concrete blockers, each corrected and regression-tested; the last
-  closure review passed with no logic/security findings. Runtime was frozen for that in-place review.
-  The earlier optional receipt hash audit did not complete; no signed/full hash attestation is claimed.
-
-Any subsequent runtime edit requires renewed affected-path review and test verification.
-
-### Target-chain acceptance — E-006
-
-These are **not established by offline fixtures**:
-
-- Helius target-network history, real nested transaction shapes, continuation/restart, confirmed
-  versus finalized behavior and concurrent arrivals over bounded ranges.
-- Both bridge directions, mixed decimals, refund/quarantine, and exact authoritative readback.
-- Accepted-but-unparsed responses, timeout before/after acceptance, crashes at durable boundaries,
-  backup/WAL restore and database-loss reconstruction without skipped deposits or double payout.
-- Nexus reference/contract fields, pagination/completeness, TLS and POST semantics on the intended build.
-
-No live financial transaction is authorized by this repair. Run the matrix on explicitly approved
-Solana devnet and Nexus test infrastructure before any production decision.
-
-### Optional receipts — E-016
-
-Receipt assets and names spend operator NXS. Keep `NEXUS_SWAP_RECEIPTS_ENABLED=false` for production;
-the admission gate still rejects an explicit enablement. Required separate acceptance covers the
-actual creation/name cost, budget adequacy, timeout-after-acceptance, indexing delay, exact owner and
-payload readback, duplicate detection, and receipt-capable registration migration. A fixed-field v1
-asset cannot gain `receipt_schema` through a heartbeat update.
-
-### Operations — E-007 / E-009
-
-Rehearse hold resolution, alert delivery, incident response, backups and key rotation. Maintain
-independent authorization for ambiguous financial dispositions. Unknown/legacy evidence remains
-held, not silently rewritten or released by an upgrade.
-
-## Prioritized development plan
-
-1. **Completed:** repair and independently review this local candidate; preserve safety controls and compatibility.
-2. Execute the target-chain matrix and operator rehearsals with recorded authoritative evidence.
-3. Enable optional receipts only after their separate cost/schema gate; otherwise leave them disabled.
-4. Pursue provider-v2 and remaining configuration consolidation as a separate versioned migration.
-
-### Batch 7 — Complete configurability and provider asset v2 **(in progress; provider v2 remains documentation only)**
-
-The implemented canonical pair object is not the planned provider-v2 contract. Remaining work:
-
-- Consolidate network, custody, complete fee/minimum/dust terms and a deterministic terms fingerprint.
-- Replace named-v1 heartbeat identity with an explicitly selected immutable asset address; validate
-  owner, `distordia-type=swapService`, schema, `service_id` and complete pair/custody identity.
-- Create a new complete fixed-field registration rather than relabelling v1, with an explicit
-  compatibility release and migration evidence.
-- Test multiple services/assets per signature chain, address/name disagreement, altered terms and
-  every configured fee/decimal/legacy-alias conflict. Never select the first type match.
-- Publish only non-secret identity, terms, custody, status and liveness data; never private RPC URLs,
-  PINs, sessions or keys.
-
-See the [planned standard](../ASSET_STANDARD.md#provider-swapservice-asset-standard-v2-planned),
-[configuration reference](../CONFIG.md), [state machines](STATE_MACHINES.md), and
-[token-literal inventory](TOKEN_PAIR_LITERAL_INVENTORY.md). Provider-v2 is not a prerequisite to
-correctly repairing the existing single-pair bridge, and is not implemented by this batch.
+The executable current plan is the
+[September 25 recovery admission and capacity-fairness plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md).
+The [October 2 review](DEVELOPMENT_REVIEW_2026-10-02.md) is the current dated evidence. The
+[September 23 follow-up](plans/2026-09-23-financial-recovery-follow-up.md) and original
+[A/B/C implementation plan](plans/recovery-input-cap-repairs.md) remain historical implementation records.

@@ -17,7 +17,7 @@ from solders.transaction import Transaction, VersionedTransaction
 from solders.message import Message
 from struct import pack
 import threading, queue
-from . import state_db, nexus_client, nexus_memo
+from . import state_db, nexus_client, nexus_memo, solana_deposit_policy
 import time
 
 from . import config, structured_logging
@@ -708,12 +708,14 @@ def _scan_incoming_deposits_helius(
 
 def replay_solana_deposit_holds(limit: int = 1000) -> int:
     """Fairly reparse holds without changing their frozen custody/finality provenance."""
-    held_rows = state_db.get_solana_deposit_holds(limit)
+    held_rows = state_db.get_solana_deposit_holds(limit, include_historical=False)
     candidates: list[tuple[dict, str | None, str | None, int, bool]] = []
     current_vault = str(getattr(config, "VAULT_USDC_ACCOUNT"))
     current_mint = str(getattr(config, "USDC_MINT"))
 
     for row in held_rows:
+        if row["reason"] == state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING:
+            continue  # Revalidated chain input cannot restore a missing authorization.
         state_db.record_solana_deposit_hold_replay_attempt(row["signature"])
         provenance = {
             "network": row.get("network"),
@@ -985,7 +987,7 @@ def _scan_incoming_deposits_core(
         next_before = None if complete else last_signature
         if not complete and not next_before:
             raise RuntimeError("Solana cursor page has no exact continuation")
-        admitted = state_db.commit_solana_deposit_scan_page(
+        admitted, held = state_db.commit_solana_deposit_scan_page(
             vault_account=vault_account, mint=mint, network=network,
             commitment=commitment, query_identity=str(core_query_identity),
             lower_timestamp=since_ts,
@@ -993,11 +995,11 @@ def _scan_incoming_deposits_core(
             upper_timestamp=upper_timestamp, previous_timestamp=previous_timestamp,
             page_last_timestamp=page_last_timestamp,
             scanned_signature_count=len(entries),
-            deposits=deposits, holds=holds, complete=complete,
+            deposits=deposits, holds=holds, complete=complete, with_hold_count=True,
         )
         return SolanaDepositBacklogProgress(
             complete, admitted, upper_timestamp, next_before,
-            provider="core", held_count=len(holds),
+            provider="core", held_count=held,
         )
     except Exception as exc:
         _log("solana_cursor_scan_failed", level=logging.ERROR, error=str(exc))
@@ -1046,7 +1048,46 @@ def process_unprocessed_solana_deposits(limit: int = 1000, timeout: float = 8.0)
                 state_db.remove_unprocessed_sig(sig)
                 continue
 
-            # 4. Validate memo format
+            # 4. Freeze the one shared exact policy before destination validation or
+            # refund routing. Existing frozen evidence wins over changed runtime
+            # configuration after restart.
+            if type(amount_solana) is not int or amount_solana <= 0:
+                raise ValueError("Solana deposit amount must be positive integer base units")
+            terms = solana_deposit_policy.terms_from_config(config)
+            proposed = solana_deposit_policy.classify(amount_solana, terms)
+            evidence = solana_deposit_policy.freeze_evidence(
+                signature=sig, timestamp=timestamp, memo=memo or "",
+                from_address=from_address, input_units=amount_solana,
+                decision=proposed,
+            )
+            frozen = state_db.freeze_solana_deposit_policy_decision(sig, evidence)
+            decision = frozen["decision"]
+            net_amount = frozen["output_units"]
+
+            if decision in {
+                solana_deposit_policy.HOLD_BELOW_MINIMUM,
+                solana_deposit_policy.HOLD_NONPOSITIVE_OUTPUT,
+            }:
+                # Full principal remains in unprocessed_sigs as an operator-visible
+                # liability. No destination, transport, refund or fee action is allowed.
+                proc_count_mic += 1
+                continue
+
+            # Preserve the explicit oversized-refund disposition without validating
+            # a destination that will not receive a Nexus debit.
+            if decision == solana_deposit_policy.REFUND_OVERSIZED:
+                from . import alerts
+                alerts.warning("swap_over_cap",
+                               "deposit exceeds MAX_SWAP_USDC; refunding instead of swapping",
+                               sig=sig, amount_units=amount_solana,
+                               cap_units=frozen["terms_object"].maximum_input_units)
+                proc_count_refund += 1
+                continue
+
+            if decision != solana_deposit_policy.PAYABLE or net_amount <= 0:
+                raise ValueError("unsupported frozen Solana deposit policy decision")
+
+            # 5. Validate memo format for policy-eligible deposits.
             prefix = str(getattr(config, "DEPOSIT_MEMO_PREFIX", "nexus:"))
             if not memo or not memo.lower().startswith(prefix.lower()):
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid memo
@@ -1059,39 +1100,10 @@ def process_unprocessed_solana_deposits(limit: int = 1000, timeout: float = 8.0)
                 proc_count_refund += 1
                 continue
 
-            # 5. Check Nexus Nexus token account validity
+            # 6. Check Nexus token account validity
             if not nexus_client.is_valid_nexus_token_account(nexus_address):
                 state_db.update_unprocessed_sig_status(sig, "to be refunded") # invalid account
                 proc_count_refund += 1
-                continue
-
-            # 5b. Per-swap size cap: refund oversized deposits rather than minting
-            # against them. Bounds the blast radius of a bug or a hostile deposit.
-            max_swap = int(getattr(config, "MAX_SWAP_SOLANA_UNITS", 0) or 0)
-            if max_swap > 0 and int(amount_solana or 0) > max_swap:
-                from . import alerts
-                alerts.warning("swap_over_cap",
-                               "deposit exceeds MAX_SWAP_USDC; refunding instead of swapping",
-                               sig=sig, amount_units=int(amount_solana or 0), cap_units=max_swap)
-                state_db.update_unprocessed_sig_status(sig, "to be refunded")
-                proc_count_refund += 1
-                continue
-
-            # 6. Calculate amount minus fees
-            # Base units, exact integer math (no float / scientific-notation hazard).
-            net_amount = nexus_client.get_nexus_send_amount_units(amount_solana)
-            if net_amount <= 0:
-                # Bug #12 fix: Track the fee (entire deposit amount is kept as fee)
-                state_db.add_fee_entry(
-                    sig=sig,
-                    txid=None,
-                    kind="micro_deposit_fee",
-                    amount_usdc_units=int(amount_solana),
-                    amount_usdd_units=None
-                )
-                state_db.mark_processed_sig(sig, timestamp, int(amount_solana), None, 0, "processed, amount after fees <= 0", None)
-                state_db.remove_unprocessed_sig(sig)
-                proc_count_mic += 1
                 continue
 
             # 7. Debit the Nexus-side token if valid.
@@ -1207,15 +1219,60 @@ def _is_solana_wallet_with_ata(wallet_address: str) -> bool:
         return False
 
 
+def _alert_solana_disposition_preparation(preparation, *, source_signature: str, kind: str) -> None:
+    """Report durable preparation holds without changing their money-path state."""
+    from . import alerts, state_db
+
+    if preparation.status is state_db.SolanaDispositionPrepareStatus.CAPACITY_HELD:
+        alerts.warning(
+            "solana_disposition_capacity_held",
+            "Solana rolling payout cap exhausted; disposition held until capacity is available",
+            source_signature=source_signature,
+            kind=kind,
+            obligation_id=preparation.obligation_id,
+            needed_units=preparation.needed_units,
+            used_units=preparation.used_units,
+            cap_units=preparation.cap_units,
+        )
+    elif preparation.status is state_db.SolanaDispositionPrepareStatus.CURRENT_CAP_TOO_LOW:
+        alerts.critical(
+            "solana_disposition_current_cap_too_low",
+            "Frozen Solana disposition exceeds the current nonzero payout cap",
+            source_signature=source_signature,
+            kind=kind,
+            obligation_id=preparation.obligation_id,
+            needed_units=preparation.needed_units,
+            used_units=preparation.used_units,
+            cap_units=preparation.cap_units,
+            operator_action=(
+                "raise the payout cap to at least needed_units; do not send manually"
+            ),
+        )
+    elif preparation.status in {
+        state_db.SolanaDispositionPrepareStatus.SOURCE_CONFLICT,
+        state_db.SolanaDispositionPrepareStatus.MALFORMED_EVIDENCE,
+        state_db.SolanaDispositionPrepareStatus.DB_FAILURE,
+    }:
+        alerts.critical(
+            "solana_disposition_preparation_held",
+            "Solana disposition preparation failed closed",
+            source_signature=source_signature,
+            kind=kind,
+            obligation_id=preparation.obligation_id,
+            status=preparation.status.value,
+            reason=preparation.reason,
+        )
+
+
 def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -> int:
 
     from . import state_db, nexus_client
 
     # 1. Fetch unprocessed sigs (oldest first)
-    unprocessed = state_db.filter_unprocessed_sigs({
-        'status_like': '%to be refunded%',
-        'limit': limit
-    })
+    cap_units = int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0)
+    unprocessed = state_db.get_solana_sig_disposition_candidates(
+        "refund", limit=limit, cap_units=cap_units
+    )
     if not unprocessed:
         return 0
     
@@ -1233,20 +1290,49 @@ def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -
 
         try:
             # 2. Check status "to be refunded"
-            if state_db.get_unprocessed_sig_status(sig) != "to be refunded":
+            source_status = state_db.get_unprocessed_sig_status(sig)
+            if source_status not in ("to be refunded", "refund capacity held"):
                 continue
 
-            # 3. Run idempotency checks: already processed?
-            if state_db.is_processed_sig(sig) or state_db.is_quarantined_sig(sig):
+            frozen_intent = None
+            if source_status == "refund capacity held":
+                loaded = state_db.get_solana_sig_disposition_capacity_hold_intent(
+                    source_sig=sig, kind="refund"
+                )
+                if isinstance(loaded, state_db.SolanaDispositionPrepareResult):
+                    _alert_solana_disposition_preparation(
+                        loaded, source_signature=sig, kind="refund"
+                    )
+                    _log(
+                        "solana_refund_frozen_hold_refused", level=logging.WARNING,
+                        sig=sig, status=loaded.status.value, reason=loaded.reason,
+                    )
+                    continue
+                frozen_intent = loaded
+                timestamp = frozen_intent.source_timestamp
+                memo = frozen_intent.source_memo
+                from_address = frozen_intent.source_token_account
+                amount_usdc_units = frozen_intent.source_amount_solana_units
+
+            # 3. New work may be cleaned up when a terminal sibling already exists.
+            # A capacity-held source is different: its typed prepare must observe the
+            # conflict transactionally and retain both principal and hold evidence.
+            if source_status != "refund capacity held" and (
+                state_db.is_processed_sig(sig) or state_db.is_quarantined_sig(sig)
+            ):
                 state_db.remove_unprocessed_sig(sig)
                 continue
-            
+
             # 4. Check refund net amount. Persisted money must remain an exact base-unit integer.
             if type(amount_usdc_units) is not int or amount_usdc_units <= 0:
                 state_db.update_unprocessed_sig_status(sig, "refund submission held")
                 _log("solana_refund_invalid_source_units", level=logging.ERROR, sig=sig)
                 continue
-            net_amount = amount_usdc_units - int(config.SWAP_PAIR.fees.refund_solana_units)
+            net_amount = (
+                frozen_intent.payout_amount_solana_units
+                if frozen_intent is not None
+                else amount_usdc_units - int(config.SWAP_PAIR.fees.refund_solana_units)
+            )
             if net_amount <= 0:
                 # Bug #12 fix: Track the fee (entire deposit amount is kept as fee for failed refunds)
                 state_db.add_fee_entry(
@@ -1261,12 +1347,15 @@ def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -
                 state_db.remove_unprocessed_sig(sig)
                 continue
 
-            # 5. Resolve the exact token account before freezing the obligation.  A
-            # wallet owner is not the transfer recipient: its existing ATA is.
-            destination_address = _resolve_solana_token_destination(from_address)
-            if destination_address is None:
-                state_db.update_unprocessed_sig_status(sig, "to be quarantined")
-                continue
+            # 5. Resolve a recipient only for a new obligation. Held retries use the
+            # exact token account already frozen before any configuration drift.
+            if frozen_intent is not None:
+                destination_address = frozen_intent.destination_token_account
+            else:
+                destination_address = _resolve_solana_token_destination(from_address)
+                if destination_address is None:
+                    state_db.update_unprocessed_sig_status(sig, "to be quarantined")
+                    continue
 
             # 6. A prior legacy attempt has no durable pre-RPC obligation. A positive
             # memo match may be adopted, but a bounded miss is never permission to
@@ -1286,15 +1375,39 @@ def process_solana_deposits_refunding(limit: int = 1000, timeout: float = 8.0) -
 
             # 7. Reserve the exact rolling-cap capacity and persist the source before
             # RPC. A later timeout/crash retains this reservation and becomes a hold.
-            payout_memo = _solana_sig_disposition_memo("refund", sig)
-            if not state_db.prepare_solana_sig_disposition(
+            payout_memo = (
+                frozen_intent.payout_memo
+                if frozen_intent is not None
+                else _solana_sig_disposition_memo("refund", sig)
+            )
+            preparation = state_db.prepare_solana_sig_disposition(
                 source_sig=sig, kind="refund", timestamp=timestamp,
                 from_address=from_address, destination_address=destination_address,
                 amount_usdc_units=amount_usdc_units, memo=memo, payout_memo=payout_memo,
                 payout_units=net_amount,
-                cap_units=int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0),
-            ):
-                _log("solana_refund_budget_or_claim_refused", level=logging.WARNING, sig=sig)
+                cap_units=cap_units,
+                frozen_intent_evidence=(
+                    frozen_intent.intent_evidence if frozen_intent is not None else None
+                ),
+            )
+            if (isinstance(preparation, state_db.SolanaDispositionPrepareResult)
+                    and preparation.status in {
+                        state_db.SolanaDispositionPrepareStatus.CAPACITY_HELD,
+                        state_db.SolanaDispositionPrepareStatus.CURRENT_CAP_TOO_LOW,
+                    }):
+                _alert_solana_disposition_preparation(
+                    preparation, source_signature=sig, kind="refund"
+                )
+                continue
+            if not preparation:
+                if isinstance(preparation, state_db.SolanaDispositionPrepareResult):
+                    _alert_solana_disposition_preparation(
+                        preparation, source_signature=sig, kind="refund"
+                    )
+                    _log(
+                        "solana_refund_preparation_refused", level=logging.WARNING, sig=sig,
+                        status=preparation.status.value, reason=preparation.reason,
+                    )
                 continue
             state_db.record_attempt(refund_key)
             ok, refund_signature = send_solana_token_to_account_with_sig(
@@ -1327,10 +1440,10 @@ def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0)
     # 1. Fetch unprocessed sigs to be quarantined (oldest first)
     # Include 'quarantine failed': it was previously written and then never selected
     # again by any pass, stranding the row (and the funds) in unprocessed_sigs forever.
-    unprocessed = state_db.filter_unprocessed_sigs({
-        'status_in': ('to be quarantined', 'quarantine failed'),
-        'limit': limit
-    })
+    cap_units = int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0)
+    unprocessed = state_db.get_solana_sig_disposition_candidates(
+        "quarantine", limit=limit, cap_units=cap_units
+    )
     if not unprocessed:
         return 0
     
@@ -1348,24 +1461,53 @@ def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0)
 
         try:
             # 2. Re-check status (either pending or a previously failed attempt)
-            if state_db.get_unprocessed_sig_status(sig) not in ("to be quarantined", "quarantine failed"):
+            source_status = state_db.get_unprocessed_sig_status(sig)
+            if source_status not in (
+                "to be quarantined", "quarantine failed", "quarantine capacity held"
+            ):
                 continue
             # Bound the retry so a permanently failing quarantine cannot spin every cycle.
             if not state_db.should_attempt(state_db.quarantine_send_attempt_key(sig)):
                 continue
-            state_db.record_attempt(state_db.quarantine_send_attempt_key(sig))
 
-            # 3. Run idempotency checks: already processed?
-            if state_db.is_processed_sig(sig) or state_db.is_refunded_sig(sig):
+            frozen_intent = None
+            if source_status == "quarantine capacity held":
+                loaded = state_db.get_solana_sig_disposition_capacity_hold_intent(
+                    source_sig=sig, kind="quarantine"
+                )
+                if isinstance(loaded, state_db.SolanaDispositionPrepareResult):
+                    _alert_solana_disposition_preparation(
+                        loaded, source_signature=sig, kind="quarantine"
+                    )
+                    _log(
+                        "solana_quarantine_frozen_hold_refused", level=logging.WARNING,
+                        sig=sig, status=loaded.status.value, reason=loaded.reason,
+                    )
+                    continue
+                frozen_intent = loaded
+                timestamp = frozen_intent.source_timestamp
+                memo = frozen_intent.source_memo
+                from_address = frozen_intent.source_token_account
+                amount_usdc_units = frozen_intent.source_amount_solana_units
+
+            # 3. Preserve a held principal when conflicting terminal evidence exists;
+            # typed preparation reports and alerts the conflict without orphaning it.
+            if source_status != "quarantine capacity held" and (
+                state_db.is_processed_sig(sig) or state_db.is_refunded_sig(sig)
+            ):
                 state_db.remove_unprocessed_sig(sig)
                 continue
-            
+
             # 4. Check quarantine net amount. Persisted money must be exact base units.
             if type(amount_usdc_units) is not int or amount_usdc_units <= 0:
                 state_db.update_unprocessed_sig_status(sig, "quarantine submission held")
                 _log("solana_quarantine_invalid_source_units", level=logging.ERROR, sig=sig)
                 continue
-            net_amount = amount_usdc_units - int(config.SWAP_PAIR.fees.refund_solana_units)
+            net_amount = (
+                frozen_intent.payout_amount_solana_units
+                if frozen_intent is not None
+                else amount_usdc_units - int(config.SWAP_PAIR.fees.refund_solana_units)
+            )
 
             # 4b. Nothing left after the fee: there is nothing to move, so finalise here.
             # A durable disposition requires positive exact output units; otherwise an
@@ -1394,28 +1536,56 @@ def process_solana_deposits_quarantine(limit: int = 1000, timeout: float = 25.0)
                     _log("solana_quarantine_legacy_attempt_held", level=logging.WARNING, sig=sig)
                 continue
 
-            # 6. Resolve the exact token-account recipient before freezing the
-            # obligation.  Quarantine is configured as a token account in production;
-            # allowing an owner here preserves local/test compatibility while keeping
-            # the actual ATA immutable in the durable record.
-            destination_address = _resolve_solana_token_destination(config.USDC_QUARANTINE_ACCOUNT)
-            if destination_address is None:
-                state_db.update_unprocessed_sig_status(sig, "quarantine submission held")
-                _log("solana_quarantine_destination_invalid", level=logging.ERROR, sig=sig)
-                continue
+            # 6. Resolve a recipient only for new work. A held retry keeps the exact
+            # token account frozen before any quarantine-account/ATA configuration drift.
+            if frozen_intent is not None:
+                destination_address = frozen_intent.destination_token_account
+            else:
+                destination_address = _resolve_solana_token_destination(
+                    config.USDC_QUARANTINE_ACCOUNT
+                )
+                if destination_address is None:
+                    state_db.update_unprocessed_sig_status(sig, "quarantine submission held")
+                    _log("solana_quarantine_destination_invalid", level=logging.ERROR, sig=sig)
+                    continue
 
             # 7. Freeze the exact obligation and reserve capacity before RPC. The
             # reservation survives any unreturned/ambiguous send outcome.
-            payout_memo = _solana_sig_disposition_memo("quarantine", sig)
-            if not state_db.prepare_solana_sig_disposition(
+            payout_memo = (
+                frozen_intent.payout_memo
+                if frozen_intent is not None
+                else _solana_sig_disposition_memo("quarantine", sig)
+            )
+            preparation = state_db.prepare_solana_sig_disposition(
                 source_sig=sig, kind="quarantine", timestamp=timestamp,
                 from_address=from_address, destination_address=destination_address,
                 amount_usdc_units=amount_usdc_units, memo=memo, payout_memo=payout_memo,
                 payout_units=net_amount,
-                cap_units=int(getattr(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0),
-            ):
-                _log("solana_quarantine_budget_or_claim_refused", level=logging.WARNING, sig=sig)
+                cap_units=cap_units,
+                frozen_intent_evidence=(
+                    frozen_intent.intent_evidence if frozen_intent is not None else None
+                ),
+            )
+            if (isinstance(preparation, state_db.SolanaDispositionPrepareResult)
+                    and preparation.status in {
+                        state_db.SolanaDispositionPrepareStatus.CAPACITY_HELD,
+                        state_db.SolanaDispositionPrepareStatus.CURRENT_CAP_TOO_LOW,
+                    }):
+                _alert_solana_disposition_preparation(
+                    preparation, source_signature=sig, kind="quarantine"
+                )
                 continue
+            if not preparation:
+                if isinstance(preparation, state_db.SolanaDispositionPrepareResult):
+                    _alert_solana_disposition_preparation(
+                        preparation, source_signature=sig, kind="quarantine"
+                    )
+                    _log(
+                        "solana_quarantine_preparation_refused", level=logging.WARNING, sig=sig,
+                        status=preparation.status.value, reason=preparation.reason,
+                    )
+                continue
+            state_db.record_attempt(state_db.quarantine_send_attempt_key(sig))
             state_db.record_attempt(quar_key)
             ok, quarantine_signature = send_solana_token_to_account_with_sig(
                 destination_address, net_amount, memo=payout_memo,
@@ -1634,7 +1804,8 @@ def _rpc_call(method, *args, timeout: Optional[float] = None, **kwargs):
         except Exception as e:  # pragma: no cover
             q.put((False, e))
     th = threading.Thread(target=_runner, daemon=True)
-    th.start()
+    from . import custody_workers
+    custody_workers.start(th)
     try:
         ok, val = q.get(timeout=timeout)
     except Exception:  # timeout

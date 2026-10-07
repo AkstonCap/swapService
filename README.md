@@ -4,7 +4,7 @@ A custodial, bidirectional bridge for **one operator-configured Solana SPL token
 
 The bridge uses a **1:1 whole-token backing/conversion model before fees and conservative decimal rounding**. It is not a market-price exchange, a multi-pair router, or a general cross-chain adapter. The current Solana transfer implementation uses the classic SPL Token program; configurable mint selection does not imply native-SOL or Token-2022 support.
 
-> **Release safety:** local engineering checks do not establish production readiness. Target-chain, custody, migration and crash/recovery acceptance remain required before real funds are admitted. See the [current evaluation](docs/EVALUATION.md), [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md), and [2026-09-07 safety repair evidence](docs/POST_CHANGE_REVIEW_2026-09-07.md).
+> **Release safety:** local engineering checks do not establish production readiness. The current source requires an independently witnessed sealed custody image before startup, but complete executable-artifact, service-identity, node-freshness, bootstrap/restore and live-chain gates remain open. Real funds remain blocked. See the [current evaluation](docs/EVALUATION.md), [2026-10-02 development review](docs/DEVELOPMENT_REVIEW_2026-10-02.md), and [sealed-custody architecture](docs/maintenance/sealed-custody-admission.md).
 
 ## Documentation
 
@@ -15,7 +15,7 @@ The bridge uses a **1:1 whole-token backing/conversion model before fees and con
 | Asset/client integrations | [ASSET_STANDARD.md](ASSET_STANDARD.md) |
 | Developers | [runtime state machines](docs/STATE_MACHINES.md), [engineering guidance](.github/copilot-instructions.md) |
 | Security and release decisions | [SECURITY.md](docs/SECURITY.md), [EVALUATION.md](docs/EVALUATION.md) |
-| Current and previous verification | [2026-09-08 development review](docs/DEVELOPMENT_REVIEW_2026-09-08.md), [2026-09-07 repair report](docs/POST_CHANGE_REVIEW_2026-09-07.md), [baseline review](docs/DEVELOPMENT_REVIEW_2026-09-07.md) |
+| Current and previous verification | [2026-10-02 development review](docs/DEVELOPMENT_REVIEW_2026-10-02.md), [2026-09-30 review](docs/DEVELOPMENT_REVIEW_2026-09-30.md), [2026-09-28 review](docs/DEVELOPMENT_REVIEW_2026-09-28.md) |
 
 Dated review/audit reports retain their original snapshots, token examples and test counts. They are historical evidence, not a substitute for checking the current code and deployment.
 
@@ -134,6 +134,40 @@ Processing time depends on chain finality, polling, asset discovery, RPC availab
 
 The current service requires valid custody checkpoints and affirmative complete startup recovery before exposure-producing loop work. Missing/zero waterlines, incompatible heartbeat data, incomplete scans and recovery errors refuse startup. Creating a heartbeat asset does not by itself establish a safe bootstrap checkpoint. Never set waterlines to the current time to bypass recovery.
 
+The current sealed-custody implementation additionally requires a one-use permit from an independently operated
+witness for the exact whole SQLite image, schema, configuration and currently declared source manifest.
+It claims before schema creation, enters `running` only after recovery/session/heartbeat validation,
+checks the lease every cycle, and seals a next generation only after workers drain. The dashboard shows
+healthy metrics only for that exact live lease. This is not yet release accepted: executable root and
+installed artifacts are not completely attested, heartbeat owner/address/pair and node freshness are not
+admitted, and the bootstrap/restore certificate ceremony is incomplete. See the
+[sealed-custody note](docs/maintenance/sealed-custody-admission.md).
+
+An empty custody database with nonzero checkpoints now creates a durable startup hold before
+chain reconstruction or polling. Restarting or inserting rows afterwards does not clear it.
+Restore an independently verified, coherent custody backup; do not delete the hold or seed rows
+to bypass admission. Startup also persists a monotonic Solana replay boundary: previously unseen
+inputs at or before it become quantified, non-sendable historical-authorization holds, visible in the
+dashboard issues list. This includes inputs received while offline; chain rediscovery alone cannot
+release them. Startup also holds retained `ready for processing` source rows when both frozen-policy
+fields are absent, without changing their principal or other evidence. This includes pre-fix replay
+rows and deposits interrupted before their first policy freeze; timestamps alone cannot exempt them.
+Ready rows with partial, malformed, source-conflicting or nonpayable frozen policy are also held;
+raw evidence is preserved. Startup also holds every retained `to be refunded`, `to be quarantined`
+and `quarantine failed` row: those worker paths would create a new disposition from current terms,
+even when input policy survives. Interrupted legitimate work in those states is conservatively held too.
+Startup also holds retained ready rows with any non-NULL debit transaction ID, reference or frozen
+debit amount, even with valid payable policy: stale ready status cannot authorize another submission.
+A retained disposition-capacity row or processed/refunded/quarantined terminal sibling also makes a ready
+source inconsistent and non-sendable; neither can authorize source deletion or a new Nexus debit.
+Raw evidence and reservations survive. Ready-row payable policies without any conflicting component,
+frozen-capacity retries and in-flight/finality states keep their existing behavior; they are not a complete
+lifecycle audit.
+An unaudited partial/stale restore remains unsafe and must not be certified. Exact-image continuity cannot
+prove that an externally approved image was complete: missing lifecycle components, pre-fix rows and
+source-specific audited resolution remain unresolved. An empty dashboard is not proof of zero liabilities.
+See the containment scope in [EVALUATION.md](docs/EVALUATION.md).
+
 Mutable multi-page Nexus offset scans cannot authorize checkpoint advancement. Previously discovered positive credits can be retained while coverage remains incomplete. Refer to [STATE_MACHINES.md](docs/STATE_MACHINES.md) for live processing and recovery invariants.
 
 ### Read-only operator dashboard
@@ -144,6 +178,14 @@ python3 dashboard.py
 ```
 
 The dashboard is separate from the service and exposes no retry/refund controls. It shows selected-token labels, backing/liabilities, pending and held work, fee accounting, payout-cap use and heartbeat age. Historic column names are compatibility fields, not fixed token selection.
+
+A durable startup recovery hold appears in the summary, issue list and recovery banner.
+When held or admission evidence is unavailable, total obligations are **unknown, not zero**:
+backing ratio, fee totals and payout usage are unavailable even if a snapshot survives.
+Displayed row counts cover only the local database. In the current implementation, healthy metrics additionally
+require a matching external `running` witness head and live local receipt before and after the read-only
+snapshot. That proves continuity of the approved image, not solvency or completeness of the original
+approval.
 
 Keep it local or follow the authentication/TLS requirements in [SETUP.md](SETUP.md). The dashboard's read-only design is not an instruction to expose custody credentials or the service database publicly.
 

@@ -1,0 +1,44 @@
+diff --git a/src/config.py b/src/config.py
+index 8e0f410..0976974 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -196,6 +196,16 @@ DEPOSIT_MEMO_PREFIX = os.getenv("DEPOSIT_MEMO_PREFIX", "nexus:")
+ SERVICE_PROVIDER = os.getenv("SERVICE_PROVIDER", "")          # operator name / domain
+ SERVICE_VERSION = os.getenv("SERVICE_VERSION", "1.0.0")
+ SERVICE_CONTACT = os.getenv("SERVICE_CONTACT", "")            # url or contact handle
++# Provider Asset Standard v2 is the default public contract. Registration identity is
++# deliberately allowed to remain empty at import time so offline/read-only modules can
++# load; the v2 builder and runtime validator fail closed before publication or trust.
++PROVIDER_RECORD_SCHEMA_VERSION = "2"
++NEXUS_SERVICE_ASSET_ADDRESS = os.getenv("NEXUS_SERVICE_ASSET_ADDRESS", "").strip()
++NEXUS_SERVICE_EXPECTED_OWNER = os.getenv("NEXUS_SERVICE_EXPECTED_OWNER", "").strip()
++SERVICE_ID = os.getenv("SERVICE_ID", "").strip()
++NEXUS_NETWORK = os.getenv("NEXUS_NETWORK", "").strip().lower()
++SERVICE_SOURCE_URL = os.getenv("SERVICE_SOURCE_URL", "-").strip() or "-"
++SERVICE_TERMS_URL = os.getenv("SERVICE_TERMS_URL", "-").strip() or "-"
+ NEXUS_USDD_LOCAL_ACCOUNT = os.getenv("NEXUS_USDD_LOCAL_ACCOUNT")
+ NEXUS_USDD_QUARANTINE_ACCOUNT = _compat_env(
+     "NEXUS_QUARANTINE_ACCOUNT", "NEXUS_USDD_QUARANTINE_ACCOUNT"
+@@ -460,6 +470,22 @@ def parse_strict_boolean(name: str, value: str | None = None, *, default: bool =
+ 
+ PRODUCTION_MODE = parse_strict_boolean("SWAP_PRODUCTION_MODE", default=False)
+ 
++ALLOW_LEGACY_PROVIDER_V1 = parse_strict_boolean(
++    "ALLOW_LEGACY_PROVIDER_V1", default=False
++)
++
++
++def _nonnegative_integer_env(name: str, default: str = "0") -> int:
++    """Read canonical non-negative revision/timestamp configuration."""
++    raw = os.getenv(name, default)
++    if not isinstance(raw, str) or not raw.isascii() or not raw.isdecimal():
++        raise ValueError(f"{name} must be a non-negative integer")
++    return int(raw)
++
++
++SERVICE_TERMS_VERSION = _nonnegative_integer_env("SERVICE_TERMS_VERSION")
++SERVICE_TERMS_EFFECTIVE_AT = _nonnegative_integer_env("SERVICE_TERMS_EFFECTIVE_AT")
++
+ # Public receipt assets cost NXS and are therefore strictly opt-in. Publication never
+ # participates in payout retry/refund decisions; ambiguous creates use readback only.
+ NEXUS_SWAP_RECEIPTS_ENABLED = parse_strict_boolean(

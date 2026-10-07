@@ -1,9 +1,48 @@
 # Swap Service State Machines
 
-**Scope:** one configured classic SPL token ↔ Nexus token pair. This describes the current
-working candidate; offline gates and independent ingestion closure review passed.
-See [EVALUATION.md](EVALUATION.md) for current approval status. Historical dated notes and the full
-previous diagrams are preserved in the [pre-repair snapshot](POST_CHANGE_REVIEW_2026-09-13_PRE_REPAIR_DOCUMENTATION.md).
+## Governing vision and portfolio traceability
+
+Read [the repository vision](../vision.md) and [Distordia alignment/dependency map](DISTORDIA_ALIGNMENT.md) before assigning work. Authority is master Distordia strategy/customer evidence → portfolio roadmap/strategy decisions → repository vision → this architecture → tasks/code/tests/external evidence and human release.
+
+**Portfolio purpose:** primary O4 attributable settlement and bounded risk, supported by O3
+reproducible provenance and O1 inspectable/open evidence contracts. O5 remains an external-
+acceptance objective; exact service-record identity is an O2 prerequisite, not proof that this
+repository establishes namespace authority. The settlement use case is a non-Atlas hypothesis and
+must not inherit marine Class A evidence. The current one-pair operator-custodial bridge remains the
+transitional SD-002 condition; SD-003–SD-008 and all non-custody, slashing, regulatory and adoption
+claims remain open. The alignment map supplies batch ownership, upstream prerequisites and human
+gates. Each material task must name those fields alongside exact production paths and collected
+acceptance tests.
+
+**Current source scope (2026-10-07):** exact source
+`2c4ed319d251836f01dfb83de68da71b1c6c6a23` implements one configured classic SPL token ↔ Nexus
+token pair. Published startup containment holds four inconsistent restored-source families before
+workers: retained ordinary refund/quarantine states, ready rows with debit-submission metadata,
+ready rows with capacity siblings, and ready rows with terminal siblings. The published sealed-
+custody witness and later in-process fingerprint increments bind the root entrypoint, running
+interpreter, conventional foundational native mappings, the installed `solders` extension, its
+selected root/flat/token/RPC/optional wrapper sources and selected RPC wire wrappers. Fresh offline
+collection found 1,522 tests; all passed with 77 subtests. This is finite in-process drift
+containment, not complete trusted pre-execution artifact identity. Production and real funds remain
+blocked.
+
+**Current release blockers:** an external immutable launcher/image must verify every executable byte
+before repository imports or other side effects; coherent restore/bootstrap authority and an all-
+status evidence audit remain incomplete; heartbeat owner/address/schema/pair/custody/terms and node
+health/sync/freshness are unbound; malformed oldest capacity evidence still starves a younger valid
+hold; witness/hold operations and target acceptance remain open. Exact image continuity does not
+prove that the approved image contains complete liabilities or correct historical authorization.
+
+See [EVALUATION.md](EVALUATION.md), the
+[October 2 review](DEVELOPMENT_REVIEW_2026-10-02.md), the
+[sealed-custody architecture note](maintenance/sealed-custody-admission.md), the
+[current repair plan](plans/2026-09-25-recovery-admission-and-capacity-fairness.md), and the
+[historical A/B/C acceptance report](RECOVERY_INPUT_CAP_ACCEPTANCE.md).
+
+Provider-v2, optional receipt enablement and dependency upgrades remain outside this repair. Historical
+dated notes are preserved below and in the
+[pre-repair snapshot](POST_CHANGE_REVIEW_2026-09-13_PRE_REPAIR_DOCUMENTATION.md); present-tense defect
+statements in those snapshots are superseded only where the current sections explicitly say so.
 
 ## Safety boundaries
 
@@ -16,8 +55,66 @@ previous diagrams are preserved in the [pre-repair snapshot](POST_CHANGE_REVIEW_
   success, source identity, vault/mint, exact recipient and output against frozen intent.
 - Payout completion, fee booking and exact source removal commit atomically. Nexus source identity
   is `(txid, contract_id)` so settling one sibling cannot delete another.
-- Incomplete recovery prevents the exposure-producing service loop from starting. Paused operation
-  continues evidence-only resolution and existing refund/quarantine work, not new bridge exposure.
+- Incomplete startup recovery prevents every poller/worker from starting. A later reconciliation/exposure
+  pause inside an admitted process may continue evidence-only resolution and already-authorized
+  refund/quarantine work, but that is a different state and must not be advertised during startup refusal.
+
+## Sealed custody image and process admission
+
+The current implementation places an external continuity protocol in front of the existing recovery state
+machines. The October 2 certificate wording below is a historical snapshot; the current finite in-process
+manifest is documented in [the sealed-custody note](maintenance/sealed-custody-admission.md), while complete
+trusted pre-execution identity remains open:
+
+```mermaid
+flowchart LR
+    Ready[Witness ready g<br/>one-use permit] -->|claim exact certified image| Claimed[claimed g]
+    Claimed -->|image/schema/config/build + chain identity + recovery + session/heartbeat| Running[running g]
+    Claimed -->|failure or ambiguity| Held[held permanently]
+    Running -->|witness/receipt mismatch or runtime failure| Held
+    Running -->|stop + drain workers + checkpoint + hash + CAS| Next[ready g+1]
+```
+
+`main.run()` takes the singleton lock, claims before schema creation, verifies the exact file again,
+checks both genesis identities, initializes/migrates the database, runs recovery, validates session and
+heartbeat, and only then completes the lease. The main loop requires a matching external `running` head
+and local live-process receipt before each cycle. Shutdown may seal only after every tracked custody
+worker exits; unresolved work permanently holds the generation. The dashboard reports healthy metrics
+only from the same running lease before and after one read-only SQLite snapshot.
+
+The certificate binds whole-file hash/size, schema digest, effective public configuration, expected chain
+genesis and an in-process build digest over current `src/*.py`, root `swapService.py`,
+`requirements.txt`, the running interpreter, conventional foundational native mappings, the installed
+`solders` extension, selected root/flat/token/RPC/optional solders source wrappers and selected RPC
+wire wrappers. This rejects drift in the finite selected set before witness-permit consumption, but it
+still runs after repository imports and does not cover the complete transitive dependency/bytecode/
+stdlib/shared-library/mapped-memory closure. An externally enforced immutable artifact and audited
+bootstrap/restore certificate ceremony remain required.
+
+Genesis equality identifies a chain but does not prove node readiness. Current admission still needs
+Solana health/root freshness, Nexus synchronization/tip freshness, and exact heartbeat owner/address/
+schema/pair/custody/terms validation before mutable startup.
+
+## Startup restore-admission coding contract
+
+Startup owns one `BEGIN IMMEDIATE` audit before either chain rebuild or any worker selection. The replay
+boundary and every conservative status change commit together. If any write or validation fails, roll back
+the whole audit, report recovery incomplete and call no scanner, reference lookup or financial transport.
+Status is not authorization by itself:
+
+| Retained source state | Worker eligibility contract | Current behavior / remaining work |
+|---|---|---|
+| `ready for processing` | Exact source-matching payable policy; all debit-submission fields SQL `NULL`; no retained disposition-capacity or terminal sibling | Implemented containment: absent/invalid policy, any non-NULL transaction ID/reference/frozen amount, or any capacity/processed/refunded/quarantined sibling becomes `historical_solana_authorization_missing`. Blank, zero, negative and malformed retained values are conflicts, not evidence of no submission. |
+| Ordinary refund/quarantine states | A first disposition may be created only inside the admitted live transition that just classified the source; restart may not reconstruct it from current fees or destination | Implemented containment: retained ordinary refund, quarantine and legacy failed-quarantine states are held at startup, even with valid input policy. |
+| Capacity-held disposition | Strict frozen source, kind, destination, amount, fee, memo and budget evidence; no source/terminal conflict | Existing validated frozen retries remain eligible. Malformed/conflicting evidence is non-sendable, but the scheduler still lets the oldest malformed row starve later valid work. |
+| Debit/disposition in flight, unknown or awaiting confirmation | Resolution-only; never selectable as new work, and completion requires exact positive chain evidence | Existing workers exclude these states. A complete startup audit of missing/conflicting per-state fields remains open. |
+| Terminal or competing lifecycle evidence | Exact immutable source identity and settlement proof; no incompatible retained source state | Conflicts must retain principal/evidence and require audited resolution; no startup cleanup may delete them merely because a sibling row exists. |
+
+Every hold must preserve exact integer principal, raw evidence, reservations and remote identifiers; remain
+included in liabilities/checkpoint pinning; be visible to operators; and have no manual status-clear or
+direct-send bypass. Held rows outside a worker's selector must not consume that worker's limit. Positive
+controls must prove that a genuinely new valid source and a coherent frozen retry still progress exactly
+once while all held and in-flight rows remain byte-for-byte unchanged apart from the documented status.
 
 ## Solana deposit enumeration and holds
 
@@ -29,16 +126,25 @@ flowchart TD
     Helius --> Validate[Validate full page and ordering]
     Core --> Validate
     Validate -->|incomplete or malformed enumeration| Stop[Hold cursor and public waterline]
-    Validate -->|exact positive deposit| Policy{Admission policy}
-    Policy -->|supported and finality satisfied| Queue[ready for processing]
-    Policy -->|unsupported shape or finality pending| Hold[Durable per-signature hold]
-    Queue --> Commit[Atomic rows + page evidence + continuation]
+    Validate -->|exact positive deposit| RecoveryBoundary{Retained lifecycle or<br/>strictly after startup boundary?}
+    Validate -->|unsupported shape or finality pending| Hold[Durable per-signature evidence hold]
+    RecoveryBoundary -->|previously unseen at/before boundary| Historical[historical authorization missing<br/>quantified, non-sendable]
+    RecoveryBoundary -->|retained exact lifecycle or after boundary| Queue[Persist ready source]
+    Queue --> Commit[Atomic source + page evidence + continuation]
     Hold --> Commit
+    Historical --> Commit
     Commit -->|continuation remains| Query
     Commit -->|range complete| Checkpoint[Evaluate conservative public waterline]
     Hold --> Replay[Fair bounded replay using frozen provenance]
     Replay -->|exact evidence and required finality| Queue
     Replay -->|still unresolved| Hold
+    Queue --> Policy{Freeze shared exact input policy}
+    Policy -->|below minimum| PolicyHold[policy held, non-sendable<br/>retain full principal]
+    Policy -->|calculated output non-positive| PolicyHold
+    Policy -->|above maximum| Refund[to be refunded]
+    Policy -->|payable| Destination{Validate memo and destination}
+    Destination -->|invalid| Refund
+    Destination -->|valid| Debit[Persist Nexus debit intent]
 ```
 
 Helius is trusted; core RPC is not a mandatory second attestor. Bind provider continuations to
@@ -55,9 +161,28 @@ Status queries obey provider batch limits, and replay cannot repeatedly select o
 unsupported oldest window.
 
 Ordinary classic SPL `transfer` and `transferChecked` share exact vault-balance validation. An outer
-ATA creation and its matching inner initialization form one logical creation. Multiple incoming
-sources or memos remain held when one payable source/destination cannot be established. Every positive
-deposit enters the liability/fee/refund lifecycle; processing minimums must not silently filter history.
+ATA creation and its matching inner initialization form one logical creation. Every positive deposit
+enters durable liability state before economic admission; processing minimums never filter history.
+Before recovery scans, startup atomically advances a monotonic boundary and audits every retained
+`ready for processing` row. A ready row is allowed to remain selectable only when strict frozen policy
+parses, matches the exact source and says `payable`, its debit transaction ID, reference and frozen
+output fields are all SQL `NULL`, and no disposition-capacity or processed/refunded/quarantined sibling
+exists. Every other ready row becomes
+`historical_solana_authorization_missing` without rewriting evidence or releasing reservations. Both
+page committers route a previously unseen source at or before the boundary to a quantified deposit hold,
+and automatic hold replay excludes that reason. This boundary is deliberately conservative: offline or
+clock-ambiguous deposits may require permanent review, and it is not proof that a partial database is
+coherent.
+
+The worker freezes one pure strict-integer policy before destination validation. Classification order
+is below minimum, above maximum, non-positive output, then payable. Exact minimum/maximum pass
+the size checks, but payout still requires positive output after conversion and fees;
+decimal rescaling and flat-plus-basis-point fees use integer floor arithmetic. `MICRO_DEPOSIT_FEE_PCT`
+is intentionally unused because no percentage micro-deposit disposition is supported. Below-minimum
+and non-positive-output inputs retain full principal and book no fee. Payable invalid destinations and
+oversized inputs follow the established refund route. Submitted intent is not reclassified by later
+configuration changes while the frozen evidence survives in SQLite. Total-loss recovery is not
+equivalent to restart; see the limitation below.
 
 ## Public waterlines and database loss
 
@@ -72,10 +197,31 @@ deposit enters the liability/fee/refund lifecycle; processing minimums must not 
 | Nexus mutable multi-page offset scan | Hold; positive rows do not establish complete enumeration |
 | Empty live Nexus enumeration | Hold as unproven absence |
 
-A durable **local** hold is not enough to pass an **external** recovery checkpoint: the local
-record can disappear with the database. Either keep the public checkpoint behind it or demonstrate
-complete reconstruction before startup succeeds. Do not initialize or move checkpoints to “now” to
-bypass custody history. A policy/configuration mismatch must not silently reinterpret a saved cursor.
+A durable **local** hold can disappear with the database. Keeping the public checkpoint behind it
+proves source rediscovery only, not reconstruction of frozen authorization. Empty-custody containment
+checks positive heartbeat waterlines before reconstruction and persists
+`empty_custody_database_recovery_held` when all recognized source lifecycle/deposit-hold tables are empty.
+`main.run()` then starts no poller or worker, and initialization/replay cannot clear the latch.
+
+For a nonempty database, startup persists `solana_recovery_boundary = max(retained boundary,
+startup wall clock, Solana waterline)` before either chain rebuild. Both Solana page committers hold an
+unseen source whose chain timestamp is at or before that boundary. In the same transaction, every
+retained ready row without exact matching payable policy, or with any retained debit-submission field,
+becomes a non-sendable historical-authorization row. Every retained ordinary refund/quarantine state is
+held as well. These controls close the reproduced current-term disposition path and the path where a valid
+policy plus stale ready status allowed a previous debit identity to be overwritten by a second mocked call.
+
+The protocol remains incomplete. Table non-emptiness is not restore proof, the boundary is not an
+authoritative chain-clock certificate, and the startup audit is not a schema for every nonterminal status.
+Capacity, in-flight/finality and apparently complete pre-fix rows can still lack or conflict with required
+lifecycle components without proving a coherent restore. Nexus-side partial reconstruction also remains
+outside this Solana containment.
+
+**Required, not yet implemented:** verify a complete restore/deployment identity or transactionally audit
+every retained and rediscovered nonterminal lifecycle before any worker selection. Missing or conflicting
+historical policy, disposition or submission evidence becomes a quantified, visible, non-sendable recovery
+hold. Do not move checkpoints, seed rows or accept table non-emptiness/current terms as history proof. An
+audited new bootstrap remains separate from existing-deployment restore.
 
 Nexus startup currently accepts an empty first bounded page while rejecting a later mutable-offset
 page. The stricter live-poller rule differs; target-node completeness semantics remain an acceptance
@@ -85,25 +231,46 @@ gate, not something local fixtures prove.
 
 ```mermaid
 flowchart LR
-    Ready[ready for processing] -->|persist reference and terms| Flight[debit in flight]
+    Ready[ready for processing] --> Policy{Freeze input policy}
+    Policy -->|below minimum or non-positive output| PolicyHold[policy held, non-sendable]
+    Policy -->|above maximum| Refund[to be refunded]
+    Policy -->|payable + valid destination; persist terms| Flight[debit in flight]
+    Policy -->|payable + invalid destination| Refund
     Flight -->|returned txid recorded| Await[debited, awaiting confirmation]
     Flight -->|uncertain response| Unknown[debit unverified]
     Unknown -->|positive exact chain evidence| Await
     Await -->|exact confirmed Nexus contract| Done[debit_confirmed]
-    Ready -->|invalid destination/memo or over cap| Refund[to be refunded]
-    Ready -->|net output is not positive| Fees[processed, amount after fees <= 0]
-    Refund -->|intent + cap reservation + one send| RefundWait[refund sent, awaiting confirmation]
+    Refund --> PrepareRefund{Atomic typed preparation}
+    PrepareRefund -->|prepared; exactly one send| RefundWait[refund sent, awaiting confirmation]
+    PrepareRefund -->|capacity held| RefundCap[refund capacity held]
+    PrepareRefund -->|conflict/malformed/DB failure| RefundStop[distinct non-sendable outcome]
+    RefundCap -->|current cap admits original frozen terms| RefundWait
     RefundWait -->|exact finalized transfer| Refunded[refund_confirmed]
     Refund -->|eligible source cannot be refunded| Quarantine[to be quarantined]
-    Quarantine -->|intent + cap reservation + one send| QuarantineWait[quarantine sent, awaiting confirmation]
+    Quarantine --> PrepareQ{Atomic typed preparation}
+    PrepareQ -->|prepared; exactly one send| QuarantineWait[quarantine sent, awaiting confirmation]
+    PrepareQ -->|capacity held| QuarantineCap[quarantine capacity held]
+    PrepareQ -->|conflict/malformed/DB failure| QuarantineStop[distinct non-sendable outcome]
+    QuarantineCap -->|current cap admits original frozen terms| QuarantineWait
     QuarantineWait -->|exact finalized transfer| Quarantined[quarantine_confirmed]
 ```
 
-The diagram omits nonterminal retry/hold loops, not their controls. Unknown Nexus mint outcomes
-cannot be converted into a Solana refund merely because a bounded lookup is empty. Refund/quarantine
-workers freeze the source, resolved token-account recipient, exact output and versioned memo before
-submission; legacy rows without frozen terms remain held. Receipt publication never reopens this
-bridge payout lifecycle.
+Unknown Nexus mint outcomes cannot become Solana refunds merely because a bounded lookup is empty.
+Capacity-held retries parse and reuse the original destination, output, memo, source, fee and service
+terms while coherent database evidence survives. Empty-database loss refuses startup. For a nonempty database, unseen pre-boundary inputs, retained ordinary dispositions, invalid/missing-policy
+ready rows and ready rows with debit-submission metadata become historical-authorization holds. With
+retained valid frozen-capacity evidence, mutable configuration or address resolution cannot replace terms.
+
+This protection does not yet cover every nonterminal evidence tuple. In-flight/finality/capacity rows and
+apparently valid pre-fix combinations still require an all-status audit tied to coherent restore identity.
+Admission applies current rolling capacity in global eligible-hold order; individually impossible holds
+retain full principal without blocking fitting work.
+Lifecycle conflict, malformed evidence, database failure, pre-RPC durable intent and unknown/submitted
+outcomes stay distinct and non-sendable. **Current scheduler qualification:** the global oldest-hold query
+still includes a malformed oldest row, so it can keep a later valid fitting hold in `capacity held` forever.
+This retains liabilities and causes no send, but violates progress; move such rows atomically to a durable
+operator-action class outside automatic FIFO before claiming complete retry fairness. Receipt publication
+never reopens this payout lifecycle.
 
 ## Nexus token → Solana token lifecycle
 
@@ -133,7 +300,28 @@ mint, amount, memo and authoritative chronology. A conflicting active Nexus mint
 reconstruction instead of erasing a possible mint-and-refund conflict. Missing source memos use the
 same representation as normal persisted deposits.
 
-Reconstruction restores terminal disposition, fee and cap events atomically and idempotently.
+Current recovery accepts automatic terminal confirmation only with exact chain proof and strict frozen
+authorization provenance. `pre_submission_v1` JSON rejects duplicate keys, non-finite constants,
+booleans/integral floats for integer fields, incomplete fields and conflicting values; identifiers are
+byte-exact. Valid `legacy_pre_submission_v0` intent remains supported.
+
+At initialization, WAL selection precedes one migration transaction and `BEGIN IMMEDIATE` starts
+before schema or data migration. In-place upgrades, SQLite online backups and copied DB+WAL restores
+apply this idempotent rule:
+
+```text
+terminal + exact proven pre-submission intent + exact chain match
+  → preserve/confirm terminal disposition
+terminal + absent, malformed, recovery-only or unknown provenance
+  → retain proven cap spend + reverse inferred fee/unsafe terminal
+  → restore full source principal as refund/quarantine evidence held
+  → migration audit + no automatic send
+```
+
+Fresh chain-only current-v1 evidence follows the conservative second path. Any DDL/data failure rolls
+back the migration and releases the lock. A conflicting active Nexus mint lifecycle also holds
+reconstruction rather than erasing a possible mint-and-refund conflict.
+
 Confirmed cap consumption uses chain time, including refunds/quarantine before a newer heartbeat.
 The whole rolling window must be covered even when the recovery checkpoint is newer. Known primary
 payout identities preserve paid Nexus siblings; unpaid siblings remain independently recoverable.
@@ -170,19 +358,36 @@ records cannot gain a receipt schema through a heartbeat update.
 
 | Store | Authority |
 |---|---|
-| Four `*_sigs` lifecycle tables | Solana source obligations and terminal evidence |
+| Four `*_sigs` lifecycle tables | Solana source obligations and terminal evidence; evidence-held current-v1 rows remain in `unprocessed_sigs` |
 | Four `*_txids` lifecycle tables | Composite Nexus source obligations and terminal evidence |
 | Provider cursor/event tables | Bound page continuation and completion evidence |
 | `solana_deposit_holds` | Unresolved principal, evidence, provenance and replay state |
+| Policy decision/evidence on source rows | Frozen shared economic admission and full-principal policy holds |
+| `solana_payout_capacity_holds` | Retryable refund/quarantine cap evidence and original frozen intent |
 | `solana_payout_budget_events` | Per-obligation reserved/submitted/confirmed/released cap accounting |
+| `solana_disposition_provenance_migrations` | Idempotent conservative migration and reversed-fee audit |
+| `recovery_admission_holds` | Narrow durable empty-custody startup latch; absence is not general recovery completion or restore proof |
+| `solana_recovery_boundary` | Monotonic timestamp containment for unseen Solana sources; not a restore manifest or authoritative chain-clock certificate |
 | `nexus_transfer_intents` / audit events | Immutable operator disposition and attribution |
 | `swap_receipts` / `receipt_nxs_budget_events` | Publication obligation and NXS reservation |
 | `fee_entries` | Authoritative integer fee journal |
 
-SQLite uses WAL. Use `state_db.payout_budget_used(86400)` for rolling usage rather than summing one
-ledger by hand. Inspect unresolved lifecycle rows, holds, manual-review receipts and unresolved cap
-reservations together. Primary cap refusal has a durable dashboard-visible state; disposition cap
-refusal currently retains generic source states and structured diagnostics.
+SQLite uses WAL. Use runtime snapshot/accounting APIs rather than hand-summing one ledger. Inspect
+source rows, ingestion/policy/cap/evidence holds, migration audit and unresolved reservations together.
+Refund/quarantine preparation returns `prepared`, `capacity_held`, `current_cap_too_low`,
+`source_conflict`, `malformed_evidence`, `db_failure` or `already_submitted`. Retryable rolling waits
+with valid evidence use eligible FIFO order. A frozen payout above the current nonzero cap retains
+full principal and requires a reviewed cap change, not merely aging spend; impossible rows cannot
+starve fitting work even beyond the worker limit. This guarantee currently excludes malformed or
+conflicting oldest holds, which remain safe but can block later automatic progress (R-1b). A
+sufficient cap increase or established cap `0` restores eligibility using the unchanged frozen
+intent only when that evidence validates. Dashboard/API diagnostics and rate-limited alerts are
+emitted after durable transition.
+Alert failure cannot erase a hold or cause a send. The audited operator workflow currently covers
+only an exact Nexus refund-hold family. Solana policy/evidence/conflict/malformed/unknown-submission
+holds lack an equivalent resolution command; do not treat dashboard visibility as that protocol.
+**Do not manually edit SQLite or bypass a hold with a direct token send**, including the unsafe
+legacy advice in `quarantine_viewer.py`. See R-3 in [the evaluation](EVALUATION.md).
 
 Frozen compatibility examples include `reservations.kind=usdc_to_usdd_debit`, the
 `usdc_send:<txid>:<contract_id>` attempt key, legacy fee/table columns and existing status strings.
@@ -192,3 +397,130 @@ For settings/timeouts see [CONFIG.md](../CONFIG.md); for operator procedures see
 [SETUP.md](../SETUP.md) and [SECURITY.md](SECURITY.md). The runtime entrypoints are
 `poll_solana_deposits`, `poll_nexus_deposits`, `process_unprocessed_txids`,
 `check_unconfirmed_debits`, and `perform_startup_recovery` in their respective `src/` modules.
+
+## Startup identity and admission limitations
+
+Incomplete recovery blocks `main.run()` before pollers. Published source-level containment still audits
+unseen/invalid-policy/ordinary/debit/capacity-sibling/terminal-sibling Solana rows and remains necessary.
+The current external witness adds a general startup outcome: any failure after claim leaves the generation
+claimed or permanently held, and the dashboard requires a matching live `running` lease. Summary reads
+use one read-only snapshot and do not create a missing database. This supersedes the former stale-healthy
+and writable-dashboard defects for the current offline implementation.
+
+The October 2 artifact-omission finding is historical and is superseded in part: current source now binds
+the root entrypoint, running interpreter and selected installed artifacts in-process. The narrower current
+finding remains release-blocking because this finite check is neither external nor pre-execution and does
+not cover the complete execution closure.
+
+The stronger continuity gate still does not establish initial image completeness or trusted
+pre-execution identity. The current in-process fingerprint binds the root executable and the finite
+selected interpreter/native/solders artifacts listed above, but repository imports precede the check
+and the full transitive execution closure remains unattested. Heartbeat validation still accepts an
+unbound name-resolved record, while genesis pins do not prove Solana health/root freshness or Nexus
+sync/tip freshness. Complete external artifact, service-record and node-readiness admission plus
+independent witness bootstrap/restore operations remain required before release.
+
+Provider-v2 is committed library code with no production importer. Actual registration, heartbeat and
+recovery still use named v1 records; the parsed legacy opt-in flag is not enforced. V2 needs a target-valid
+storage layout and exact address/owner/schema/pair/custody validation through every caller before cutover.
+See the current register in [the evaluation](EVALUATION.md).
+
+## Preserved dated architecture history
+
+The addenda below are unchanged historical snapshots. Their statements that A/B/C transitions were
+missing or partial remain valid for those dated source versions but are superseded for the current
+published candidate only within the qualified scope above. They are not production approvals or
+final-gate results.
+
+## 2026-09-15 safety-architecture addendum
+
+The state diagrams above remain the committed intended architecture, with these reviewed
+qualifications:
+
+1. **Disposition recovery is not yet intent-complete.** Current-v1 refund/quarantine memos bind kind
+   and source signature but not frozen output, fee or terms revision. After database loss, exact
+   finalized transfer evidence may restore actual rolling-cap spend, but must not by itself authorize
+   terminal source removal or classify `source - payout` as fee. Retain a manual-review liability
+   until frozen intent survives or a new versioned on-chain identity proves it.
+2. **Solana minimum classification is missing after ingestion.** Durable ingestion must continue to
+   admit every positive custody delta. Before the `debit in flight` transition, a shared
+   live/recovery classifier must apply `MIN_DEPOSIT_SOLANA_UNITS` and the published micro policy.
+   Current positive-net below-minimum deposits can reach the Nexus debit boundary.
+3. **Disposition cap refusal needs a state.** Capacity exhaustion must persist a distinct retryable
+   cap-held state and exact needed/used/cap evidence. Evidence conflicts require a different manual
+   hold. A generic ready state plus a log is not an operational safety control.
+4. **Provider-v2 remains outside this runtime state machine.** The dirty builder has no registration,
+   heartbeat, startup-recovery or waterline caller. Until address-based read/update, exact owner and
+   immutable-record validation, monotonic terms updates, secret-safe publication and explicit v1
+   fallback are integrated and target-tested, v1 remains the actual runtime contract and v2 remains
+   a non-deployable candidate.
+
+See [the full 2026-09-15 review](DEVELOPMENT_REVIEW_2026-09-15.md) for probes, hashes and executable
+repair exits. Production and real-fund admission remain hard-blocked.
+
+## 2026-09-16 verification note
+
+Tracked runtime did not change after the September 15 source baseline. The real index still excludes
+the dirty provider-v2 proposal, and all paths in the September 15 runtime manifest match. Fresh focused
+execution continues to reproduce each qualification above: arbitrary-shortfall v1 recovery can
+terminalize a fee, a below-minimum Solana source can reach the Nexus debit boundary, and disposition
+cap refusal retains only its generic source state. The isolated v2 library still publishes unenforced
+micro percentages and permits a configured secret as a public URL substring.
+
+The full shared-tree suite and configured focused shards remain green; that verifies execution and
+isolation, not these architectural exits. See the
+[full 2026-09-16 review](DEVELOPMENT_REVIEW_2026-09-16.md). No live-chain acceptance ran.
+
+## 2026-09-17 unresolved-transition clarification
+
+No tracked runtime changed after the preceding note. The following are required transition contracts,
+not descriptions of current behavior:
+
+1. **Chain-only current-v1 disposition recovery must not enter a terminal state.** Positive transfer
+   evidence may append actual rolling-cap spend, but without frozen intent the source transitions to a
+   quantified `manual_review`/unresolved-liability state. It must not enter `refund_confirmed` or
+   `quarantine_confirmed`, delete the source obligation or derive a fee from an unexplained shortfall.
+   Exact surviving frozen intent or a new pre-submission evidence version is the only automatic path
+   from recovered chain evidence to a terminal disposition.
+2. **Durable ingestion and economic admission are separate transitions.** Every positive custody delta
+   still enters durable state. Before `debit in flight`, one shared classifier must produce an explicit
+   below-minimum, boundary or payable outcome using exact integer terms. Live processing and recovery
+   consume the same result; ingestion never filters history to enforce economic policy.
+3. **Capacity refusal is a state, not a failed claim.** Refund and quarantine preparation must
+   atomically persist a typed retryable cap hold containing obligation identity and exact
+   needed/used/cap units. Capacity release may return that same obligation to preparation after
+   restart. Evidence conflict and lifecycle conflict remain separate manual-review states, and every
+   hold transition occurs before any transport send.
+
+The currently collected recovery and cap tests accept the old terminal-fee and generic-state
+behaviors, while no collected real-worker test enforces the input threshold matrix. Those tests must
+be replaced or extended with the transition contracts above. See the
+[full 2026-09-17 review](DEVELOPMENT_REVIEW_2026-09-17.md). Production and real-fund admission remain
+hard-blocked.
+
+## 2026-09-21 transition update
+
+`814c0ae` implements the evidence-held transition for a fresh database reconstruction, so the first
+September 17 contract is now partly current behavior. Its safe branch is:
+
+```text
+current-v1 chain evidence + no surviving disposition row
+  → exact observed cap spend
+  → full-principal evidence hold
+  → no fee, no terminal row, no automatic send
+```
+
+The transition is not upgrade-complete. A matching existing terminal disposition row follows the
+frozen-intent path regardless of whether it was written before submission or manufactured by the
+pre-repair recovery. Add immutable intent provenance and an in-place/backup migration:
+
+```text
+existing terminal row + proven pre-submission provenance + exact chain match
+  → terminal confirmation
+existing terminal row + missing/legacy/recovery-only provenance
+  → exact observed cap spend + evidence hold + no inferred fee
+```
+
+After that P0 migration, retain the other two September 17 contracts unchanged: shared exact input
+classification before Nexus transport, then typed durable cap holds before any refund/quarantine
+transport. The [full 2026-09-21 review](DEVELOPMENT_REVIEW_2026-09-21.md) specifies executable exits.

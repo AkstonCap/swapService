@@ -196,8 +196,8 @@ def test_refund_disposition_reserves_before_rpc_and_settles_on_confirmation(tmp_
     ]
 
 
-def test_quarantine_disposition_cap_refusal_leaves_source_retryable(tmp_path):
-    """A full cap must not create a partial quarantine intent or consume source state."""
+def test_quarantine_disposition_cap_refusal_leaves_durable_retryable_hold(tmp_path):
+    """A full cap retains exact retry evidence without creating a submission intent."""
     with isolated_state(tmp_path):
         state_db.add_unprocessed_sig(
             "deposit-b", 11, "original-memo", "sender", 100,
@@ -221,9 +221,14 @@ def test_quarantine_disposition_cap_refusal_leaves_source_retryable(tmp_path):
             quarantine = conn.execute(
                 "SELECT 1 FROM quarantined_sigs WHERE sig = 'deposit-b'"
             ).fetchone()
+            hold = conn.execute(
+                """SELECT kind, obligation_id, needed_units
+                   FROM solana_payout_capacity_holds WHERE source_signature = 'deposit-b'"""
+            ).fetchone()
 
-    assert status == ("to be quarantined",)
+    assert status == ("quarantine capacity held",)
     assert quarantine is None
+    assert hold == ("quarantine", "quarantine:deposit-b", 50)
 
 
 def test_refund_submission_ledger_failure_keeps_reserved_capacity_held(tmp_path):

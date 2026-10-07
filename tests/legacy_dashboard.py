@@ -61,15 +61,16 @@ s = dashboard.api_summary()
 # ratio is derived from integer basis points, so it is floor-rounded to 1 bp.
 # Floor is the SAFE direction: it can only understate the ratio, never make a real
 # deficit look healthy. Assert both the value and that safety property.
-check("ratio computed from snapshot", s["ratio"] == 10101 / 10000, str(s["ratio"]))
-check("ratio never overstates backing", s["ratio"] <= 100 / 99 + 1e-12)
+check("uncertified backing ratio is unknown", s["ratio"] is None)
+check("uncertified fees and cap use are unknown",
+      s["fees_solana"] is None and s["payout_24h_solana"] is None)
 check("vault/circulating scaled to token units",
       s["vault_solana"] == 100.0 and s["circulating_nexus"] == 99.0)
-check("payout total surfaced", s["payout_24h_solana"] == 3.0)
+check("uncertified cap totals not surfaced as complete", s["payout_24h_solana"] is None)
 check("counts present", s["counts"]["unprocessed_sigs"] == 2)
 
 i = dashboard.api_issues()
-check("issue rows found", i["counts"]["issues"] == 3, str(i["counts"]))
+check("local issues and recovery warning found", i["counts"]["issues"] == 4, str(i["counts"]))
 check("issue carries its reference for chain lookup",
       any(x["reference"] == 4242 for x in i["issues"]))
 awaiting = next((x for x in i["issues"] if x["id"] == "SIG_AWAITING"), None)

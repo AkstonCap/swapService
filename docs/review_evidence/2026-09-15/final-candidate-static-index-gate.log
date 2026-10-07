@@ -1,0 +1,10 @@
+disposable_index=/tmp/swapservice-sep15-final-index-Gzyvwt
+real_index_before=15d4c078b7bfd0a0addbbd6a8041bbadb20a6e12f8f4154b2830ec6ae10cf3f2
+Token-pair literal inventory is current (274 active lines).
+candidate_index_whitespace=pass
+tracked_worktree_whitespace=pass
+No broken requirements found.
+compile=pass
+Local Markdown links: OK
+real_index_after=15d4c078b7bfd0a0addbbd6a8041bbadb20a6e12f8f4154b2830ec6ae10cf3f2
+real_index_unchanged=pass

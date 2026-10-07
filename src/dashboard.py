@@ -32,6 +32,7 @@ from urllib.parse import urlparse, parse_qs
 
 from . import state_db
 
+_cfg = None
 try:
     from . import config as _cfg
     SOL_DECIMALS = int(_cfg.SOLANA_TOKEN_DECIMALS)
@@ -48,9 +49,11 @@ except Exception:
 # Statuses that mean "a human should look at this".  The paired action maps turn a
 # raw state-machine label into an instruction that is safe for the operator to follow.
 SIG_ISSUE_STATUSES = (
+    "historical_solana_authorization_missing",
+    "policy held, non-sendable",
     "debit unverified", "debit in flight", "debited, awaiting confirmation",
-    "to be refunded", "refund submission held", "refund sent, awaiting confirmation",
-    "to be quarantined", "quarantine submission held", "quarantine sent, awaiting confirmation",
+    "to be refunded", "refund capacity held", "refund submission held", "refund evidence held", "refund sent, awaiting confirmation",
+    "to be quarantined", "quarantine capacity held", "quarantine submission held", "quarantine evidence held", "quarantine sent, awaiting confirmation",
     "quarantine failed", "refund pending",
 )
 TXID_ISSUE_STATUSES = (
@@ -58,14 +61,28 @@ TXID_ISSUE_STATUSES = (
     "trade balance to be checked", "payout cap held", "sending", "sig created, awaiting confirmations",
 )
 SIG_OPERATOR_ACTIONS = {
+    "historical_solana_authorization_missing": (
+        "retain full principal; historical policy is missing or invalid; do not retry or send manually"
+    ),
+    "policy held, non-sendable": (
+        "retain the full principal; review policy evidence before manual disposition"
+    ),
     "debit in flight": "verify Nexus debit before any disposition",
     "debit unverified": "verify Nexus debit before any disposition",
     "debited, awaiting confirmation": "verify Nexus debit before any disposition",
     "to be refunded": "automatic Solana refund pending; inspect if stale",
+    "refund capacity held": (
+        "wait for rolling capacity; automatic retry preserves the frozen intent"
+    ),
     "refund submission held": "verify the ambiguous Solana refund before any disposition",
+    "refund evidence held": "chain spend is proven but current-v1 terms are unresolved; do not terminalize or retry",
     "refund sent, awaiting confirmation": "verify Solana refund before any disposition",
     "to be quarantined": "automatic Solana quarantine pending; inspect if stale",
+    "quarantine capacity held": (
+        "wait for rolling capacity; automatic retry preserves the frozen intent"
+    ),
     "quarantine submission held": "verify the ambiguous Solana quarantine before any disposition",
+    "quarantine evidence held": "chain spend is proven but current-v1 terms are unresolved; do not terminalize or retry",
     "quarantine sent, awaiting confirmation": "verify Solana quarantine before any disposition",
     "quarantine failed": "inspect failed Solana quarantine before retrying",
     "refund pending": "inspect refund evidence before retrying",
@@ -88,26 +105,36 @@ def _ro_conn() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
 
 
-def _rows(sql: str, params=()) -> list[dict]:
-    conn = _ro_conn()
+def _rows(sql: str, params=(), *, connection=None) -> list[dict]:
+    conn = connection
     try:
+        if conn is None:
+            conn = _ro_conn()
         conn.row_factory = sqlite3.Row
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
     except sqlite3.Error:
+        if connection is not None:
+            raise
         return []
     finally:
-        conn.close()
+        if conn is not None and connection is None:
+            conn.close()
 
 
-def _scalar(sql: str, params=(), default=0):
-    conn = _ro_conn()
+def _scalar(sql: str, params=(), default=0, *, connection=None):
+    conn = connection
     try:
+        if conn is None:
+            conn = _ro_conn()
         row = conn.execute(sql, params).fetchone()
         return row[0] if row and row[0] is not None else default
     except sqlite3.Error:
+        if connection is not None:
+            raise
         return default
     finally:
-        conn.close()
+        if conn is not None and connection is None:
+            conn.close()
 
 
 def _units(v, decimals: int) -> float | None:
@@ -122,23 +149,111 @@ def _units(v, decimals: int) -> float | None:
 # --------------------------------------------------------------------------- API
 
 
-def api_summary() -> dict:
-    snap = state_db.get_metrics_snapshot() or {}
-    now = int(time.time())
-    ratio_bps = snap.get("ratio_bps")
+def _recovery_admission_status(*, connection=None) -> dict:
+    """Read the startup latch without treating a failed lookup as an empty table.
 
-    hb = _rows("SELECT name, last_beat, wline_sol, wline_nxs FROM heartbeat LIMIT 1")
+    Absence of this narrow total-loss latch is NOT proof of complete recovery.
+    In particular, it cannot validate partial/stale restores or authorize sends.
+    """
+    unavailable = {
+        "status": "unknown", "reason": "custody_recovery_admission_unavailable",
+        "liabilities_complete": False,
+        "detail": "Recovery admission evidence is unavailable; total liabilities are unknown.",
+        "operator_action": (
+            "keep processing stopped; inspect custody database recovery evidence; "
+            "do not seed rows, clear holds or send funds manually"
+        ),
+    }
+    conn = connection
+    try:
+        if conn is None:
+            conn = _ro_conn()
+        rows = conn.execute(
+            "SELECT id, reason, nexus_waterline, solana_waterline "
+            "FROM recovery_admission_holds LIMIT 2"
+        ).fetchall()
+    except sqlite3.Error:
+        return unavailable
+    finally:
+        if conn is not None and connection is None:
+            conn.close()
+    if not rows:
+        try:
+            from . import custody_admission
+            return custody_admission.dashboard_status()
+        except Exception:
+            return unavailable
+    row = rows[0]
+    if (len(rows) != 1 or row[0] != 1
+            or row[1] != "empty_custody_database_recovery_held"
+            or any(type(value) is not int or value <= 0 for value in row[2:])):
+        return unavailable
+    return {
+        "status": "held",
+        "reason": row[1],
+        "nexus_waterline": row[2],
+        "solana_waterline": row[3],
+        "liabilities_complete": False,
+        "detail": "Recovery is held; total liabilities are unknown, not zero.",
+        "operator_action": (
+            "restore an independently verified custody backup with coherent DB/WAL evidence; "
+            "do not seed rows, clear the hold or send funds manually"
+        ),
+    }
+
+
+def api_summary() -> dict:
+    conn = None
+    try:
+        conn = _ro_conn()
+        conn.execute("BEGIN")
+    except sqlite3.Error:
+        if conn is not None:
+            conn.close()
+        conn = None
+    try:
+        return _summary_in_snapshot(conn)
+    except sqlite3.Error:
+        return _summary_in_snapshot(None)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _summary_in_snapshot(conn) -> dict:
+    # All custody reads use one read-only SQLite snapshot. The witness is rechecked
+    # after collection so an intervening seal/hold cannot reuse an obsolete green.
+    def rows(sql, params=()):
+        return _rows(sql, params, connection=conn) if conn is not None else []
+    def scalar(sql, params=(), default=0):
+        return _scalar(sql, params, default, connection=conn) if conn is not None else default
+    recovery = (_recovery_admission_status(connection=conn) if conn is not None else {
+        "status": "unknown", "liabilities_complete": False,
+        "reason": "custody_snapshot_unavailable",
+        "detail": "custody database read snapshot is unavailable",
+        "operator_action": "keep service stopped and restore independently verified evidence",
+    })
+    recovery_unresolved = recovery["status"] != "not_held"
+    snapshots = rows("SELECT * FROM metrics_snapshot WHERE id = 1")
+    snap = snapshots[0] if snapshots else {}
+    now = int(time.time())
+    ratio_bps = None if recovery_unresolved else snap.get("ratio_bps")
+
+    hb = rows("SELECT name, last_beat, wline_sol, wline_nxs FROM heartbeat LIMIT 1")
     hb = hb[0] if hb else {}
 
     counts = {
-        "unprocessed_sigs": _scalar("SELECT COUNT(*) FROM unprocessed_sigs"),
-        "unprocessed_txids": _scalar("SELECT COUNT(*) FROM unprocessed_txids"),
-        "processed_sigs": _scalar("SELECT COUNT(*) FROM processed_sigs"),
-        "processed_txids": _scalar("SELECT COUNT(*) FROM processed_txids"),
-        "refunded_sigs": _scalar("SELECT COUNT(*) FROM refunded_sigs"),
-        "refunded_txids": _scalar("SELECT COUNT(*) FROM refunded_txids"),
-        "quarantined_sigs": _scalar("SELECT COUNT(*) FROM quarantined_sigs"),
-        "quarantined_txids": _scalar("SELECT COUNT(*) FROM quarantined_txids"),
+        "unprocessed_sigs": scalar("SELECT COUNT(*) FROM unprocessed_sigs"),
+        "unprocessed_txids": scalar("SELECT COUNT(*) FROM unprocessed_txids"),
+        "processed_sigs": scalar("SELECT COUNT(*) FROM processed_sigs"),
+        "processed_txids": scalar("SELECT COUNT(*) FROM processed_txids"),
+        "refunded_sigs": scalar("SELECT COUNT(*) FROM refunded_sigs"),
+        "refunded_txids": scalar("SELECT COUNT(*) FROM refunded_txids"),
+        "quarantined_sigs": scalar("SELECT COUNT(*) FROM quarantined_sigs"),
+        "quarantined_txids": scalar("SELECT COUNT(*) FROM quarantined_txids"),
+        "solana_payout_capacity_holds": scalar(
+            "SELECT COUNT(*) FROM solana_payout_capacity_holds"
+        ),
     }
 
     cap = 0
@@ -150,33 +265,48 @@ def api_summary() -> dict:
     # The durable ledger includes held/reserved exposure and reconstructed payouts;
     # the legacy payouts table alone can understate the rolling cap after a crash.
     try:
-        spent = state_db.payout_budget_used(86400)
+        if conn is None:
+            raise sqlite3.OperationalError("custody snapshot unavailable")
+        spent = state_db._payout_budget_usage_in_transaction(conn, now - 86400)
     except Exception:
         # Preserve read-only dashboard availability if an old/corrupt database cannot
         # yet expose the durable ledger; never let a UI query affect money-path state.
         spent = snap.get("payouts_24h_units")
         if spent is None:
-            spent = _scalar(
+            spent = scalar(
                 "SELECT COALESCE(SUM(amount_usdc_units),0) FROM payouts WHERE timestamp >= ?",
                 (now - 86400,),
             )
 
     snap_age = (now - int(snap["timestamp"])) if snap.get("timestamp") else None
 
+    if not recovery_unresolved:
+        final_admission = _recovery_admission_status(connection=conn)
+        if final_admission != recovery:
+            recovery = final_admission
+            if final_admission['status'] == 'not_held':
+                recovery = {"status": "unknown", "liabilities_complete": False,
+                            "reason": "custody_admission_changed",
+                            "detail": "custody lease changed during dashboard snapshot",
+                            "operator_action": "keep service stopped until custody admission is stable"}
+            recovery_unresolved = True
+            ratio_bps = None
+
     return {
         "now": now,
+        "recovery_admission": recovery,
         "snapshot_age_sec": snap_age,
         "snapshot_stale": snap_age is None or snap_age > 300,
-        "paused": bool(snap.get("paused")),
+        "paused": recovery_unresolved or bool(snap.get("paused")),
         "vault_solana": _units(snap.get("vault_usdc_units"), SOL_DECIMALS),
         "circulating_nexus": _units(snap.get("circulating_usdd_units"), NXS_DECIMALS),
         "ratio": (ratio_bps / 10000.0) if ratio_bps is not None else None,
         "ratio_bps": ratio_bps,
-        "fees_solana": _units(snap.get("fees_usdc_units"), SOL_DECIMALS),
-        "fees_nexus": _units(snap.get("fees_usdd_units"), NXS_DECIMALS),
+        "fees_solana": None if recovery_unresolved else _units(snap.get("fees_usdc_units"), SOL_DECIMALS),
+        "fees_nexus": None if recovery_unresolved else _units(snap.get("fees_usdd_units"), NXS_DECIMALS),
         "payout_cap_solana": _units(cap, SOL_DECIMALS) if cap else None,
-        "payout_24h_solana": _units(spent, SOL_DECIMALS),
-        "payout_cap_pct": (100.0 * spent / cap) if cap else None,
+        "payout_24h_solana": None if recovery_unresolved else _units(spent, SOL_DECIMALS),
+        "payout_cap_pct": (100.0 * spent / cap) if cap and not recovery_unresolved else None,
         "heartbeat": {
             "name": hb.get("name"),
             "last_beat": hb.get("last_beat"),
@@ -192,12 +322,102 @@ def api_issues() -> dict:
     """Anything an operator should act on, newest first, with a plain-language reason."""
     now = int(time.time())
     issues: list[dict] = []
+    recovery = _recovery_admission_status()
+    if recovery["status"] != "not_held":
+        issues.append({
+            "kind": "Custody recovery", "id": "custody-recovery-admission",
+            "status": recovery["reason"], "age_sec": None,
+            "amount": None, "unit": None, "counterparty": None,
+            "detail": recovery["detail"], "reference": None,
+            "operator_action": recovery["operator_action"],
+        })
+
+    for r in _rows(
+        """SELECT signature, block_timestamp, reason, amount_units, from_address
+           FROM solana_deposit_holds WHERE reason = ?
+           ORDER BY block_timestamp ASC, signature ASC LIMIT 200""",
+        (state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING,),
+    ):
+        issues.append({
+            "kind": f"{SOL_SYM} recovery", "id": r["signature"],
+            "status": r["reason"],
+            "age_sec": now - int(r["block_timestamp"]),
+            "amount": _units(r["amount_units"], SOL_DECIMALS),
+            "amount_units": r["amount_units"], "unit": SOL_SYM,
+            "counterparty": r["from_address"], "reference": None,
+            "detail": "Source principal retained; historical authorization is missing.",
+            "operator_action": (
+                "retain principal and verify coherent backup evidence; do not clear the hold "
+                "or send manually; automated disposition is disabled"
+            ),
+        })
 
     marks = ",".join("?" for _ in SIG_ISSUE_STATUSES)
+    try:
+        current_payout_cap = int(
+            getattr(_cfg, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 0) or 0
+        )
+    except (NameError, TypeError, ValueError):
+        current_payout_cap = 0
     for r in _rows(
-        f"""SELECT sig, timestamp, status, amount_usdc_units, from_address, memo, reference
-            FROM unprocessed_sigs WHERE status IN ({marks})
-            ORDER BY timestamp ASC LIMIT 200""", SIG_ISSUE_STATUSES):
+        f"""SELECT u.sig, u.timestamp, u.status, u.amount_usdc_units,
+                   u.from_address, u.memo, u.reference,
+                   h.source_signature AS capacity_source_signature,
+                   h.kind AS capacity_kind, h.obligation_id AS capacity_obligation_id,
+                   h.needed_units AS capacity_needed_units,
+                   h.used_units AS capacity_used_units, h.cap_units AS capacity_cap_units,
+                   h.first_held_timestamp AS capacity_first_held_timestamp,
+                   h.updated_timestamp AS capacity_updated_timestamp,
+                   h.reason AS capacity_reason, h.attempt_count AS capacity_attempt_count
+            FROM unprocessed_sigs AS u
+            LEFT JOIN solana_payout_capacity_holds AS h
+              ON h.source_signature = u.sig
+            WHERE u.status IN ({marks})
+            ORDER BY u.timestamp ASC LIMIT 200""", SIG_ISSUE_STATUSES):
+        capacity_hold = None
+        capacity_detail = r.get("capacity_reason") or r.get("memo")
+        operator_action = SIG_OPERATOR_ACTIONS.get(
+            r["status"], "inspect chain evidence before disposition"
+        )
+        if r.get("capacity_source_signature") is not None:
+            capacity_hold = {
+                "source_signature": r["capacity_source_signature"],
+                "kind": r["capacity_kind"],
+                "obligation_id": r["capacity_obligation_id"],
+                "needed_units": r["capacity_needed_units"],
+                "used_units": r["capacity_used_units"],
+                "cap_units": r["capacity_cap_units"],
+                "first_held_timestamp": r["capacity_first_held_timestamp"],
+                "updated_timestamp": r["capacity_updated_timestamp"],
+                "reason": r["capacity_reason"],
+                "attempt_count": r["capacity_attempt_count"],
+            }
+            currently_too_large = (
+                current_payout_cap > 0
+                and type(r.get("capacity_needed_units")) is int
+                and r["capacity_needed_units"] > current_payout_cap
+            )
+            if currently_too_large:
+                capacity_detail = state_db.SOLANA_PAYOUT_CURRENT_CAP_TOO_LOW_REASON
+                operator_action = (
+                    "raise the payout cap to at least the frozen needed units; "
+                    "do not send manually; automatic retry resumes after a safe cap increase"
+                )
+            elif (
+                r.get("capacity_reason")
+                == state_db.SOLANA_PAYOUT_CURRENT_CAP_TOO_LOW_REASON
+            ):
+                capacity_detail = (
+                    "current payout cap admits the frozen payout; automatic retry pending"
+                )
+                operator_action = (
+                    "allow automatic retry; inspect if stale; do not send manually"
+                )
+        if r["status"] == state_db.HISTORICAL_SOLANA_AUTHORIZATION_MISSING:
+            # Retained capacity evidence is diagnostic, not permission to retry a
+            # source whose startup authorization is held.
+            operator_action = SIG_OPERATOR_ACTIONS[r["status"]]
+            capacity_detail = "Historical policy missing; full source principal held."
         issues.append({
             "kind": f"{SOL_SYM}→{NXS_SYM}",
             "id": r["sig"],
@@ -206,9 +426,10 @@ def api_issues() -> dict:
             "amount": _units(r.get("amount_usdc_units"), SOL_DECIMALS),
             "unit": SOL_SYM,
             "counterparty": r.get("from_address"),
-            "detail": r.get("memo"),
+            "detail": capacity_detail,
             "reference": r.get("reference"),
-            "operator_action": SIG_OPERATOR_ACTIONS.get(r["status"], "inspect chain evidence before disposition"),
+            "operator_action": operator_action,
+            "capacity_hold": capacity_hold,
         })
 
     marks = ",".join("?" for _ in TXID_ISSUE_STATUSES)
@@ -485,7 +706,13 @@ function card(k,v,s,cls){const c=el("div","card");c.append(el("div","k",k));
 
 function renderSummary(d){
   const b=document.getElementById("banners");b.textContent="";
-  if(d.paused){const x=el("div","banner bad");
+  const recovery=d.recovery_admission;
+  const unresolved=!recovery||recovery.status!=="not_held";
+  if(unresolved){const x=el("div","banner bad");
+    x.append(el("strong",null,recovery?.status==="held"?"RECOVERY HELD. ":"RECOVERY STATUS UNKNOWN. "));
+    x.append(document.createTextNode((recovery?.detail||"Total liabilities are unknown.")+" "+
+      (recovery?.operator_action||"Keep processing stopped; verify custody recovery evidence.")));b.append(x);}
+  if(d.paused&&!unresolved){const x=el("div","banner bad");
     x.append(el("strong",null,"PAUSED — backing deficit. "));
     x.append(document.createTextNode("New swaps are stopped; refunds and quarantine continue."));b.append(x);}
   if(d.snapshot_stale){const x=el("div","banner warn");
@@ -496,15 +723,15 @@ function renderSummary(d){
     x.append(document.createTextNode("Vault "+SOL+" is below circulating "+NXS+"."));b.append(x);}
 
   const c=document.getElementById("cards");c.textContent="";
-  const rc=d.ratio==null?"":d.ratio>=1?"ok":d.ratio>=0.99?"warn":"bad";
-  c.append(card("Backing ratio", d.ratio==null?"—":d.ratio.toFixed(4),
-    d.ratio_bps!=null?d.ratio_bps+" bps":"vault ÷ circulating", rc));
+  const rc=unresolved?"bad":d.ratio==null?"":d.ratio>=1?"ok":d.ratio>=0.99?"warn":"bad";
+  c.append(card("Backing ratio", unresolved?"Unknown":d.ratio==null?"—":d.ratio.toFixed(4),
+    unresolved?"recovery evidence incomplete":d.ratio_bps!=null?d.ratio_bps+" bps":"vault ÷ circulating", rc));
   c.append(card("Vault "+SOL, F(d.vault_solana,2), "on Solana"));
   c.append(card("Circulating "+NXS, F(d.circulating_nexus,2), "on Nexus"));
   c.append(card("Open items",
-    (d.counts.unprocessed_sigs+d.counts.unprocessed_txids),
-    d.counts.unprocessed_sigs+" "+SOL+" · "+d.counts.unprocessed_txids+" "+NXS));
-  c.append(card("Quarantined",
+    unresolved?"Unknown":(d.counts.unprocessed_sigs+d.counts.unprocessed_txids),
+    d.counts.unprocessed_sigs+" "+SOL+" · "+d.counts.unprocessed_txids+" "+NXS+" (local rows only)"));
+  c.append(card("Quarantined (local)",
     (d.counts.quarantined_sigs+d.counts.quarantined_txids),
     "needs manual review",
     (d.counts.quarantined_sigs+d.counts.quarantined_txids)>0?"warn":""));
@@ -527,7 +754,7 @@ function renderSummary(d){
 function table(cols,rows,build){
   if(!rows.length){const e=el("div","empty","Nothing here.");return e;}
   const t=el("table"),th=el("tr");cols.forEach(c=>th.append(el("th",null,c)));
-  t.append(el("thead")).append(th);const tb=el("tbody");
+  const thead=el("thead");thead.append(th);t.append(thead);const tb=el("tbody");
   rows.forEach(r=>tb.append(build(r)));t.append(tb);return t;
 }
 

@@ -1,0 +1,492 @@
+diff --git a/src/service_record.py b/src/service_record.py
+new file mode 100644
+index 0000000..828d243
+--- /dev/null
++++ b/src/service_record.py
+@@ -0,0 +1,486 @@
++"""Canonical public Provider Asset Standard v2 record contract.
++
++This module deliberately maps an allow-list of validated configuration values. It never
++serializes a configuration dictionary, RPC endpoint, credential, signer path, or other
++operational capability into a public record or its terms fingerprint.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import re
++import time
++from urllib.parse import urlparse
++
++DISTORDIA_TYPE = "swapService"
++SCHEMA_VERSION = "2"
++
++IMMUTABLE_FIELDS = (
++    "owner",
++    "address",
++    "distordia-type",
++    "schema_version",
++    "service_id",
++    "nexus_network",
++    "nexus_token_name",
++    "nexus_token_address",
++    "nexus_token_decimals",
++    "nexus_treasury_address",
++    "nexus_quarantine_address",
++    "nexus_fee_address",
++    "solana_cluster",
++    "solana_token_symbol",
++    "solana_token_mint",
++    "solana_token_decimals",
++    "solana_vault_address",
++    "solana_quarantine_address",
++    "solana_fee_address",
++    "enabled_directions",
++    "user_mapping_type",
++)
++
++OPTIONAL_IMMUTABLE_FIELDS = ("receipt_schema",)
++
++MUTABLE_FIELDS = (
++    "provider",
++    "contact",
++    "source_url",
++    "terms_url",
++    "software_version",
++    "memo_prefix",
++    "mapping_schema_version",
++    "fee_flat_to_nexus",
++    "fee_bps_to_nexus",
++    "fee_flat_to_solana",
++    "fee_bps_to_solana",
++    "fee_refund_solana",
++    "fee_nexus_disposition",
++    "micro_fee_pct_solana_input",
++    "micro_fee_pct_nexus_input",
++    "min_input_solana",
++    "dust_input_solana",
++    "min_input_nexus",
++    "dust_input_nexus",
++    "max_input_solana",
++    "max_input_nexus",
++    "daily_payout_cap_solana",
++    "terms_version",
++    "terms_effective_at",
++    "terms_hash",
++    "status",
++    "pause_reason",
++    "last_poll_timestamp",
++    "last_safe_timestamp_solana",
++    "last_safe_timestamp_nexus",
++    "record_updated_at",
++)
++
++REQUIRED_FIELDS = IMMUTABLE_FIELDS + MUTABLE_FIELDS
++
++# ASSET_STANDARD.md defines the fingerprint as public pair/fee/limit fields only.
++# Provider prose/release metadata and operational liveness are intentionally excluded.
++TERMS_HASH_FIELDS = (
++    "distordia-type",
++    "schema_version",
++    "service_id",
++    "nexus_network",
++    "nexus_token_name",
++    "nexus_token_address",
++    "nexus_token_decimals",
++    "nexus_treasury_address",
++    "nexus_quarantine_address",
++    "nexus_fee_address",
++    "solana_cluster",
++    "solana_token_symbol",
++    "solana_token_mint",
++    "solana_token_decimals",
++    "solana_vault_address",
++    "solana_quarantine_address",
++    "solana_fee_address",
++    "enabled_directions",
++    "user_mapping_type",
++    "memo_prefix",
++    "mapping_schema_version",
++    "fee_flat_to_nexus",
++    "fee_bps_to_nexus",
++    "fee_flat_to_solana",
++    "fee_bps_to_solana",
++    "fee_refund_solana",
++    "fee_nexus_disposition",
++    "micro_fee_pct_solana_input",
++    "micro_fee_pct_nexus_input",
++    "min_input_solana",
++    "dust_input_solana",
++    "min_input_nexus",
++    "dust_input_nexus",
++    "max_input_solana",
++    "max_input_nexus",
++    "daily_payout_cap_solana",
++    "terms_version",
++    "terms_effective_at",
++)
++
++_ALLOWED_STATUSES = frozenset({"online", "paused", "maintenance", "retired", "starting"})
++_UINT_RE = re.compile(r"0|[1-9][0-9]*\Z")
++_AMOUNT_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?\Z")
++_INTEGER_FIELDS = (
++    "nexus_token_decimals",
++    "solana_token_decimals",
++    "mapping_schema_version",
++    "fee_bps_to_nexus",
++    "fee_bps_to_solana",
++    "micro_fee_pct_solana_input",
++    "micro_fee_pct_nexus_input",
++    "terms_version",
++    "terms_effective_at",
++    "last_poll_timestamp",
++    "last_safe_timestamp_solana",
++    "last_safe_timestamp_nexus",
++    "record_updated_at",
++)
++_SOLANA_AMOUNT_FIELDS = (
++    "fee_flat_to_solana",
++    "fee_refund_solana",
++    "min_input_solana",
++    "dust_input_solana",
++    "max_input_solana",
++    "daily_payout_cap_solana",
++)
++_NEXUS_AMOUNT_FIELDS = (
++    "fee_flat_to_nexus",
++    "fee_nexus_disposition",
++    "min_input_nexus",
++    "dust_input_nexus",
++    "max_input_nexus",
++)
++_SECRET_CONFIG_NAMES = (
++    "NEXUS_PIN",
++    "NEXUS_SESSION",
++    "NEXUS_API_PASSWORD",
++    "NEXUS_API_USER",
++    "VAULT_KEYPAIR_PATH",
++    "HELIUS_API_KEY",
++)
++
++
++def _required_text(value: object, field: str) -> str:
++    if type(value) is not str or not value.strip():
++        raise ValueError(f"provider v2 {field} must be a non-empty string")
++    return value
++
++
++def _nonnegative_int(value: object, field: str) -> int:
++    if type(value) is not int or value < 0:
++        raise ValueError(f"provider v2 {field} must be a non-negative integer")
++    return value
++
++
++def _uint_string(value: object, field: str) -> int:
++    if type(value) is not str or _UINT_RE.fullmatch(value) is None:
++        raise ValueError(f"provider v2 {field} must be a canonical non-negative integer string")
++    return int(value)
++
++
++def _amount_from_units(units: object, decimals: object, field: str) -> str:
++    units_int = _nonnegative_int(units, field)
++    decimals_int = _nonnegative_int(decimals, f"{field} decimals")
++    digits = str(units_int)
++    if decimals_int == 0:
++        return digits
++    digits = digits.zfill(decimals_int + 1)
++    whole, fraction = digits[:-decimals_int], digits[-decimals_int:].rstrip("0")
++    return whole if not fraction else f"{whole}.{fraction}"
++
++
++def _validate_amount(value: object, decimals: int, field: str) -> None:
++    if type(value) is not str or _AMOUNT_RE.fullmatch(value) is None:
++        raise ValueError(f"provider v2 {field} must be a canonical non-negative amount string")
++    fraction = value.partition(".")[2]
++    if len(fraction) > decimals:
++        raise ValueError(f"provider v2 {field} exceeds the published token precision")
++
++
++def _solana_cluster(config_module: object) -> str:
++    configured = str(getattr(config_module, "SOLANA_NETWORK", "") or "").strip().lower()
++    if configured:
++        if configured not in {"mainnet", "devnet"}:
++            raise ValueError("provider v2 SOLANA_NETWORK must be mainnet or devnet")
++        return "mainnet-beta" if configured == "mainnet" else "devnet"
++
++    host = (urlparse(str(getattr(config_module, "RPC_URL", "") or "")).hostname or "").lower()
++    if host in {"api.mainnet-beta.solana.com", "rpc.helius.xyz", "mainnet.helius-rpc.com"}:
++        return "mainnet-beta"
++    if host in {"api.devnet.solana.com", "devnet.helius-rpc.com"}:
++        return "devnet"
++    raise ValueError(
++        "provider v2 requires explicit SOLANA_NETWORK for a custom or private RPC endpoint"
++    )
++
++
++def _assert_no_secret_collision(record: dict[str, str], config_module: object) -> None:
++    public_values = tuple(record.values())
++    for name in _SECRET_CONFIG_NAMES:
++        secret = getattr(config_module, name, None)
++        if type(secret) is str and secret and secret in public_values:
++            raise ValueError(f"provider v2 public field must not expose configured secret {name}")
++
++
++def _compute_terms_hash(record: dict[str, str]) -> str:
++    payload = {field: record[field] for field in TERMS_HASH_FIELDS}
++    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
++    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
++
++
++def _validate_terms_projection(record: dict[str, str]) -> None:
++    for field in TERMS_HASH_FIELDS:
++        _required_text(record[field], field)
++    if record["distordia-type"] != DISTORDIA_TYPE or record["schema_version"] != SCHEMA_VERSION:
++        raise ValueError("provider v2 type/schema identity mismatch")
++    if record["enabled_directions"] != "solana-to-nexus,nexus-to-solana":
++        raise ValueError("provider v2 enabled_directions is not canonical")
++    if record["user_mapping_type"] != "nexusBridge":
++        raise ValueError("provider v2 user_mapping_type is not canonical")
++    if record["solana_cluster"] not in {"mainnet-beta", "devnet"}:
++        raise ValueError("provider v2 solana_cluster is not supported")
++    parsed = {
++        field: _uint_string(record[field], field)
++        for field in _INTEGER_FIELDS
++        if field in TERMS_HASH_FIELDS
++    }
++    for field in ("micro_fee_pct_solana_input", "micro_fee_pct_nexus_input"):
++        if parsed[field] > 100:
++            raise ValueError(f"provider v2 {field} must be between 0 and 100")
++    for field in _SOLANA_AMOUNT_FIELDS:
++        _validate_amount(record[field], parsed["solana_token_decimals"], field)
++    for field in _NEXUS_AMOUNT_FIELDS:
++        _validate_amount(record[field], parsed["nexus_token_decimals"], field)
++
++
++def terms_hash(record: dict[str, str]) -> str:
++    """Return the SHA-256 fingerprint of the canonical public pair/fee/limit projection."""
++    if type(record) is not dict:
++        raise ValueError("provider v2 record must be an object")
++    missing = [field for field in TERMS_HASH_FIELDS if field not in record]
++    if missing:
++        raise ValueError(f"provider v2 record is missing terms fields: {missing}")
++    _validate_terms_projection(record)
++    return _compute_terms_hash(record)
++
++
++def build_record(
++    status: str = "online",
++    last_poll: int | None = None,
++    wline_sol: int | None = None,
++    wline_nxs: int | None = None,
++) -> dict[str, str]:
++    """Build one complete all-string v2 on-chain record from effective runtime policy.
++
++    Registration address, expected owner, service ID and both networks are required here,
++    not at configuration import, preserving dependency-safe offline imports.
++    """
++    from . import config
++
++    pair = config.SWAP_PAIR
++    now = _nonnegative_int(int(time.time()), "record_updated_at")
++    poll = now if last_poll is None else _nonnegative_int(last_poll, "last_poll_timestamp")
++    sol_line = 0 if wline_sol is None else _nonnegative_int(wline_sol, "last_safe_timestamp_solana")
++    nxs_line = 0 if wline_nxs is None else _nonnegative_int(wline_nxs, "last_safe_timestamp_nexus")
++    if type(status) is not str or status not in _ALLOWED_STATUSES:
++        raise ValueError(f"provider v2 status must be one of {sorted(_ALLOWED_STATUSES)}")
++
++    nexus_decimals = _nonnegative_int(pair.nexus.decimals, "nexus_token_decimals")
++    solana_decimals = _nonnegative_int(pair.solana.decimals, "solana_token_decimals")
++    nexus_network = _required_text(getattr(config, "NEXUS_NETWORK", ""), "nexus_network")
++    fees = pair.fees
++
++    record = {
++        "owner": _required_text(
++            getattr(config, "NEXUS_SERVICE_EXPECTED_OWNER", ""), "owner"
++        ),
++        "address": _required_text(
++            getattr(config, "NEXUS_SERVICE_ASSET_ADDRESS", ""), "address"
++        ),
++        "distordia-type": DISTORDIA_TYPE,
++        "schema_version": SCHEMA_VERSION,
++        "service_id": _required_text(getattr(config, "SERVICE_ID", ""), "service_id"),
++        "nexus_network": nexus_network,
++        "nexus_token_name": _required_text(pair.nexus.symbol, "nexus_token_name"),
++        "nexus_token_address": _required_text(
++            pair.nexus.register_address, "nexus_token_address"
++        ),
++        "nexus_token_decimals": str(nexus_decimals),
++        "nexus_treasury_address": _required_text(
++            pair.nexus.treasury_account, "nexus_treasury_address"
++        ),
++        "nexus_quarantine_address": str(pair.nexus.quarantine_account or "-"),
++        "nexus_fee_address": str(pair.nexus.fee_account or "treasury"),
++        "solana_cluster": _solana_cluster(config),
++        "solana_token_symbol": _required_text(pair.solana.symbol, "solana_token_symbol"),
++        "solana_token_mint": _required_text(pair.solana.mint, "solana_token_mint"),
++        "solana_token_decimals": str(solana_decimals),
++        "solana_vault_address": _required_text(
++            pair.solana.vault_account, "solana_vault_address"
++        ),
++        "solana_quarantine_address": str(pair.solana.quarantine_account or "-"),
++        "solana_fee_address": str(pair.solana.fee_account or "vault"),
++        "enabled_directions": "solana-to-nexus,nexus-to-solana",
++        "user_mapping_type": "nexusBridge",
++        "provider": str(getattr(config, "SERVICE_PROVIDER", "") or "-"),
++        "contact": str(getattr(config, "SERVICE_CONTACT", "") or "-"),
++        "source_url": str(getattr(config, "SERVICE_SOURCE_URL", "") or "-"),
++        "terms_url": str(getattr(config, "SERVICE_TERMS_URL", "") or "-"),
++        "software_version": _required_text(
++            getattr(config, "SERVICE_VERSION", ""), "software_version"
++        ),
++        "memo_prefix": _required_text(pair.deposit_memo_prefix, "memo_prefix"),
++        "mapping_schema_version": "1",
++        "fee_flat_to_nexus": _amount_from_units(
++            fees.flat_to_nexus_units, nexus_decimals, "fee_flat_to_nexus"
++        ),
++        "fee_bps_to_nexus": str(_nonnegative_int(fees.basis_points, "fee_bps_to_nexus")),
++        "fee_flat_to_solana": _amount_from_units(
++            fees.flat_to_solana_units, solana_decimals, "fee_flat_to_solana"
++        ),
++        "fee_bps_to_solana": str(_nonnegative_int(fees.basis_points, "fee_bps_to_solana")),
++        "fee_refund_solana": _amount_from_units(
++            fees.refund_solana_units, solana_decimals, "fee_refund_solana"
++        ),
++        "fee_nexus_disposition": _amount_from_units(
++            fees.nexus_disposition_units, nexus_decimals, "fee_nexus_disposition"
++        ),
++        "micro_fee_pct_solana_input": str(
++            _nonnegative_int(config.MICRO_DEPOSIT_FEE_PCT, "micro_fee_pct_solana_input")
++        ),
++        "micro_fee_pct_nexus_input": str(
++            _nonnegative_int(config.MICRO_CREDIT_FEE_PCT, "micro_fee_pct_nexus_input")
++        ),
++        "min_input_solana": _amount_from_units(
++            config.MIN_DEPOSIT_SOLANA_UNITS, solana_decimals, "min_input_solana"
++        ),
++        "dust_input_solana": "0",
++        "min_input_nexus": _amount_from_units(
++            config.MIN_CREDIT_NEXUS_UNITS, nexus_decimals, "min_input_nexus"
++        ),
++        "dust_input_nexus": _amount_from_units(
++            config.DUST_CREDIT_NEXUS_UNITS, nexus_decimals, "dust_input_nexus"
++        ),
++        "max_input_solana": _amount_from_units(
++            config.MAX_SWAP_SOLANA_UNITS, solana_decimals, "max_input_solana"
++        ),
++        "max_input_nexus": _amount_from_units(
++            config.MAX_SWAP_NEXUS_UNITS, nexus_decimals, "max_input_nexus"
++        ),
++        "daily_payout_cap_solana": _amount_from_units(
++            config.DAILY_PAYOUT_CAP_SOLANA_UNITS,
++            solana_decimals,
++            "daily_payout_cap_solana",
++        ),
++        "terms_version": str(
++            _nonnegative_int(config.SERVICE_TERMS_VERSION, "terms_version")
++        ),
++        "terms_effective_at": str(
++            _nonnegative_int(config.SERVICE_TERMS_EFFECTIVE_AT, "terms_effective_at")
++        ),
++        "terms_hash": "",
++        "status": status,
++        "pause_reason": "-",
++        "last_poll_timestamp": str(poll),
++        "last_safe_timestamp_solana": str(sol_line),
++        "last_safe_timestamp_nexus": str(nxs_line),
++        "record_updated_at": str(now),
++    }
++    receipt_enabled = getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False)
++    if type(receipt_enabled) is not bool:
++        raise ValueError("provider v2 NEXUS_SWAP_RECEIPTS_ENABLED must be a boolean")
++    if receipt_enabled:
++        from .receipt_contract import SCHEMA as RECEIPT_SCHEMA
++
++        record["receipt_schema"] = RECEIPT_SCHEMA
++    record["terms_hash"] = _compute_terms_hash(record)
++    _assert_no_secret_collision(record, config)
++    _validate_structure(record)
++    return record
++
++
++def _validate_structure(record: object) -> dict[str, str]:
++    if type(record) is not dict:
++        raise ValueError("provider v2 record must be an object")
++    allowed = set(REQUIRED_FIELDS) | set(OPTIONAL_IMMUTABLE_FIELDS)
++    missing = sorted(set(REQUIRED_FIELDS) - set(record))
++    extra = sorted(set(record) - allowed)
++    if missing or extra:
++        raise ValueError(f"provider v2 field set mismatch; missing={missing}, extra={extra}")
++    if any(type(value) is not str for value in record.values()):
++        raise ValueError("provider v2 record fields must all be strings")
++    for field in REQUIRED_FIELDS:
++        _required_text(record[field], field)
++    if "receipt_schema" in record:
++        from .receipt_contract import SCHEMA as RECEIPT_SCHEMA
++
++        if record["receipt_schema"] != RECEIPT_SCHEMA:
++            raise ValueError("provider v2 receipt_schema is not the supported fixed extension")
++    _validate_terms_projection(record)
++    if record["status"] not in _ALLOWED_STATUSES:
++        raise ValueError("provider v2 status is not allowed")
++    for field in _INTEGER_FIELDS:
++        _uint_string(record[field], field)
++    expected_hash = _compute_terms_hash(record)
++    if record["terms_hash"] != expected_hash:
++        raise ValueError("provider v2 terms_hash mismatch")
++    return record
++
++
++def validate_record(
++    record: object,
++    *,
++    expected_address: str | None = None,
++    require_config_match: bool = True,
++    require_terms_match: bool = True,
++) -> None:
++    """Validate one on-chain v2 record, raising ``ValueError`` on any mismatch.
++
++    ``require_config_match=False`` is read-only structural inspection of another instance;
++    it is never sufficient for a writer. ``require_terms_match=False`` supports an explicit
++    operator terms update while retaining local owner/address/service/pair/custody checks.
++    """
++    candidate = _validate_structure(record)
++    if expected_address is not None:
++        expected = _required_text(expected_address, "expected_address")
++        if candidate["address"] != expected:
++            raise ValueError("provider v2 address does not match expected_address")
++    if not require_config_match:
++        return None
++
++    from . import config
++
++    # Building the local record validates mandatory runtime identity and creates the exact
++    # allow-listed configuration projection. Liveness values are supplied only to avoid
++    # irrelevant current-time differences in diagnostics/comparison.
++    local = build_record(
++        status=candidate["status"],
++        last_poll=int(candidate["last_poll_timestamp"]),
++        wline_sol=int(candidate["last_safe_timestamp_solana"]),
++        wline_nxs=int(candidate["last_safe_timestamp_nexus"]),
++    )
++    local_address = expected_address or config.NEXUS_SERVICE_ASSET_ADDRESS
++    if candidate["address"] != local_address:
++        raise ValueError("provider v2 address does not match configured asset")
++    for field in IMMUTABLE_FIELDS:
++        if candidate[field] != local[field]:
++            raise ValueError(f"provider v2 immutable field {field} does not match config")
++    if ("receipt_schema" in candidate) != ("receipt_schema" in local):
++        raise ValueError("provider v2 receipt extension does not match config")
++    if require_terms_match:
++        for field in TERMS_HASH_FIELDS:
++            if candidate[field] != local[field]:
++                raise ValueError(f"provider v2 terms field {field} does not match config")
++        for field in (
++            "provider",
++            "contact",
++            "source_url",
++            "terms_url",
++            "software_version",
++        ):
++            if candidate[field] != local[field]:
++                raise ValueError(f"provider v2 metadata field {field} does not match config")
++    return None

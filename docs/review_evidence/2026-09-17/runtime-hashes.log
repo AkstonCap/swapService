@@ -1,0 +1,39 @@
+swapService runtime and candidate identities — 2026-09-17
+HEAD 91ce0b866a4e155bd690f70b6533124467c7318f
+HEAD_TREE 1f4cce83362c739682cf81d830d20a2c19519c4a
+REAL_INDEX_TREE 1f4cce83362c739682cf81d830d20a2c19519c4a
+REAL_INDEX_SHA256 f01b946e68b399df075f71d174fa546d4dc264154ede69aa79a34e5d4f4d9157
+TRACKED_RUNTIME_BASELINE 6b1f052a2018f0315603e64a440d71cb612e8212
+
+COMMITTED INDEX RUNTIME SHA256
+f8e4e295aacbc0236dc332f33917c78e413a7611790e48f52646cdd2a570d868  src/config.py
+20ed25032231735972f2565049c6014eca060964c98fed373282600a27cf19d6  src/nexus_client.py
+b6afe7a8abb0f4027cbf9a78a2052b5a87920ba872d0088322092c9a95e8533b  src/receipt_contract.py
+bc2c4108f65fd4585cfe3166a9503c6065c83f3067eb4794ce19c96bf19e2bd6  src/solana_client.py
+25a7528fff6c80e3bb9737e6494fa29f7cc295e1e8d35e21184a29fed9dcbd48  src/startup_recovery.py
+4ae733f36aac1c5b85124832eae9df8150d6ac5910c16b33dbb15da3243578cb  src/state_db.py
+1374281b0bf62cc7a86c4af945b9d7d7bf14674372f8b68ca24aea7bebc7f4d2  src/swap_nexus.py
+745b894cbc2c39789036d07579c40a31a906e26bd3742b8e24d1e5b6318ff81f  src/swap_receipts.py
+3cf6cdaa8e5170992fdc384cc25fffaf6508ec42ab50eb0cca34e9e17065f8e5  src/swap_solana.py
+
+CONCURRENT WORKTREE SHA256
+f8e4e295aacbc0236dc332f33917c78e413a7611790e48f52646cdd2a570d868  committed-index src/config.py
+e6b7f28d60e4d26c6fed1fea0ab869aaa727fb7be3672dd6d002ba1f658f52eb  worktree src/config.py
+absent                                                            committed-index src/service_record.py
+1487382a259b373f08f3ec667075e88d1485bb99042dccb4d1469b16bcf8c6ec  worktree src/service_record.py
+absent                                                            committed-index tests/test_service_record_v2.py
+9039c042f660dfeddf0eaaaa0c36a1f35969e777f2cb9f8345c34a7f81055497  worktree tests/test_service_record_v2.py
+
+CONCURRENT WORKTREE GIT OBJECT IDS
+8e0f4106bd223e158c6500461c7caa7e2263b794  committed-index src/config.py
+0976974c5d3d8e3d3d068756ef8cf07846a9c089  worktree src/config.py
+828d2437a3cdfde7cbb0d938c92f2c5eeea37f39  worktree src/service_record.py
+304a981d027e566e3c7923c9b093ed5e9b924a8b  worktree tests/test_service_record_v2.py
+
+PRESERVED UNTRACKED RAW-EVIDENCE SHA256
+ca03c11322630c8ecab22c8702fcc6b46d755b807941a4164ac09bc4ae703791  docs/review_evidence/2026-09-15/committed-since-sept12.diff
+f16cebe66b69a9fae7eedf99e1e2fadc55bd6f66c7878e21a47cf126f7633404  docs/review_evidence/2026-09-15/dirty-config.diff
+85e94ec6a52f9a71538d8a8352cdca173d8740050879ed0753847d86fbb7b91b  docs/review_evidence/2026-09-15/dirty-service-record.diff
+e421348127283b0c00e8e5b08d448df4d3d2719be5395d408f0f15d72d887282  docs/review_evidence/2026-09-15/dirty-service-record-tests.diff
+
+The real index SHA-256 and tree were unchanged before/after the disposable-index gate.

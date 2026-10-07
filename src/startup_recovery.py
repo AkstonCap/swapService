@@ -571,6 +571,39 @@ def _fallback_recent_scan() -> dict:
     }
 
 
+def _terminal_solana_dispositions_have_provenance() -> bool:
+    """Audit all persisted terminals, including rows older than any chain scan.
+
+    A legacy terminal may have been manufactured by chain-only reconstruction.
+    Refuse startup rather than letting its inferred fee/no-liability state authorize
+    exposure. Repair requires conservative migration or exact historical intent;
+    neither a recent empty scan nor current fee settings supplies that evidence.
+    """
+    conn = state_db.sqlite3.connect(state_db.DB_PATH)
+    try:
+        conn.execute("BEGIN")  # Both disposition tables belong to one snapshot.
+        for kind, details in state_db._SOLANA_SIG_DISPOSITION.items():
+            rows = conn.execute(
+                f"""SELECT sig, timestamp, from_address, destination_address,
+                           amount_usdc_units, memo, payout_memo,
+                           {details['units_column']}, intent_provenance, intent_evidence
+                    FROM {details['table']} WHERE status = ?""",
+                (details["terminal_status"],),
+            )
+            for row in rows:
+                if not state_db._has_valid_solana_sig_disposition_provenance(
+                    provenance=row[8], evidence=row[9], kind=kind,
+                    source_sig=row[0], timestamp=row[1], from_address=row[2],
+                    destination_address=row[3], amount_usdc_units=row[4],
+                    memo=state_db._canonical_solana_source_memo(row[5]),
+                    payout_memo=row[6], payout_units=row[7],
+                ):
+                    return False
+        return True
+    finally:
+        conn.close()
+
+
 def perform_startup_recovery() -> dict:
     """Recover both chains from nonzero checkpoints or return an explicit latch."""
     print("🔧 Starting recovery...")
@@ -582,6 +615,22 @@ def perform_startup_recovery() -> dict:
             "recovery_complete": False,
             "recovery_incomplete": True,
             "error": f"interrupted_transfer_hold_failed:{exc}",
+        }
+
+    try:
+        terminal_provenance_valid = _terminal_solana_dispositions_have_provenance()
+    except Exception:
+        # Database/schema/read failures must not bypass this all-history audit.
+        return {
+            "recovery_complete": False,
+            "recovery_incomplete": True,
+            "error": "solana_terminal_provenance_audit_failed",
+        }
+    if not terminal_provenance_valid:
+        return {
+            "recovery_complete": False,
+            "recovery_incomplete": True,
+            "error": "solana_terminal_provenance_unresolved",
         }
 
     try:
@@ -623,6 +672,41 @@ def perform_startup_recovery() -> dict:
             "recovery_incomplete": True,
             "interrupted_nexus_transfers_held": interrupted_nexus_transfers_held,
             "error": "zero_or_missing_checkpoint:" + ",".join(missing),
+        }
+
+    # Chain rediscovery cannot restore unsent policy/cap authorization lost with
+    # SQLite. Persist refusal *before* replay writes can make an empty DB nonempty.
+    try:
+        empty_custody_held = state_db.latch_empty_custody_recovery(
+            nexus_waterline=nexus_waterline, solana_waterline=solana_waterline,
+        )
+    except Exception:
+        return {
+            "recovery_complete": False,
+            "recovery_incomplete": True,
+            "error": "custody_recovery_admission_failed",
+        }
+    if empty_custody_held:
+        return {
+            "recovery_complete": False,
+            "recovery_incomplete": True,
+            "error": "empty_custody_database_recovery_held",
+            "operator_action": "restore a verified custody backup; do not seed rows or clear the hold",
+            "nexus_waterline": nexus_waterline,
+            "solana_waterline": solana_waterline,
+            "interrupted_nexus_transfers_held": interrupted_nexus_transfers_held,
+        }
+
+    # A nonempty restore can still have lost an unsent authorization. Before any
+    # reconstruction, fence off unseen pre-startup inputs and retained ready
+    # rows without valid matching policy. This is not a coherent-restore proof.
+    try:
+        state_db.record_solana_recovery_boundary(max(int(time.time()), solana_waterline))
+    except Exception:
+        return {
+            "recovery_complete": False,
+            "recovery_incomplete": True,
+            "error": "solana_recovery_boundary_persistence_failed",
         }
 
     print(f"   Waterlines: Nexus={nexus_waterline}, Solana={solana_waterline}")

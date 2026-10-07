@@ -1,7 +1,7 @@
 import os
 import time
 import threading
-from . import config, state_db, alerts  # switched from JSON state to DB only
+from . import config, state_db, alerts, custody_workers  # switched from JSON state to DB only
 from .swap_solana import poll_solana_deposits
 from .swap_nexus import poll_nexus_deposits, process_unprocessed_txids
 from .nexus_client import (
@@ -160,7 +160,7 @@ def _safe_call(fn, *args, timeout_sec=5, **kwargs):
             exc["error"] = e
 
     thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
+    custody_workers.start(thread)
     thread.join(timeout_sec)
     
     if thread.is_alive():
@@ -234,7 +234,7 @@ def _run_with_watchdog(func, label, budget_sec):
 
     thread = threading.Thread(target=_wrapper, daemon=True)
     _running_pollers[label] = thread
-    thread.start()
+    custody_workers.start(thread)
     thread.join(budget_sec)
 
     if thread.is_alive():
@@ -286,12 +286,58 @@ def run():
     if not validate_production_controls():
         return False
 
-    # Ensure the SQLite schema exists before any state access (idempotent).
-    state_db.init_db()
-
-    # Refuse to run a second instance against the same state DB.
+    # Lock first: opening or migrating state before restore admission is unsafe.
     if not acquire_singleton_lock():
         return False
+    from . import custody_admission
+    try:
+        lease = custody_admission.claim()
+    except custody_admission.AdmissionError as exc:
+        alerts.critical(
+            "custody_admission_refused",
+            "independent sealed custody evidence unavailable; refusing all activity",
+            error=str(exc),
+        )
+        return False
+    sealed = False
+    try:
+        # Pin the observed chains before migrations, recovery scans or reference reads.
+        from . import custody_chain
+        custody_chain.verify()
+        if _run_admitted(lease) is not True:
+            return False
+        if not _drain_custody_workers():
+            alerts.critical("custody_shutdown_unresolved", "workers still active; restart permit withheld")
+            return False
+        lease.seal()
+        sealed = True
+        return True
+    except Exception:
+        alerts.critical("custody_runtime_failed", "custody runtime or seal failed; restart permit withheld")
+        return False
+    finally:
+        if _stop_event is not None:
+            _stop_event.set()
+        if not sealed:
+            # A claimed permit already prevents a restart even if the witness is offline.
+            try:
+                lease.hold()
+            except Exception:
+                pass
+
+
+def _drain_custody_workers(timeout_sec=10):
+    """Never seal while timed-out helper/poller threads can still write or send."""
+    if _stop_event is not None:
+        _stop_event.set()
+    return custody_workers.drain(timeout_sec)
+
+
+def _run_admitted(lease):
+    # Only an independently claimed exact image may be opened or migrated.
+    lease.verify_image()
+    state_db.init_db()
+    lease.check_file_identity()
 
     # Recovery is an admission gate, not a diagnostic. It must complete before any
     # heartbeat checks, metrics reads, reconciliation, or poller can touch a chain.
@@ -364,8 +410,10 @@ def run():
         print(f"   {'✓' if sess_ok else '⚠'} Nexus session: {sess_msg}")
         if not sess_ok:
             alerts.critical("nexus_session_misconfigured", sess_msg)
-    except Exception as e:
-        print(f"   ⚠ Nexus session validation error: {e}")
+            return False
+    except Exception:
+        alerts.critical("nexus_session_unverified", "Nexus session validation unavailable; startup held")
+        return False
 
     # Fail loudly on a heartbeat asset that cannot accept the fields we write: every
     # update would fail atomically, silently freezing the heartbeat and both waterlines.
@@ -375,8 +423,15 @@ def run():
         print(f"   {'✓' if hb_ok else '⚠'} Heartbeat: {hb_msg}")
         if not hb_ok:
             alerts.critical("heartbeat_asset_invalid", hb_msg)
-    except Exception as e:
-        print(f"   ⚠ Heartbeat validation error: {e}")
+            return False
+    except Exception:
+        alerts.critical("heartbeat_asset_unverified", "Heartbeat validation unavailable; startup held")
+        return False
+
+    # Complete only after recovery and mandatory custody query identities validate.
+    lease.check_file_identity()
+    lease.complete()
+    lease.assert_running()
 
     # Startup balances summary (Solana vault + Nexus circulating supply) with timeout protection
     try:
@@ -447,6 +502,8 @@ def run():
 
     try:
         while not _stop_event.is_set():
+            # External ownership uncertainty stops ALL activity, not just new exposure.
+            lease.assert_running()
             # Fail safe: if the backing check itself errors we treat the cycle as paused
             # (no new exposure) rather than assuming everything is fine.
             should_pause = True

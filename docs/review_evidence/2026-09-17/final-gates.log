@@ -1,0 +1,68 @@
+swapService documentation review gate — 2026-09-17
+Reviewed source: 91ce0b866a4e155bd690f70b6533124467c7318f
+Shared worktree scope: includes unchanged dirty provider-v2 proposal
+Local interpreter: Python 3.11.15
+CI interpreter: Python 3.12 (not rerun locally; dependency probe denied and not rerouted)
+
+DEPENDENCY CONSISTENCY
+COMMAND: .venv/bin/python -m pip check
+RESULT: PASS — No broken requirements found.
+
+LITERAL CONFIGURED COMPILATION
+COMMAND: PYTHONPYCACHEPREFIX=/tmp/swapservice-review-20260917-pycache .venv/bin/python -m compileall -q src *.py tests
+RESULT: PASS — exit 0
+
+LOCAL MARKDOWN LINKS
+COMMAND: .venv/bin/python scripts/check_markdown_links.py
+RESULT: PASS — Local Markdown links: OK
+
+DEFAULT COLLECTION
+COMMAND: PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest --collect-only -q
+RESULT: PASS — 434 tests collected in 0.40s
+
+INITIAL IN-PROGRESS FULL SUITE
+COMMAND: .venv/bin/python -m pytest -q
+RESULT: EXPECTED INTERMEDIATE FAIL — 1 failed, 433 passed, 71 subtests passed in 132.31s
+DETAIL: only test_markdown_link_checker_accepts_tracked_documentation failed because the newly linked dated report did not exist yet.
+
+FINAL FULL SHARED-TREE SUITE
+COMMAND: .venv/bin/python -m pytest -q
+RESULT: PASS — 434 passed, 71 subtests passed in 134.84s
+
+RECOVERY STANDALONE
+COMMAND: .venv/bin/python -m pytest -q tests/test_recovery_safety.py
+RESULT: PASS — 33 passed, 46 subtests passed in 8.91s
+
+RECOVERY PLUS INSTALLED SDK BOUNDARY
+COMMAND: .venv/bin/python -m pytest -q tests/test_recovery_safety.py tests/test_solana_sdk_boundary.py
+RESULT: PASS — 34 passed, 46 subtests passed in 9.31s
+
+RECEIPT + PAYOUT + NEXUS-FEE + SDK SHARD
+COMMAND: .venv/bin/python -m pytest -q tests/test_swap_receipts.py tests/test_payout_review_regressions.py tests/test_nexus_fee_lifecycle.py tests/test_solana_sdk_boundary.py
+RESULT: PASS — 85 passed in 26.43s
+
+REAL-INDEX TOKEN INVENTORY
+COMMAND: .venv/bin/python scripts/check_token_pair_inventory.py
+RESULT: PASS — Token-pair literal inventory is current (274 active lines).
+
+DOCUMENTATION-ONLY DISPOSABLE INDEX
+PATHS:
+A docs/DEVELOPMENT_REVIEW_2026-09-17.md
+M docs/EVALUATION.md
+M docs/STATE_MACHINES.md
+COMMAND: GIT_INDEX_FILE=<temporary> .venv/bin/python scripts/check_token_pair_inventory.py
+RESULT: PASS — Token-pair literal inventory is current (274 active lines).
+COMMAND: GIT_INDEX_FILE=<temporary> git diff --cached --check
+RESULT: PASS — exit 0
+CANDIDATE TREE BEFORE EVIDENCE LOGS: 56a308e6b7922435a33aa4b6df8bbd85a5bbd565
+
+WHITESPACE
+COMMAND: git diff --check
+RESULT: PASS — exit 0
+COMMAND: git diff --cached --check
+RESULT: PASS — exit 0; real index has no staged entries
+
+UNAVAILABLE / BLOCKED
+ruff, mypy, pyflakes, pylint, bandit and pip-audit are not installed in the repository venv.
+Fresh temporary focused blocker probes were denied and not rerouted.
+No target-chain matrix or external side effect ran.

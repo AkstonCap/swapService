@@ -102,7 +102,7 @@ All decimal settings below are whole-token values. They are converted to integer
 | `FEE_REFUND_SOLANA` | Nexus-output flat fee value | Solana token | Deducted from automated Solana deposit refunds/quarantine moves. |
 | `FEE_NEXUS_DISPOSITION` | `0` | Nexus token | Stored in canonical fee policy; no automatic Nexus refund/quarantine path applies it. |
 | `FEE_BPS` | `10` | basis points | Applied to successful swaps; valid range is `0..4999`. |
-| `MIN_DEPOSIT_SOLANA_TOKEN` | derived | Solana input token | At least twice the Solana-scale equivalent of `FEE_FLAT_TO_NEXUS`; smaller configured values are raised. |
+| `MIN_DEPOSIT_SOLANA_TOKEN` | derived | Solana input token | At least twice the Solana-scale equivalent of `FEE_FLAT_TO_NEXUS`; smaller configured values are raised. Every positive custody deposit is retained, then inputs below this minimum are durably held as non-sendable full-principal liabilities before any Nexus debit. |
 | `MIN_CREDIT_NEXUS_TOKEN` | derived | Nexus input token | At least twice the Nexus-scale equivalent of `FEE_FLAT_TO_SOLANA`; smaller configured values are raised. |
 | `DUST_CREDIT_NEXUS_TOKEN` | derived | Nexus input token | Default is max(one Nexus base unit, one tenth of the Nexus-scale Solana-output flat fee). Credits below it are ignored; credits below the minimum but at/above dust are durably booked as fees. |
 | `MAX_SWAP_USDC` | `0` | Solana token | Literal legacy-named active key; `0` disables outside production. Oversized Solana deposits follow the Solana refund path. |
@@ -111,7 +111,7 @@ All decimal settings below are whole-token values. They are converted to integer
 
 There are currently no generic environment aliases for the three cap keys; preserve their literal spelling until code adds and validates a migration path.
 
-`MICRO_DEPOSIT_FEE_PCT` and `MICRO_CREDIT_FEE_PCT` are parsed with default `100`, but current processing does not consume them as configurable percentages. Do not publish a non-100 policy based on those variables. `MAX_DEPOSITS_PER_LOOP` is also parsed (default `100`) but the current Solana poll path uses explicit processing bounds instead; do not rely on it as an enforced tuning knob.
+`MICRO_DEPOSIT_FEE_PCT` and `MICRO_CREDIT_FEE_PCT` are parsed with default `100`, but current processing does not consume them as configurable percentages. A below-minimum Solana deposit is not seized as a fee: it remains an operator-visible full-principal liability. Do not publish either percentage as effective policy. `MAX_DEPOSITS_PER_LOOP` is also parsed (default `100`) but the current Solana poll path uses explicit processing bounds instead; do not rely on it as an enforced tuning knob.
 
 ## Nexus transport and identity
 

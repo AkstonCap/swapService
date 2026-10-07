@@ -13,7 +13,10 @@ from urllib.request import (
     build_opener,
 )
 from . import config
-from . import state_db, nexus_client, nexus_memo, receipt_contract, structured_logging
+from . import (
+    state_db, nexus_client, nexus_memo, receipt_contract, solana_deposit_policy,
+    structured_logging,
+)
 import time
 
 
@@ -370,10 +373,9 @@ def get_nexus_send_amount_units(amount_solana_units: int) -> int:
     unrepresentable fractional Nexus unit, then all fees are computed in that same
     Nexus-unit domain.
     """
-    gross_nexus_units = config.solana_units_to_nexus(int(amount_solana_units), round_up=False)
-    fee_policy = config.SWAP_PAIR.fees
-    dynamic_fee = _dynamic_fee_units(gross_nexus_units, fee_policy.basis_points)
-    return max(0, gross_nexus_units - int(fee_policy.flat_to_nexus_units) - dynamic_fee)
+    return solana_deposit_policy.output_units(
+        amount_solana_units, solana_deposit_policy.terms_from_config(config)
+    )
 
 
 def get_solana_send_amount_units(amount_nexus_units: int) -> int:
@@ -1861,6 +1863,7 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
     """The complete public description of this bridge, derived from config."""
     import time as _t
     nxs_field, sol_field = heartbeat_waterline_field_names()
+    solana_terms = solana_deposit_policy.terms_from_config(config)
     rec = {
         # identity + pair (immutable)
         "distordiaType": "nexusBridgeHeartbeat",
@@ -1883,15 +1886,17 @@ def build_service_record(status: str = "online", last_poll: int | None = None,
         # These must share the exact immutable policy used by the payout functions above;
         # legacy flat-fee aliases remain inputs only during the compatibility migration.
         "fee_flat_to_nexus": _format_amount_units(
-            config.SWAP_PAIR.fees.flat_to_nexus_units,
-            config.SWAP_PAIR.nexus.decimals,
+            solana_terms.flat_output_fee_units,
+            solana_terms.output_decimals,
         ),
         "fee_flat_to_solana": _format_amount_units(
             config.SWAP_PAIR.fees.flat_to_solana_units,
             config.SWAP_PAIR.solana.decimals,
         ),
-        "fee_bps": str(int(config.SWAP_PAIR.fees.basis_points)),
-        "min_to_nexus": format_solana_units(int(config.MIN_DEPOSIT_SOLANA_UNITS)),
+        "fee_bps": str(solana_terms.fee_basis_points),
+        "min_to_nexus": _format_amount_units(
+            solana_terms.minimum_input_units, solana_terms.input_decimals,
+        ),
         "min_to_solana": format_nexus_units(int(config.MIN_CREDIT_NEXUS_UNITS)),
     }
     if getattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False):

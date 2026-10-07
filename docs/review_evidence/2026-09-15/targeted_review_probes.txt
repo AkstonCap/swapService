@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import tempfile
+from dataclasses import replace
+from unittest.mock import patch
+
+os.environ.update({
+    "SOLANA_RPC_URL": "http://127.0.0.1:1",
+    "VAULT_KEYPAIR": "/nonexistent/offline-keypair.json",
+    "VAULT_USDC_ACCOUNT": "11111111111111111111111111111111",
+    "USDC_MINT": "11111111111111111111111111111111",
+    "SOL_MAIN_ACCOUNT": "11111111111111111111111111111111",
+    "NEXUS_PIN": "offline-fixture-not-a-credential",
+    "NEXUS_USDD_TREASURY_ACCOUNT": "TREASURY",
+    "NEXUS_TOKEN_REGISTER_ADDRESS": "TOKEN-REGISTER",
+    "NEXUS_CLI_PATH": "/bin/false",
+})
+
+from src import config, nexus_client, service_record, solana_client, state_db
+
+
+def test_committed_solana_below_minimum_reaches_real_debit_boundary():
+    """Ground the missing post-ingestion minimum policy through the actual worker."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "state.db")
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(
+                config.SWAP_PAIR.fees,
+                flat_to_nexus_units=10,
+                basis_points=0,
+            ),
+        )
+        with (
+            patch.object(state_db, "DB_PATH", db_path),
+            patch.object(config, "SWAP_PAIR", pair),
+            patch.object(config, "MIN_DEPOSIT_SOLANA_UNITS", 200),
+            patch.object(nexus_client, "is_valid_nexus_token_account", return_value=True),
+            patch.object(
+                nexus_client,
+                "debit_nexus_token_with_txid",
+                return_value=(True, "nexus-output-txid"),
+            ) as debit,
+        ):
+            state_db.init_db()
+            state_db.add_unprocessed_sig(
+                "solana-source", 10, "nexus:recipient", "source-token-account",
+                150, "ready for processing", None,
+            )
+            result = solana_client.process_unprocessed_solana_deposits(limit=1, timeout=10)
+            status = state_db.get_unprocessed_sig_status("solana-source")
+
+        assert result[0] == 1
+        assert status == "debited, awaiting confirmation"
+        debit.assert_called_once_with("recipient", 140, 1)
+
+
+def test_committed_wipeout_recovery_accepts_arbitrary_disposition_fee():
+    """Ground that v1 disposition chain evidence does not bind frozen fee/terms."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "state.db")
+        with patch.object(state_db, "DB_PATH", db_path), patch.object(
+            state_db.time, "time", return_value=1_000
+        ):
+            state_db.init_db()
+            restored = state_db.reconstruct_confirmed_solana_sig_disposition(
+                kind="refund",
+                source_signature="solana-source",
+                source_timestamp=800,
+                source_token_account="source-token-account",
+                source_amount_solana_units=1_000_000,
+                source_memo="nexus:recipient",
+                payout_signature="solana-refund",
+                destination_token_account="source-token-account",
+                payout_amount_solana_units=1,
+                chain_timestamp=900,
+                payout_memo="swapService:v1:refund:solana-source",
+            )
+            with sqlite3.connect(db_path) as conn:
+                terminal = conn.execute(
+                    "SELECT refunded_units, status FROM refunded_sigs WHERE sig=?",
+                    ("solana-source",),
+                ).fetchone()
+                fee = conn.execute(
+                    "SELECT amount_usdc_units FROM fee_entries WHERE sig=?",
+                    ("solana-source",),
+                ).fetchone()
+
+        assert restored is True
+        assert terminal == (1, "refund_confirmed")
+        assert fee == (999_999,)
+
+
+def test_committed_disposition_cap_refusal_has_no_durable_reason_or_alert_state():
+    """Ground the still-generic/log-only cap refusal through the refund worker."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "state.db")
+        pair = replace(
+            config.SWAP_PAIR,
+            fees=replace(config.SWAP_PAIR.fees, refund_solana_units=10),
+        )
+        with (
+            patch.object(state_db, "DB_PATH", db_path),
+            patch.object(config, "SWAP_PAIR", pair),
+            patch.object(config, "DAILY_PAYOUT_CAP_SOLANA_UNITS", 1),
+            patch.object(
+                solana_client, "_resolve_solana_token_destination", return_value="source-token-account"
+            ),
+            patch.object(
+                solana_client,
+                "send_solana_token_to_account_with_sig",
+                side_effect=AssertionError("cap refusal must not send"),
+            ),
+        ):
+            state_db.init_db()
+            state_db.add_unprocessed_sig(
+                "solana-source", 10, "bad-memo", "source-token-account",
+                100, "to be refunded", None,
+            )
+            processed = solana_client.process_solana_deposits_refunding(limit=1, timeout=10)
+            status = state_db.get_unprocessed_sig_status("solana-source")
+            used = state_db.payout_budget_used(86_400)
+
+        assert processed == 0
+        assert status == "to be refunded"
+        assert used == 0
+
+
+def _configure_dirty_v2(monkeypatch):
+    monkeypatch.setattr(config, "NEXUS_SERVICE_ASSET_ADDRESS", "SERVICE-ASSET")
+    monkeypatch.setattr(config, "NEXUS_SERVICE_EXPECTED_OWNER", "OWNER")
+    monkeypatch.setattr(config, "SERVICE_ID", "provider:pair:one")
+    monkeypatch.setattr(config, "NEXUS_NETWORK", "mainnet")
+    monkeypatch.setattr(config, "SOLANA_NETWORK", "devnet")
+    monkeypatch.setattr(config, "SERVICE_TERMS_VERSION", 7)
+    monkeypatch.setattr(config, "SERVICE_TERMS_EFFECTIVE_AT", 1_700_000_000)
+    monkeypatch.setattr(config, "NEXUS_SWAP_RECEIPTS_ENABLED", False)
+
+
+def test_dirty_v2_can_publish_secret_as_url_substring(monkeypatch):
+    _configure_dirty_v2(monkeypatch)
+    monkeypatch.setattr(config, "NEXUS_API_PASSWORD", "leaked-password")
+    monkeypatch.setattr(
+        config, "SERVICE_CONTACT", "https://public.invalid/?token=leaked-password"
+    )
+    record = service_record.build_record(last_poll=1, wline_sol=2, wline_nxs=3)
+    assert "leaked-password" in record["contact"]
+
+
+def test_dirty_v2_advertises_unused_micro_policy(monkeypatch):
+    _configure_dirty_v2(monkeypatch)
+    monkeypatch.setattr(config, "MICRO_DEPOSIT_FEE_PCT", 99)
+    monkeypatch.setattr(config, "MICRO_CREDIT_FEE_PCT", 98)
+    record = service_record.build_record(last_poll=1, wline_sol=2, wline_nxs=3)
+    assert record["micro_fee_pct_solana_input"] == "99"
+    assert record["micro_fee_pct_nexus_input"] == "98"
+    # The committed Nexus classifier exposes no percentage policy; below-minimum
+    # credits are terminalized in swap_nexus with the full principal as fee.
+    with patch.object(config, "DUST_CREDIT_NEXUS_UNITS", 1), patch.object(
+        config, "MIN_CREDIT_NEXUS_UNITS", 100
+    ):
+        assert nexus_client.classify_nexus_credit("0.00005").disposition == "below_minimum"
