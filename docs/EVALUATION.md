@@ -109,6 +109,58 @@ Add missing cases to default pytest collection; a scratch script alone is not ac
 | Dashboard/operations | missing/unreadable DB, witness mismatch, corrupt hold evidence, absent resolution proof | witness changes around one read-only snapshot; operator resolution races worker selection | restart during resolution and after accepted-but-unparsed disposition | Existing dashboard tests plus new collected operator protocol tests; no writes from reads, no stale green state, one attributable disposition or unchanged hold |
 | Authorized external acceptance | unsupported transaction version, pagination truncation, wrong finality/transfer, Nexus incomplete references/TLS failure | concurrent arrivals, timeout after remote acceptance, competing restart | process crash at each intent/submission/finalization boundary; coherent restore and total loss | Explicit devnet/testnet command recorded against the exact immutable artifact; no production funds; human release remains separate |
 
+### Maintenance increment — external container pre-execution admission (2026-10-07)
+
+**Implemented narrowly offline; Batch 0 remains blocked.** This increment adds a standalone
+Docker admission launcher, not another in-process SDK fingerprint. An independently installed
+copy starts only an exact full-ID, never-started container whose image ID and selected execution
+configuration match separately supplied approval pins. The selected projection includes command,
+environment, host policy, mounts, network endpoints and security labels. The guard requires a
+read-only root, nonprivileged/all-capabilities-dropped policy, no user tmpfs or anonymous volumes,
+explicit nonrecursive/private custody and read-only secrets binds, and a pristine whole writable
+layer on two inspections. It imports no repository runtime, does not pull/resolve tags, create an
+approval, override a command, clear holds, retry, delete containers or alter financial authority.
+
+The focused collected module returned **58 passed**. A red regression demonstrated execution
+with duplicate inspection keys; strict parsing now refuses. Independent review found omitted
+network pinning and recursively writable secrets binds; selected network/security evidence and
+nonrecursive/private declaration/readback checks now cover those paths. An actual isolated CLI
+subprocess refused before a mutable `sitecustomize.py` could execute. The actual Docker CLI path
+also refused with a sanitized message because this host denies Docker socket access. Docker
+boundary tests are injected/offline: no image or container was built or started, and reported
+layer-mutation cases are not real immutable-image file-mutation acceptance.
+
+The clean Python 3.12 complete suite returned **1,580 passed, 77 subtests passed** in
+104.49 seconds, with no skips. CI-isolation shards returned **35 passed/52 subtests**,
+**36 passed/52 subtests** and **85 passed**. Compilation, dependency consistency, local
+Markdown links, intended-index literal inventory (**274 active lines**) and whitespace
+checks passed. Read-only re-review found no remaining blocker in the declared narrow scope.
+Runtime/test SHA-256 evidence:
+
+```text
+f18a88ced35757c6486a4f0dc1e7e9dd055daa01223f93ca74ce808f42035f70  scripts/custody_external_launcher.py
+772c5b57204c738a6bf1e956d3d6de55e023cb411e6b51f22ee012ea77190d20  tests/test_custody_external_launcher.py
+```
+
+**Work-item grounding:** O4/O3 and supporting O1; non-Atlas settlement hypothesis and transitional
+custody remain unchanged. Component owner is deployment/startup; the scheduled maintainer acts
+under the operator's bounded one-issue authorization. Production path is
+`scripts/custody_external_launcher.py`, with collected
+`tests/test_custody_external_launcher.py`; existing pinned Solana/Nexus dependencies and custody
+runtime are untouched. Base is `dd46d6fbacc1621f61c5e90583899081bc3a77dd`, freshly fetched and
+fast-forwarded without unrelated work. See the
+[exact external-container contract](maintenance/external-container-admission.md).
+
+The installed launcher/interpreter/Docker daemon/image store/host and supplied approval pins
+are trusted external prerequisites, **not self-attested by this script**. Exclusive Docker
+administration is required across inspect/diff/start; repeated reads are not an atomic CAS.
+Bind contents/runtime pseudo-filesystems are not image bytes. Protected installation, complete
+image closure, external-image witness binding, real Docker mount/diff semantics, approved
+claim/run/seal, contention/crash/restore and live acceptance remain open. Direct Python startup
+is unchanged; this tool is not yet the mandatory supported deployment path. Batch 0, production
+and real funds remain blocked. Full/static/index and publication results accompany the exact
+maintenance commit report.
+
 ## Historical verdict — 2026-10-02
 
 **Release blocked.** Committed-runtime and separately reviewed candidate identity:
